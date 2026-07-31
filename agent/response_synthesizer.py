@@ -1,0 +1,156 @@
+"""
+响应合成与输出信号采集（开发文档 §1.1 第 7/8 步）。
+
+- 建构含上下文（工具结果/命中记忆）的合成 prompt 交 LLM 生成最终回复
+- LLM 结构化输出 citations 数组按使用顺序列 memory_id，服务端按下标从 1 编号
+- response_signal 两阶段采集：本轮形态维度 + 下一轮隐式反应/关键词
+"""
+from __future__ import annotations
+
+import re
+from datetime import datetime
+
+from infrastructure.prompt_loader import PROMPTS
+
+# 隐式关键词词表（本地正则匹配，零成本）
+IMPLICIT_KEYWORDS = [
+    "太长了", "太短了", "说人话", "别啰嗦", "继续说", "展开讲讲", "给个表格",
+    "别列 bullet", "简短", "详细点",
+]
+
+
+# 单轮工具输出截断上限（字符）：工具结果不入 L2 历史，超大输出在合成层截断兑底
+TOOL_RESULT_MAX_CHARS = 8000
+
+
+def build_response_prompt(user_message: str, tool_results: list[dict],
+                          memories: list[dict]) -> list[dict]:
+    """合成 prompt：把工具结果 + 命中记忆交给 LLM，要求输出 citations。"""
+    ctx_parts = []
+    if memories:
+        mem_txt = "\n".join(
+            f"[{i+1}] {m['title']}（id={m['id']}）：{m.get('detail', m.get('summary', ''))}"
+            for i, m in enumerate(memories))
+        ctx_parts.append("已检索到的相关记忆：\n" + mem_txt)
+    if tool_results:
+        def _clip(v) -> str:
+            s = str(v)
+            if len(s) > TOOL_RESULT_MAX_CHARS:
+                return s[:TOOL_RESULT_MAX_CHARS] + f"\n…（已截断，原 {len(s)} 字）"
+            return s
+        tr = "\n".join(
+            f"- {r.get('tool', '')}: {_clip(r.get('result', ''))}" for r in tool_results)
+        ctx_parts.append("工具执行结果：\n" + tr)
+    # disputed 记忆命中：要求 AI 主动告知矛盾并引导到健康度 Tab 裁决
+    disputed = [m for m in memories if m.get("confidence") == "disputed"]
+    if disputed:
+        names = "、".join(m.get("title", m.get("id", "")) for m in disputed[:3])
+        ctx_parts.append(
+            f"注意：命中的记忆「{names}」存在矛盾（disputed）。请在回复中主动简要告知"
+            "用户存在不一致的信息来源，并建议到记忆中心·健康度 Tab 的矛盾处理区裁决。")
+    # 延迟导出文档：本次回复正文只会被导出为文档，不会在对话中展示，
+    # 故正文只写文档内容本身，禁止对话式开场白/结尾或“手动另存为”等替代步骤
+    if any(r.get("tool") == "generate_document" and r.get("deferred")
+           for r in (tool_results or [])):
+        ctx_parts.append(
+            "重要：用户要求导出文档。你这次输出的全部内容会被直接写入文档文件，"
+            "不会在对话界面展示。因此请只写文档应有的完整正文内容本身："
+            "不要写对话式的开场白、结尾语（如‘以上内容已整理完成’‘好的，为您生成’），"
+            "不要叫用户手动复制/粘贴/另存为，也不要说自己没有生成文档的能力。")
+    system = (PROMPTS.load_raw("agent/prompts/response_synth")
+              + "\n\n" + "\n\n".join(ctx_parts))
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user_message}]
+
+
+def _strip_empty_fences(text: str) -> str:
+    """清理声明被挖走后残留的空代码围栏（如 ```json\n``` 会被渲染成空白块）。"""
+    return re.sub(r"```[a-zA-Z]*\s*```", "", text).rstrip()
+
+
+def extract_citations(text: str, valid_ids: set[str]) -> tuple[str, list[str]]:
+    """从回复中提取 citations JSON 声明，返回 (去除声明后的正文, 有序去重的 memory_id)。"""
+    m = re.search(r'\{\s*"citations"\s*:\s*\[(.*?)\]\s*\}', text, flags=re.S)
+    cites: list[str] = []
+    if m:
+        raw = re.findall(r'"(mem_\w+)"', m.group(1))
+        seen = set()
+        for mid in raw:
+            if mid in valid_ids and mid not in seen:
+                seen.add(mid)
+                cites.append(mid)
+        text = text[:m.start()].rstrip() + text[m.end():].rstrip()
+        text = _strip_empty_fences(text)
+    return text, cites
+
+
+def extract_memory_confirm(text: str) -> tuple[str, dict | None]:
+    """从回复中提取 memory_confirm 声明（low 待确认记忆的对话确认结果）。
+    返回 (去除声明后的正文, {"id":..., "confirmed": bool} | None)。"""
+    m = re.search(
+        r'\{\s*"memory_confirm"\s*:\s*\{\s*"id"\s*:\s*"(mem_\w+)"\s*,\s*'
+        r'"confirmed"\s*:\s*(true|false)\s*\}\s*\}', text, flags=re.S)
+    if not m:
+        return text, None
+    text = (text[:m.start()].rstrip() + text[m.end():]).rstrip()
+    text = _strip_empty_fences(text)
+    return text, {"id": m.group(1), "confirmed": m.group(2) == "true"}
+
+
+def collect_signal_shape(content: str) -> dict:
+    """阶段一：采集回复形态维度。"""
+    paragraphs = [p for p in content.split("\n\n") if p.strip()]
+    bullets = len(re.findall(r"^\s*[-*]\s", content, flags=re.M))
+    code_blocks = content.count("```") // 2
+    tables = len(re.findall(r"^\|.*\|", content, flags=re.M))
+    # 结论位置
+    pos = "middle"
+    if paragraphs:
+        first = paragraphs[0]
+        if any(k in first for k in ("建议", "结论", "总的来说", "简单说")):
+            pos = "start"
+        elif any(k in paragraphs[-1] for k in ("建议", "结论", "综上")):
+            pos = "end"
+    return {"char_count": len(content), "paragraph_count": len(paragraphs),
+            "bullet_count": bullets, "code_block_count": code_blocks,
+            "table_count": tables, "conclusion_position": pos}
+
+
+def detect_implicit_keywords(next_user_message: str) -> str:
+    hits = [k for k in IMPLICIT_KEYWORDS if k in next_user_message]
+    return ";".join(hits)
+
+
+class SignalCollector:
+    def __init__(self, db):
+        self.db = db
+
+    def record_shape(self, message_id: int, shape: dict, context_label: str) -> int:
+        cur = self.db.execute(
+            "INSERT INTO response_signals(message_id,char_count,paragraph_count,"
+            "bullet_count,code_block_count,table_count,conclusion_position,"
+            "context_label,create_time) VALUES(?,?,?,?,?,?,?,?,?)",
+            (message_id, shape["char_count"], shape["paragraph_count"],
+             shape["bullet_count"], shape["code_block_count"], shape["table_count"],
+             shape["conclusion_position"], context_label,
+             datetime.now().isoformat(timespec="seconds")))
+        return cur.lastrowid
+
+    def backfill_reaction(self, message_id: int, implicit_reaction: str,
+                          keywords: str) -> None:
+        """阶段二：下一轮回填隐式反应与关键词（explicit_keywords 分号拼接不覆盖）。"""
+        row = self.db.query_one(
+            "SELECT id,explicit_keywords FROM response_signals WHERE message_id=? "
+            "ORDER BY id DESC LIMIT 1", (message_id,))
+        if not row:
+            return
+        existing = row["explicit_keywords"] or ""
+        merged = ";".join(filter(None, [existing, keywords]))
+        self.db.execute(
+            "UPDATE response_signals SET implicit_reaction=?, explicit_keywords=? WHERE id=?",
+            (implicit_reaction, merged, row["id"]))
+
+    def set_explicit_reaction(self, message_id: int, reaction: int) -> None:
+        self.db.execute(
+            "UPDATE response_signals SET explicit_reaction=? WHERE message_id=?",
+            (reaction, message_id))

@@ -1,0 +1,4 @@
+# Embedding 隔离环境依赖（embedding/venv，与主环境分离）
+# torch 默认装 CPU 版；有 NVIDIA GPU 时 setup 脚本会改用 CUDA 源安装
+sentence-transformers>=3.0.0
+torch>=2.2.0

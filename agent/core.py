@@ -1,0 +1,1313 @@
+"""
+Agent Core —— 八步对话流水线编排（产品文档 §对话调度引擎 / 开发文档 §1.1）。
+
+输入预处理 → 上下文加载(冻结快照) → 记忆检索 → 意图识别 → 流程编排(DAG)
+→ 工具执行 → 响应合成与输出 → 后置处理。
+产出 SSE 事件流（async generator，yield {"event","data"}）。
+同 session 串行化：同一 session 同时最多处理一个请求，超出排队（上限 session_queue_limit）。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+import time
+from collections import defaultdict
+from typing import Any, AsyncIterator
+
+from infrastructure.llm_provider import CircuitOpenError, estimate_tokens
+from infrastructure.observability import get_trace_id
+from infrastructure.prompt_loader import PROMPTS
+from observability_langfuse import get_tracer
+from soul.constants import ONBOARDING_PERSONA
+
+from . import response_synthesizer as rs
+from .compression import Compressor, assemble_context, render_summary_body
+from .dag_scheduler import SharedState, build_dag
+from .intent_parser import IntentParser
+
+logger = logging.getLogger("second_person.core")
+
+# 意图类型中文标签（思考过程展示用，提交/存储仍用英文枚举值）
+INTENT_TYPE_LABELS = {
+    "query_memory": "检索记忆", "query_knowledge": "查询知识库",
+    "query_external": "查询外部信息", "compute": "计算任务",
+    "file_op": "文件操作", "remember_intent": "记忆指令",
+    "remember_confirm": "重要信息待确认",
+    "soul_feedback": "风格反馈", "output_preference_feedback": "输出偏好反馈",
+    "meta": "系统相关", "chat": "日常对话",
+}
+
+
+# 输入清洗：剔除控制字符（保留换行/制表符），首尾去空
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# 主动记忆检测：未识别 remember_intent 但消息含明确新事实时，
+# 标记为下次被动回顾的候选（零 LLM 启发式）
+_FACT_PATTERNS = [
+    r"我(是|在|做)", r"我(喜欢|不喜欢|讨厌|偏好|习惯)", r"我决定", r"我打算",
+    r"我的(目标|计划|原则)", r"以后(都|就)", r"从今天起", r"我最近",
+]
+
+
+def _sanitize_input(text: str) -> str:
+    """第 1 步输入清洗：去控制字符与首尾空白，不改写用户内容。"""
+    return _CTRL_RE.sub("", text or "").strip()
+
+
+def _strip_attachment_context(text: str) -> str:
+    """剥离前端拼装的附件上下文前缀（【附件：…】块），返回用户真实提问。
+    仅供记忆检索的本地 Embedding 使用：几万字附件正文会把本地 BGE-M3 拖入
+    分钟级计算（触发 600s 总超时），且向量被海量代码/正文稀释后召回全是噪声。
+    意图识别等云端 LLM 环节不得使用本函数——材料本身可能承载用户意图。"""
+    if "【附件：" in text and "\n---\n" in text:
+        tail = text.split("\n---\n")[-1].strip()
+        if tail:
+            return tail
+    return text
+
+
+def _format_intent_thinking(intents) -> str:
+    """把意图识别结果格式化为可读的思考过程文本（意图理解 + 任务拆解）。"""
+    lines = ["【意图理解】"]
+    for i, it in enumerate(intents):
+        summary = getattr(it, "intent_summary", "") or "（无摘要）"
+        itype = INTENT_TYPE_LABELS.get(
+            getattr(it, "intent_type", ""), getattr(it, "intent_type", ""))
+        tools = getattr(it, "tools_needed", []) or []
+        line = f"{i + 1}. {summary}（{itype}）"
+        if tools:
+            line += f"，计划调用工具：{'、'.join(tools)}"
+        deps = getattr(it, "depends_on", []) or []
+        if deps:
+            line += f"，依赖任务：{'、'.join(deps)}"
+        lines.append(line)
+    if len(intents) > 1:
+        lines.append(f"【任务拆解】共拆解为 {len(intents)} 个子任务，按依赖关系编排执行")
+    return "\n".join(lines) + "\n"
+
+
+class AgentCore:
+    def __init__(self, *, db, config, session_store, context_entry, soul_manager,
+                 profile_manager, retriever, tool_registry, tool_executor,
+                 lifecycle, signal_collector, llm_client, provider_registry,
+                 file_writer, skill_manager, event_bus=None, notifier=None):
+        self.db = db
+        self.config = config
+        self.sessions = session_store
+        self.ctx_entry = context_entry
+        self.soul = soul_manager
+        self.profile = profile_manager
+        self.retriever = retriever
+        self.registry = tool_registry
+        self.executor = tool_executor
+        self.lifecycle = lifecycle
+        self.signals = signal_collector
+        self.llm = llm_client
+        self.providers = provider_registry
+        self.fw = file_writer
+        self.skills = skill_manager
+        self.bus = event_bus
+        self.notify = notifier or (lambda t, m: None)
+        # 图片入库回调（container 在 ingest 就绪后接入）：async fn(images: list[dataURL])
+        self.image_kb_fn = None
+        self.intent_parser = IntentParser(
+            llm_client, lambda: self.providers.snapshot_for("intent"))
+        self.compressor = Compressor(
+            llm_client, lambda: self.providers.snapshot_for("agent"),
+            lambda: self.providers.snapshot_for("chat"))
+        # 压缩连续失败计数（达 3 次推通知建议新建会话）
+        self._compress_fails: dict[str, int] = {}
+        self._session_locks: dict[str,
+                                  asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._session_queue: dict[str, int] = defaultdict(int)
+
+    # ---- 主入口：SSE 事件流（队列驱动，支持工具执行中途 emit） ------------
+    async def run(self, session_id: str, message: str,
+                  client_request_id: str | None = None,
+                  images: list[str] | None = None,
+                  regenerate: bool = False,
+                  location: str | None = None) -> AsyncIterator[dict]:
+        limit = self.config.get("session_queue_limit", 3)
+        if self._session_queue[session_id] >= limit:
+            yield {"event": "error", "data": {"code": 429, "message": "会话繁忙，请稍后再试"}}
+            return
+        self._session_queue[session_id] += 1
+        lock = self._session_locks[session_id]
+        if lock.locked():
+            yield {"event": "queued", "data": {"session_id": session_id}}
+
+        queue: asyncio.Queue = asyncio.Queue()
+        _SENTINEL = object()
+
+        async def emit(event: str, data: dict) -> None:
+            await queue.put({"event": event, "data": data})
+
+        async def worker() -> None:
+            async with lock:
+                try:
+                    # 请求组：单请求超时 600 秒（进程内任务隔离）
+                    await asyncio.wait_for(
+                        self._pipeline(session_id, message, emit, images,
+                                       regenerate, location),
+                        timeout=600)
+                except asyncio.TimeoutError:
+                    logger.warning("请求超时（600s）：session=%s", session_id)
+                    await emit("error", {"code": 504, "message": "处理超时，请重试"})
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("流水线异常")
+                    await emit("error", {"code": 500, "message": str(e)})
+                finally:
+                    self._session_queue[session_id] -= 1
+                    await queue.put(_SENTINEL)
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                item = await queue.get()
+                if item is _SENTINEL:
+                    break
+                yield item
+        finally:
+            # 客户端断开/中断时取消后台 worker，避免流式输出继续跑完
+            if not task.done():
+                task.cancel()
+        await task
+
+    async def _pipeline(self, sid: str, message: str, emit, images=None,
+                        regenerate=False, location=None) -> None:
+        """包一层 Langfuse trace，内部实现不变（步骤 span 在 _pipeline_impl 中）。"""
+        tracer = get_tracer()
+        trace = tracer.trace_start(
+            name="chat.turn", session_id=sid, input=message,
+            metadata={"internal_trace_id": get_trace_id(),
+                      "images": len(images) if images else 0,
+                      "regenerate": regenerate})
+        try:
+            await self._pipeline_impl(sid, message, emit, trace, images,
+                                      regenerate, location)
+        except Exception as e:  # noqa: BLE001
+            trace.update(metadata={"internal_trace_id": get_trace_id(),
+                                   "images": len(images) if images else 0,
+                                   "regenerate": regenerate,
+                                   "status": "error", "error": str(e)})
+            raise
+        finally:
+            trace.end()
+
+    async def _pipeline_impl(self, sid: str, message: str, emit, trace,
+                             images=None, regenerate=False, location=None) -> None:
+        tracer = get_tracer()
+        onboarding = not self.config.get_raw("onboarding_completed", False)
+        _start_time = time.monotonic()
+        _llm_call_count = 0   # 仅计主回复流式调用；意图/参数推断等辅助调用见 token_usage 表
+        _model_id = None
+
+        # 思考过程累积：透明拦截所有 thinking_delta 增量（意图理解/工具调用/
+        # 模型原生推理），回复落库时随消息持久化，历史消息可回看
+        think_parts: list[str] = []
+        _orig_emit = emit
+
+        async def emit(event, data):  # noqa: F811 — 有意遮蔽，对下游透明
+            if event == "thinking_delta":
+                think_parts.append(data.get("text", ""))
+            await _orig_emit(event, data)
+
+        # 第 1 步 输入预处理 + 记录用户消息
+        # 输入清洗；信号采集阶段二：新用户消息到达 → 回填上一条 assistant 回复的隐式反应/关键词
+        # 重新生成时跳过：重发的提问不是对上一轮回复的真实反应
+        message = _sanitize_input(message)
+        # 记忆检索专用：剥离附件正文后的真实提问。仅因本地 Embedding 算不动超长文本，
+        # 意图识别/技能匹配等云端 LLM 环节仍读完整消息（材料本身可能承载意图）
+        core_query = _strip_attachment_context(message)
+        if not onboarding and not regenerate:
+            self._backfill_prev_signal(sid, message)
+        user_msg_id = self.sessions.append_message(
+            sid, "user", message, images=self._persist_images(images))
+
+        # 输入预处理：检测 URL → web_fetch 预加载（失败不中断本轮，作为附加上下文注入）
+        preload_text = ""
+        if not onboarding:
+            preload_text = await self._preload_urls(message, emit)
+
+        # 第 2 步 上下文加载（冻结快照）
+        _sp = tracer.span_start("context_load", input={
+                                "session_id": sid, "onboarding": onboarding})
+        try:
+            system_prompt = self._build_system_prompt(onboarding, location)
+            history = self.sessions.load_recovery_context(
+                sid, self.config.get("conversation_buffer_rounds", 20),
+                self.config.get("head_protected_messages", 3))
+            # 当前用户消息已提前落库：从历史中剔除，避免与 prompt 尾部重复拼接
+            history = [m for m in history if m.get("id") != user_msg_id]
+
+            # 压缩阈值判定（第 2 步拼装完之后、第 3 步之前，同步等待压缩完成）
+            est = estimate_tokens([{"content": system_prompt}] + history +
+                                  [{"content": message}])
+            _compressed = False
+            if est > self.config.get("compression_threshold_tokens", 80000):
+                _comp_sp = tracer.span_start("history_compression", input={
+                    "est_tokens": est,
+                    "threshold": self.config.get("compression_threshold_tokens", 80000),
+                    "triggered": True})
+                try:
+                    history, _compressed = await self._compress_history(sid, history)
+                    _comp_sp.end(output={"compressed": True})
+                except Exception:
+                    _comp_sp.end(level="ERROR")
+                    raise
+            # 消息 id 仅供压缩水位推进，送 LLM 前剔除
+            history = [{"role": m["role"], "content": m["content"]}
+                       for m in history]
+            _sp.end(output={"history_rounds": len(history), "est_tokens": est,
+                            "compressed": _compressed})
+        except Exception:
+            _sp.end(level="ERROR")
+            raise
+
+        chat_snap = self.providers.snapshot_for("chat")
+        # 是否配置了对话模型。熔断/半开恢复由 stream() 内的熔断器动态判定，不在此处
+        # 用早期状态快照预判可用性——否则中途 intent_parse 触发半开探测恢复后，本步
+        # 仍会用陈旧的 "unavailable" 误判，错误地回退"模型不可用"。
+        chat_configured = chat_snap is not None
+        # 检索第 2 层 LLM 精筛可用性：有对话模型且熔断器允许（半开窗口亦视为可用）
+        llm_available = chat_configured and self.llm.breaker(
+            chat_snap.model_id).allow()
+
+        memories = []
+        loaded_ids: list[str] = []
+        cited_ids: list[str] = []
+
+        # 检索线索上下文：最近 2 轮对话尾部（每条截 200 字，history 已裁为
+        # role/content），供向量路与第 2 层精筛做指代消解，零额外 IO
+        retrieval_context = ""
+        if not onboarding:
+            retrieval_context = "\n".join(
+                f"{'用户' if m['role'] == 'user' else 'AI'}：{(m['content'] or '')[:200]}"
+                for m in history[-4:])
+
+        async def _run_retrieval():
+            """第 3 步 记忆检索（query 用真实提问，不含附件正文）。"""
+            nonlocal memories, loaded_ids
+            _sp = tracer.span_start("memory_retrieval", input=core_query)
+            try:
+                retrieval = await self.retriever.retrieve(
+                    core_query, llm_available, session_id=sid,
+                    context_text=retrieval_context)
+                memories = retrieval.hits + retrieval.related
+                loaded_ids = retrieval.loaded_ids
+                if memories:
+                    await emit("memory_retrieved",
+                               {"count": len(memories),
+                                "titles": [m["title"] for m in memories]})
+                    # 检索结果并入思考过程：区分个人记忆与知识库来源
+                    await emit("thinking_delta",
+                               {"text": self._format_retrieval_thinking(memories)})
+                _span_out = {"count": len(memories),
+                             "titles": [m["title"] for m in memories][:20]}
+                # 从 diagnostics 字典读取检索质量指标
+                _diag = getattr(retrieval, "diagnostics", None) or {}
+                for _dk in ("degraded", "vector_hits", "fts_hits", "retrieval_time_ms",
+                            "refined_count", "top_vector_score", "gate", "context_chars"):
+                    _dv = _diag.get(_dk)
+                    if _dv is not None:
+                        _span_out[_dk] = _dv
+                _sp.end(output=_span_out)
+            except Exception:
+                _sp.end(level="ERROR")
+                raise
+
+        tool_names = [s.name for s in self.registry.all_specs()]
+
+        async def _run_intent():
+            """第 4 步 意图识别（读完整消息：附件/长文本可能本身就是意图载体，
+            云端模型处理长输入无本地算力瓶颈）。"""
+            _sp = tracer.span_start("intent_parse", input=message)
+            try:
+                if onboarding:
+                    _intents = [type("I", (), {"id": "i1", "intent_summary": message[:50],
+                                               "intent_type": "chat", "tools_needed": [],
+                                               "depends_on": []})()]
+                else:
+                    _intents = await self.intent_parser.parse(message, tool_names, sid)
+                    # 兜底：外部类意图若未选工具，自动补上 web_search（防止模型凭空回答实时信息）
+                    if "web_search" in tool_names:
+                        for it in _intents:
+                            if it.intent_type == "query_external" and not it.tools_needed:
+                                it.tools_needed = ["web_search"]
+                _sp.end(output=[{"summary": getattr(i, "intent_summary", ""),
+                                 "type": getattr(i, "intent_type", ""),
+                                 "tools": getattr(i, "tools_needed", [])} for i in _intents])
+                return _intents
+            except Exception:
+                _sp.end(level="ERROR")
+                raise
+
+        if not onboarding and llm_available:
+            # 记忆检索与意图识别互不依赖（分别产出 memories/intents），并行执行：
+            # 第 2 层精筛 LLM 的耗时隐藏在意图识别耗时内，主链路净省数秒
+            _results = await asyncio.gather(_run_retrieval(), _run_intent(),
+                                            return_exceptions=True)
+            for _r in _results:
+                if isinstance(_r, BaseException):
+                    raise _r
+            intents = _results[1]
+        else:
+            if not onboarding:
+                # 降级链第 4 级：LLM 不可用（熔断/未配置）→ 不检索，告知降级模式
+                await emit("degrade", {"reason": "llm_unavailable",
+                                       "message": "对话模型不可用，已进入降级模式（本轮跳过记忆检索）"})
+            intents = await _run_intent()
+
+        # 思考过程外露：意图理解与任务拆解以 thinking_delta 流式推送给前端
+        if not onboarding:
+            await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
+
+        # mimo 内置联网搜索：query_external 意图且 chat 模型为 mimo 且开关开启时，
+        # 由模型端执行搜索（博查源，带结构化引用），跳过自研 web_search；
+        # 非 mimo 模型或开关关闭时仍走自研搜索兜底链路
+        builtin_search_tools = None
+        if (not onboarding and chat_configured and chat_snap is not None
+                and self.config.get("mimo_builtin_search_enabled", True)
+                and "xiaomimimo" in (chat_snap.base_url or "")
+                and any(getattr(i, "intent_type", "") == "query_external" for i in intents)):
+            builtin_search_tools = [{
+                "type": "web_search",
+                "max_keyword": self.config.get("builtin_search_max_keyword", 3),
+                "force_search": True}]
+            for it in intents:
+                it.tools_needed = [
+                    t for t in it.tools_needed if t != "web_search"]
+            await emit("thinking_delta",
+                       {"text": "【联网搜索】使用模型内置联网搜索（mimo · 博查源）\n"})
+
+        # 显式记忆指令 + 存在图片 → 后台静默把图片存入知识库，不阻塞本轮回复
+        # （如"把这张图存到知识库"）。当轮对话仍照常把图作多模态交给模型回应。
+        if (not onboarding and images and self.image_kb_fn
+                and any(getattr(i, "intent_type", "") == "remember_intent" for i in intents)):
+            asyncio.create_task(self._image_kb_task(images))
+
+        # 第 5 步 流程编排
+        shared = SharedState()
+        tool_results: list[dict] = []
+        skill_text = ""
+        if not onboarding:
+            # 请求级技能按需追加（第 4 步意图识别后）：命中的活跃技能加载 Level1 SKILL.md
+            try:
+                matched = self.skills.match_skills(
+                    message + " " + " ".join(getattr(i, "intent_summary", "") for i in intents))
+                for sk in matched:
+                    body = self.skills.load_skill(sk)
+                    if body:
+                        skill_text += f"\n\n[技能：{sk}]\n{body[:2000]}"
+                        self.skills.record_use(sk)
+            except Exception:  # noqa: BLE001
+                logger.warning("技能按需追加失败", exc_info=True)
+            dag = build_dag(list(intents), set(tool_names))
+            # DAG 环检测降级：向用户说明（thinking_delta 外露 + prompt 注入）
+            if dag.degraded:
+                await emit("thinking_delta",
+                           {"text": f"【流程编排】{dag.reason}\n"})
+                skill_text += f"\n（注意：{dag.reason}，本轮已降级为直接回答）"
+            # 第 6 步 工具执行
+            _sp = tracer.span_start("tool_execution", input={
+                                    "intents": len(intents), "tool_names": tool_names})
+            try:
+                tool_results = await self._execute_tools(intents, dag, shared, message, emit, sid)
+                _sp.end(output=tool_results)
+            except BaseException:
+                # BaseException：手动停止（CancelledError）时 span 同样收尾，避免悬空 trace
+                _sp.end(level="ERROR")
+                raise
+
+        # 第 7 步 响应合成与输出（流式）
+        assistant_text, citations = "", []
+        # 流式增量缓冲提前定义：中断补救（CancelledError）需读取已产出部分
+        buf: list[str] = []
+        # 纯导出模式：已登记延迟导出文档 → 正文只写入文档，
+        # 对话中不再重复展示，只回一句确认 + 下载卡片
+        doc_only = bool(shared.deferred_docs)
+        _sp = tracer.span_start("response_synthesis", input={"history_rounds": len(
+            history), "est_tokens": est, "memories": len(memories), "tool_results": len(tool_results)})
+        try:
+            if not chat_configured and not onboarding:
+                assistant_text = "当前对话模型不可用，请在设置页检查模型配置。"
+                await emit("content_delta", {"text": assistant_text})
+                # 不可用提示文案不应被导出成文档
+                doc_only = False
+                shared.deferred_docs.clear()
+            else:
+                prompt = self._build_final_prompt(system_prompt, history, message,
+                                                  tool_results, memories, onboarding,
+                                                  skill_text, preload_text)
+                valid_ids = {m["id"] for m in memories}
+
+                # 推理模型（DeepSeek 等）的原生思考过程同样以 thinking_delta 外露
+                async def on_reasoning(text: str) -> None:
+                    await emit("thinking_delta", {"text": text})
+
+                # 内置搜索引用源（流式首包到达）：收集并即时外露到思考过程
+                search_refs: list[dict] = []
+
+                async def on_annotations(items) -> None:
+                    items = [a for a in (items or []) if a.get("url")]
+                    if not items:
+                        return
+                    search_refs.extend(items)
+                    titles = "、".join(
+                        (a.get("title") or a.get("url"))[:30] for a in items[:5])
+                    await emit("thinking_delta",
+                               {"text": f"【联网搜索】命中 {len(items)} 个来源：{titles}\n"})
+
+                _llm_call_count += 1
+                _model_id = getattr(chat_snap, "model_id", None)
+                if doc_only:
+                    await emit("thinking_delta",
+                               {"text": "【文档生成】检测到导出请求：正文将直接写入文档，不在对话中展示\n"})
+                _doc_chars, _doc_progress = 0, 0
+                try:
+                    async for chunk in self.llm.stream(chat_snap, prompt, source="main_chat",
+                                                       session_id=sid, images=images,
+                                                       on_reasoning=on_reasoning,
+                                                       on_annotations=on_annotations,
+                                                       extra_tools=builtin_search_tools):
+                        buf.append(chunk)
+                        if doc_only:
+                            # 正文不外露；以思考过程定期报进度，避免前端长时间无反馈
+                            _doc_chars += len(chunk)
+                            if _doc_chars - _doc_progress >= 1000:
+                                _doc_progress = _doc_chars
+                                await emit("thinking_delta",
+                                           {"text": f"【文档生成】正文已生成约 {_doc_chars} 字…\n"})
+                        else:
+                            await emit("content_delta", {"text": chunk})
+                    # 回复尾部追加联网来源列表（去重，随正文入库可溯源）
+                    if search_refs and buf:
+                        seen, uniq = set(), []
+                        for a in search_refs:
+                            if a["url"] not in seen:
+                                seen.add(a["url"])
+                                uniq.append(a)
+                        src_md = "\n\n**联网来源**\n" + "\n".join(
+                            f"{i + 1}. [{(a.get('title') or a['url'])[:60]}]({a['url']})"
+                            for i, a in enumerate(uniq[:8]))
+                        buf.append(src_md)
+                        if not doc_only:
+                            await emit("content_delta", {"text": src_md})
+                except CircuitOpenError:
+                    fallback = "对话模型暂时不可用（熔断中），请稍后重试或切换模型。"
+                    await emit("content_delta", {"text": fallback})
+                    buf = [fallback]
+                    # 熔断兜底文案不应被导出成文档
+                    doc_only = False
+                    shared.deferred_docs.clear()
+                raw = "".join(buf)
+                assistant_text, citations = rs.extract_citations(
+                    raw, valid_ids)
+                # low 待确认声明：用户在本轮明确确认/否认早前推断 → 升级/记录
+                assistant_text, mem_confirm = rs.extract_memory_confirm(
+                    assistant_text)
+                if mem_confirm:
+                    try:
+                        await self.lifecycle.confirm_low(
+                            mem_confirm["id"], mem_confirm["confirmed"])
+                    except Exception:  # noqa: BLE001
+                        logger.warning("low 确认处理失败", exc_info=True)
+                if citations:
+                    cited_ids = citations
+                    refs = [{"id": mid, "title": next(
+                        (m["title"] for m in memories if m["id"] == mid), mid)}
+                        for mid in citations]
+                    await emit("citations", {"refs": refs})
+                # generate_document 确定性兑底：模型未在正文保留下载链接时，
+                # 自动追加文件卡片，保证下载入口必然可见
+                _extra = self._append_file_cards(assistant_text, tool_results)
+                if _extra:
+                    assistant_text += _extra
+                    await emit("content_delta", {"text": _extra})
+                _sp.end(output=assistant_text)
+        except asyncio.CancelledError:
+            # 中断补救：刷新/关页导致 SSE 断开取消、600s 超时取消时，
+            # 已流式产出的部分回复落库，刷新后历史仍可见（与 Langfuse 已记录内容一致）
+            self._save_partial_reply(sid, buf, think_parts)
+            _sp.end(level="ERROR")
+            raise
+        except Exception:
+            _sp.end(level="ERROR")
+            raise
+
+        # 延迟写入：file_write 等工具在回复生成后执行，将回复正文写入文件
+        if shared.deferred_writes:
+            for dw in shared.deferred_writes:
+                try:
+                    result = await self.executor.execute_tool(
+                        "file_write",
+                        {"path": dw["path"], "content": assistant_text,
+                         "mode": dw.get("mode", "w")},
+                        emit=emit)
+                    tool_results.append({"tool": "file_write",
+                                         "result": result.get("result"),
+                                         "ok": result.get("ok"),
+                                         "error": result.get("error"),
+                                         "deferred_done": True,
+                                         "path": dw["path"]})
+                    await emit("thinking_delta",
+                               {"text": f"【工具调用】file_write 延迟写入完成：{dw['path']}\n"})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("延迟 file_write 失败：%s %s", dw["path"], e)
+                    tool_results.append({"tool": "file_write",
+                                         "result": False,
+                                         "ok": False,
+                                         "error": str(e),
+                                         "deferred_done": False,
+                                         "path": dw["path"]})
+        
+        # 延迟导出：generate_document 将主回复正文导出为文档。
+        # doc_only 模式：正文只进文档，对话回复改为简短确认 + 下载卡片
+        if shared.deferred_docs and assistant_text.strip():
+            doc_body = assistant_text
+            for dd in shared.deferred_docs:
+                try:
+                    result = await self.executor.execute_tool(
+                        "generate_document",
+                        {"title": dd["title"], "format": dd.get("format", "docx"),
+                         "content": doc_body},
+                        emit=emit)
+                    tool_results.append({"tool": "generate_document",
+                                         "result": result.get("result"),
+                                         "ok": result.get("ok"),
+                                         "error": result.get("error"),
+                                         "deferred_done": True})
+                    await emit("thinking_delta",
+                               {"text": f"【工具调用】generate_document 导出完成：{dd['title']}\n"})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("延迟 generate_document 失败：%s %s", dd["title"], e)
+                    tool_results.append({"tool": "generate_document",
+                                         "result": None, "ok": False,
+                                         "error": str(e), "deferred_done": False})
+            if doc_only:
+                _docs_ok = any(
+                    r.get("tool") == "generate_document" and r.get("ok")
+                    and r.get("deferred_done") for r in tool_results)
+                if _docs_ok:
+                    # 对话只留确认句 + 文件卡片，正文不重复展示
+                    assistant_text = "文档已生成，点击下方卡片下载："
+                    assistant_text += self._append_file_cards(
+                        assistant_text, tool_results)
+                    await emit("content_delta", {"text": assistant_text})
+                else:
+                    # 导出失败兜底：正文不能丢，退回对话中完整展示
+                    assistant_text = (doc_body
+                                      + "\n\n> ⚠️ 文档导出失败，已改为在对话中展示完整内容")
+                    await emit("content_delta", {"text": assistant_text})
+            else:
+                # 非纯导出模式：下载链接追加到已展示的回复末尾
+                _card = self._append_file_cards(assistant_text, tool_results)
+                if _card:
+                    assistant_text += _card
+                    await emit("content_delta", {"text": _card})
+        
+        # 第 8 步 后置处理
+        _sp = tracer.span_start("post_process", input={
+                                "session_id": sid, "cited_ids": cited_ids[:10]})
+        try:
+            msg_id = self.sessions.append_message(sid, "assistant", assistant_text,
+                                                  citations=[{"id": c}
+                                                             for c in cited_ids],
+                                                  thinking="".join(think_parts) or None)
+            _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
+                                                     message, onboarding, intents)
+            _sp.end(output={"message_id": msg_id, "cited": cited_ids,
+                            "signal_shape": _signal_shape, "budget_checked": True})
+        except Exception:
+            _sp.end(level="ERROR")
+            raise
+        trace.update(output=assistant_text,
+                     metadata={"internal_trace_id": get_trace_id(),
+                               "images": len(images) if images else 0,
+                               "regenerate": regenerate,
+                               "cited": cited_ids, "message_id": msg_id,
+                               "total_latency_ms": round((time.monotonic() - _start_time) * 1000),
+                               "llm_call_count": _llm_call_count,
+                               "model_id": _model_id})
+
+        await emit("turn_completed", {"message_id": msg_id})
+
+    async def _image_kb_task(self, images) -> None:
+        """后台静默将当轮图片存入知识库（fire-and-forget，失败不影响对话）。"""
+        try:
+            await self.image_kb_fn(images)
+        except Exception:  # noqa: BLE001
+            logger.warning("图片存入知识库失败", exc_info=True)
+
+    def _save_partial_reply(self, sid: str, buf: list[str],
+                            think_parts: list[str]) -> None:
+        """中断补救：把已流式产出的部分回复落库（标注未完成）。
+        同步写入（无 await）：取消处理中不得再挂起，避免二次取消丢失。"""
+        partial = "".join(buf).strip()
+        if not partial:
+            return
+        try:
+            # 清理可能已生成的 citations 尾部声明（中断场景不做引用登记）
+            partial, _ = rs.extract_citations(partial, set())
+            self.sessions.append_message(
+                sid, "assistant",
+                partial + "\n\n> ⚠️ 本回复未完成：生成已中断，以上为已生成部分",
+                thinking="".join(think_parts) or None)
+            logger.info("中断补救：部分回复已落库 session=%s chars=%d",
+                        sid, len(partial))
+        except Exception:  # noqa: BLE001
+            logger.warning("中断补救落库失败", exc_info=True)
+
+    def _persist_images(self, images: list[str] | None) -> list[str] | None:
+        """将当轮图片（dataURL）落盘 data/chat_images/，返回文件名列表。
+        随用户消息持久化，刷新/切回会话后历史气泡仍可回看；失败不阻断对话。"""
+        if not images:
+            return None
+        import base64
+        import uuid
+        from pathlib import Path
+        out: list[str] = []
+        img_dir = Path(self.sessions.data_dir) / "chat_images"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        for du in images:
+            try:
+                head, _, b64 = du.partition(",")
+                mime = head.split(";")[0].removeprefix("data:")
+                ext = {"image/png": ".png", "image/jpeg": ".jpg",
+                       "image/webp": ".webp", "image/gif": ".gif",
+                       "image/bmp": ".bmp"}.get(mime, ".png")
+                fname = f"img_{uuid.uuid4().hex[:12]}{ext}"
+                (img_dir / fname).write_bytes(base64.b64decode(b64))
+                out.append(fname)
+            except Exception:  # noqa: BLE001
+                logger.warning("对话图片落盘失败", exc_info=True)
+        return out or None
+
+    def _format_retrieval_thinking(self, memories: list[dict]) -> str:
+        """把检索命中结果格式化为思考过程文本，区分记忆与知识库来源。"""
+        personal, kb = [], []
+        for m in memories:
+            row = self.db.query_one(
+                "SELECT source_type FROM memories WHERE id=?", (m["id"],))
+            if row and row["source_type"] == "knowledge":
+                kb.append(m["title"])
+            else:
+                personal.append(m["title"])
+        parts = []
+        if personal:
+            parts.append(f"命中记忆 {len(personal)} 条：{'、'.join(personal)}")
+        if kb:
+            parts.append(f"命中知识库 {len(kb)} 条：{'、'.join(kb)}")
+        return "【记忆检索】" + "；".join(parts) + "\n"
+
+    # ---- 工具执行子流程（直接用 emit，工具状态中途可推思考流） --------
+    @staticmethod
+    def _append_file_cards(text: str, tool_results: list[dict]) -> str:
+        """收集 generate_document 成功产物中未出现在正文的下载链接，
+        返回需追加的 Markdown 片段（空串表示无需追加）。"""
+        parts = []
+        for r in tool_results or []:
+            if r.get("tool") != "generate_document" or not r.get("ok"):
+                continue
+            res = r.get("result")
+            # 延迟导出的占位结果 result 为 bool，尚未真正生成，跳过
+            if not isinstance(res, dict):
+                continue
+            url, fname = res.get("download_url"), res.get("filename")
+            if url and fname and url not in (text or ""):
+                parts.append(f"\n\n[{fname}]({url})")
+        return "".join(parts)
+
+    async def _execute_tools(self, intents, dag, shared, message, emit, sid=None) -> list[dict]:
+        tool_results: list[dict] = []
+        self._replanned = False  # 每请求最多 1 次 Replan
+        by_id = {it.id: it for it in intents}
+        for layer in dag.order:
+            # 同层内并行执行（asyncio.gather）
+            layer_intents = [by_id.get(iid) for iid in layer
+                             if by_id.get(iid) and by_id[iid].tools_needed]
+            if not layer_intents:
+                continue
+            results = await asyncio.gather(
+                *[self._run_intent_tools(it, shared, message, emit, sid) for it in layer_intents])
+            for r in results:
+                tool_results.extend(r)
+        return tool_results
+
+    async def _run_intent_tools(self, intent, shared, message, emit, sid=None) -> list[dict]:
+        """执行单个意图的工具序列（含 Replan），前序依赖由 shared feed 给
+        LLM 参数推断。
+        file_write 标记 __FROM_RESPONSE__ 时跳过执行，等主回复生成后写入。"""
+        out: list[dict] = []
+        deps = shared.get_for_intent(
+            intent.depends_on) if intent.depends_on else {}
+        for tool_name in intent.tools_needed:
+            await emit("tool_executing", {"tool_name": tool_name, "status": "running"})
+            # 工具调用状态并入思考过程流，不再依赖外部独立展示
+            await emit("thinking_delta",
+                       {"text": f"【工具调用】正在调用 {tool_name}…\n"})
+            params = (await self._memory_save_params(message, sid)
+                      if tool_name == "memory_save"
+                      else await self._infer_params(tool_name, message, deps, sid))
+            # file_write 延迟写入：content 由主回复填充，此时跳过执行
+            if tool_name == "file_write" and params.get("content") == "__FROM_RESPONSE__":
+                shared.deferred_writes.append({
+                    "path": params.get("path", "output.txt"),
+                    "mode": params.get("mode", "w"),
+                })
+                shared.put(intent.id, tool_name, 0, True)
+                await emit("thinking_delta",
+                           {"text": f"【工具调用】{tool_name} 已登记，回复生成后自动写入 {params['path']}\n"})
+                out.append({"tool": tool_name, "result": True,
+                            "ok": True, "deferred": True,
+                            "path": params["path"]})
+                continue
+            # generate_document 延迟导出：content 由主回复填充，此时跳过执行
+            if tool_name == "generate_document" and params.get("content") == "__FROM_RESPONSE__":
+                shared.deferred_docs.append({
+                    "title": params.get("title", "文档"),
+                    "format": params.get("format", "docx"),
+                })
+                shared.put(intent.id, tool_name, 0, True)
+                await emit("thinking_delta",
+                           {"text": f"【工具调用】{tool_name} 已登记，回复生成后自动导出文档\n"})
+                out.append({"tool": tool_name, "result": True,
+                            "ok": True, "deferred": True})
+                continue
+            result = await self.executor.execute_tool(
+                tool_name, params, intent_summary=intent.intent_summary,
+                emit=emit)
+            # DAG 层面 Replan：核心意图失败且尚未 Replan 时补救一次
+            if not result.get("ok") and not result.get("skipped") and not self._replanned:
+                self._replanned = True
+                decision = await self.executor.replan(
+                    intent.intent_summary, tool_name,
+                    result.get("error", ""), lambda *a, **kw: self._replan_fn(*a, sid=sid, **kw))
+                act = decision.get("action")
+                if act in ("retry_other_tool", "retry_same_tool") and decision.get("tool"):
+                    new_tool = decision["tool"]
+                    new_params = decision.get(
+                        "params") or await self._infer_params(new_tool, message, deps, sid)
+                    if self.registry.has(new_tool):
+                        await emit("tool_executing",
+                                   {"tool_name": new_tool, "status": "replan"})
+                        await emit("thinking_delta",
+                                   {"text": f"【工具调用】{tool_name} 失败，重新规划改用 {new_tool}…\n"})
+                        result = await self.executor.execute_tool(
+                            new_tool, new_params,
+                            intent_summary=intent.intent_summary, emit=emit)
+                        tool_name = new_tool
+            shared.put(intent.id, tool_name, 0, result.get("result"))
+            ok = result.get("ok")
+            await emit("thinking_delta",
+                       {"text": f"【工具调用】{tool_name} 执行{'成功' if ok else '失败：' + str(result.get('error', ''))[:80]}\n"})
+            out.append({"tool": tool_name, "result": result.get("result"),
+                        "ok": result.get("ok"), "error": result.get("error")})
+        return out
+
+    # ---- L1 压缩编排（Head-Middle-Tail + 落盘 + 失败兑底） ----------------
+    TAIL_PROTECTED_MESSAGES = 6   # Protected Tail：最近 3 轮原文保留不动
+
+    async def _compress_history(self, sid: str,
+                                history: list[dict]) -> tuple[list[dict], bool]:
+        """按配置切 head/middle/tail，只压 middle；成功则摘要落盘+推进水位，
+        失败则退化为 Head+Tail（丢 middle）并标记 compression_failed，
+        连续 3 次失败推系统通知建议新建会话。"""
+        # 已有摘要单独抽出（二次压缩合并旧摘要，不嵌套）
+        prev_text = None
+        body: list[dict] = []
+        for m in history:
+            if m["role"] == "system" and "[CONTEXT COMPACTION]" in m.get("content", ""):
+                prev_text = m["content"].split("会话历史摘要：\n", 1)[-1]
+            else:
+                body.append(m)
+        head_n = self.config.get("head_protected_messages", 3)
+        tail_n = self.TAIL_PROTECTED_MESSAGES
+        if len(body) <= head_n + tail_n:
+            return history, False  # 无可压缩的 middle 段
+        head, middle, tail = body[:head_n], body[head_n:-
+                                                 tail_n], body[-tail_n:]
+        threshold = self.config.get("compression_threshold_tokens", 80000)
+        summary, ok = await self.compressor.compress(
+            middle, prev_summary_text=prev_text, threshold_tokens=threshold,
+            session_id=sid)
+        if ok:
+            self._compress_fails.pop(sid, None)
+            # 水位 = middle 最后一条原文消息 id；摘要 md 落盘 + sessions 水位推进
+            watermark = next(
+                (m["id"] for m in reversed(middle) if m.get("id")), None)
+            if watermark:
+                try:
+                    self.sessions.save_summary(
+                        sid, render_summary_body(summary), watermark)
+                except Exception:  # noqa: BLE001
+                    logger.warning("压缩摘要落盘失败", exc_info=True)
+            return assemble_context(head, summary, tail), True
+        # 失败兑底：只保留 Head +（旧摘要）+ Tail，middle 原文丢弃（已装不下）
+        fails = self._compress_fails.get(sid, 0) + 1
+        self._compress_fails[sid] = fails
+        try:
+            self.sessions.mark_compression_failed(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning("compression_failed 标记写入失败", exc_info=True)
+        if fails >= 3:
+            self.notify("compression_failed",
+                        "上下文压缩连续 3 次失败，建议新建会话继续对话")
+        degraded = list(head)
+        if prev_text:
+            degraded.append({"role": "system",
+                             "content": f"[CONTEXT COMPACTION] 会话历史摘要：\n{prev_text}"})
+        degraded.extend(tail)
+        return degraded, False
+
+    async def _preload_urls(self, message: str, emit) -> str:
+        """第 1 步：检测消息中的 URL 并用 web_fetch 预加载；失败不中断，失败信息作为上下文。"""
+        import re
+        from tools import hooks as tool_hooks
+        urls = re.findall(r"https?://[^\s]+", message)
+        if not urls:
+            return ""
+        tool = self.registry.get("web_fetch")
+        if not tool:
+            return ""
+        blocks = []
+        for url in urls[:2]:
+            try:
+                text = await tool.run(url=url)
+                # 直调 tool.run 绕过了 post_tool 漏斗，补一次注入防护（先截断再包裹，保标注完整）
+                guarded, inj = tool_hooks.guard_external(str(text)[:3000])
+                if inj:
+                    logger.warning("URL 预加载内容疑似含注入指令，已隔离标注：%s", url)
+                    self.notify("injection_guard",
+                                f"预加载网页 {url} 疑似包含注入指令，已隔离标注")
+                blocks.append(f"【预加载 {url}】\n{guarded}")
+            except Exception as e:  # noqa: BLE001
+                blocks.append(f"（注：URL {url} 抓取失败，原因 {e}）")
+        return "\n\n".join(blocks)
+
+    def _backfill_prev_signal(self, sid: str, new_message: str) -> None:
+        """信号采集阶段二：回填上一条 assistant 回复的隐式反应与隐式关键词。"""
+        try:
+            row = self.db.query_one(
+                "SELECT id FROM conversations WHERE session_id=? AND role='assistant' "
+                "AND message_type='normal' ORDER BY id DESC LIMIT 1", (sid,))
+            if not row:
+                return
+            keywords = rs.detect_implicit_keywords(new_message)
+            followup = keywords or any(
+                k in new_message for k in ("为什么", "怎么", "是不是", "吗？", "？", "?",
+                                           "展开", "继续", "详细", "再说", "什么意思"))
+            reaction = "追问澄清" if followup else "继续新话题"
+            self.signals.backfill_reaction(row["id"], reaction, keywords)
+        except Exception:  # noqa: BLE001
+            logger.warning("信号阶段二回填失败", exc_info=True)
+
+    async def _replan_fn(self, intent_summary: str, tool_name: str, error: str, *, sid: str | None = None) -> dict:
+        """Replan 判定用 chat_model（§6.4）。"""
+        snap = self.providers.snapshot_for("chat")
+        if snap is None:
+            return {"action": "skip", "reason": "无可用模型"}
+        from infrastructure.json_repair import repair_json
+        prompt = [{"role": "system", "content":
+                   PROMPTS.load_raw("agent/prompts/replan")},
+                  {"role": "user", "content":
+                   f"意图：{intent_summary}\n失败工具：{tool_name}\n错误：{error}"}]
+        resp = await self.llm.chat(snap, prompt, source="replan", session_id=sid)
+        return repair_json(resp["content"])
+
+    async def _memory_save_params(self, message: str, sid: str | None = None) -> dict:
+        """主动/半主动记忆入库参数：标题与摘要由 LLM 提炼，详情保留用户原始描述。"""
+        snap = self.providers.snapshot_for("chat")
+        if snap is None:
+            # 兼容降级：惰性调用（_infer_params 是 async，必须 await）
+            return await self._infer_params("memory_save", message, sid=sid)
+        try:
+            from infrastructure.json_repair import repair_json
+            prompt = [{"role": "system",
+                       "content": PROMPTS.load_raw("agent/prompts/memory_card")},
+                      {"role": "user", "content": message}]
+            resp = await self.llm.chat(snap, prompt, source="system_agent", session_id=sid)
+            data = repair_json(resp["content"]) or {}
+            title = str(data.get("title") or "").strip()
+            summary = str(data.get("summary") or "").strip()
+            if title and summary:
+                return {"title": title[:30], "summary": summary[:30],
+                        "detail": message, "domain": "general"}
+        except Exception:  # noqa: BLE001
+            logger.warning("主动记忆标题/摘要提炼失败，回退截断策略", exc_info=True)
+        return await self._infer_params("memory_save", message, sid=sid)
+
+    async def _infer_params(self, tool_name: str, message: str,
+                            deps: dict | None = None, sid: str | None = None) -> dict:
+        """LLM 驱动工具参数推断（ReAct 模式）。利用 function_call + 依赖结果 feed。
+        LLM 不可用时退化为启发式正则匹配。
+        file_write 使用 relaxed schema：content 非必填，推迟到回复生成后写入。
+        参数推断走 agent 槽位（快速模型），避免 chat 槽位推理模型的长 CoT 拖慢工具链。"""
+        snap = self.providers.snapshot_for("agent")
+        if snap is not None:
+            try:
+                if tool_name == "file_write":
+                    return await self._infer_file_write_params(message, snap, deps, sid=sid)
+                if tool_name == "generate_document":
+                    return await self._infer_generate_document_params(message, snap, deps, sid=sid)
+                return await self._infer_params_llm(tool_name, message, snap, deps, sid=sid)
+            except Exception:  # noqa: BLE001
+                logger.warning("LLM 参数推断失败，退化：%s", tool_name, exc_info=True)
+        return self._infer_params_heuristic(tool_name, message)
+
+    async def _infer_file_write_params(self, message: str, snap,
+                                       deps: dict | None = None,
+                                       *, sid: str | None = None) -> dict:
+        """file_write 参数推断：只让 LLM 推断 path，content 推迟到回复生成后。
+        短内容场景 LLM 仍可直接返回 content（向后兼容）。
+        推断失败/无 path 时兜底生成默认文件名，保证该意图永不因参数缺失卡死。"""
+        # content 非必填，LLM 不会因尝试生成全文而超时
+        relaxed_schema = {
+            "type": "function",
+            "function": {
+                "name": "file_write",
+                "description": "把内容保存为工作区文件。用户说\"写入/更新/保存到文档\""
+                               "通常指把 AI 整理好的回复内容存成文件，此时只需给出 path；"
+                               "content 留空即可，回复正文会在生成后自动写入。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string",
+                                 "description": "文件路径：从用户消息提取文件名；"
+                                                "用户未指明时按主题起简短文件名，"
+                                                "默认 .md 扩展名"},
+                        "content": {"type": "string",
+                                    "description": "文件内容（可选，通常留空）"},
+                        "mode": {"type": "string", "enum": ["w", "a"]},
+                    },
+                    "required": ["path"],
+                },
+            },
+        }
+        try:
+            params = await self._infer_params_llm(
+                "file_write", message, snap, deps, sid=sid,
+                tool_schema_override=relaxed_schema)
+        except Exception:  # noqa: BLE001
+            logger.warning("file_write 参数推断异常，走默认文件名兜底", exc_info=True)
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        # 兜底：LLM 未给出 path（弱模型/空返回）→ 默认文件名，绝不让流程卡死
+        if not params.get("path"):
+            from datetime import datetime as _dt
+            params["path"] = f"回复整理_{_dt.now():%Y%m%d_%H%M%S}.md"
+        # LLM 未返回 content → 标记延迟写入，等主回复生成后填充
+        if not params.get("content"):
+            params["content"] = "__FROM_RESPONSE__"
+        return params
+
+    async def _infer_generate_document_params(self, message: str, snap,
+                                              deps: dict | None = None,
+                                              *, sid: str | None = None) -> dict:
+        """generate_document 参数推断：只让 LLM 推断 title/format，content 推迟到回复生成后。
+        与 file_write 同源——避免 tool_infer 因填不出长正文而参数校验失败、进而无谓 replan。"""
+        relaxed_schema = {
+            "type": "function",
+            "function": {
+                "name": "generate_document",
+                "description": "生成文档文件供用户下载。只需提供 title（文档标题/文件名）"
+                               "与 format（docx 或 md，默认 docx）；content 留空即可，"
+                               "将由本轮回复正文自动填充。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string",
+                                  "description": "文档标题，用作文件名；用户未指明时按主题起简短标题"},
+                        "format": {"type": "string", "enum": ["docx", "md"],
+                                   "description": "文件格式，默认 docx"},
+                        "content": {"type": "string",
+                                    "description": "文档正文（可选，通常留空）"},
+                    },
+                    "required": ["title"],
+                },
+            },
+        }
+        try:
+            params = await self._infer_params_llm(
+                "generate_document", message, snap, deps, sid=sid,
+                tool_schema_override=relaxed_schema)
+        except Exception:  # noqa: BLE001
+            logger.warning("generate_document 参数推断异常，走默认标题兜底", exc_info=True)
+            params = {}
+        if not isinstance(params, dict):
+            params = {}
+        # 兜底：无 title → 默认标题，绝不让流程因参数缺失卡死
+        if not params.get("title"):
+            params["title"] = "文档"
+        if (params.get("format") or "docx") not in ("docx", "md"):
+            params["format"] = "docx"
+        # 正文始终由主回复填充（强制延迟导出）：参数推断的快速模型偶尔会自行
+        # 编一段短 content，导致路径不确定（时而直接导出劣质正文、时而延迟导出），
+        # 且纯导出模式（doc_only）依赖延迟路径才能抑制正文重复展示
+        params["content"] = "__FROM_RESPONSE__"
+        return params
+
+    async def _infer_params_llm(self, tool_name: str, message: str, snap,
+                                deps: dict | None = None, *, sid: str | None = None,
+                                tool_schema_override: dict | None = None) -> dict:
+        """用 function_call 让 LLM 输出工具参数。
+        tool_schema_override：可选，用于 file_write 等需放松参数约束的场景。"""
+        spec = self.registry.get(tool_name)
+        if not spec:
+            return {}
+        tool_schema = tool_schema_override or {
+            "type": "function",
+            "function": {"name": tool_name, "description": spec.spec.description,
+                         "parameters": spec.spec.parameters}
+        }
+        ctx = f"用户消息：{message}"
+        if deps:
+            ctx += "\n\n前序任务结果：\n" + "\n".join(
+                f"  {k}: {str(v)[:500]}" for k, v in deps.items())
+        ctx += f"\n\n请为工具 {tool_name} 生成合适的参数。"
+        if tool_name == "file_write":
+            ctx += ("\n注意：用户要求把 AI 输出/整理的内容保存到文件时，"
+                    "只需给出 path（简短文件名，默认 .md），不要生成 content。")
+        resp = await self.llm.function_call(
+            snap, [{"role": "user", "content": ctx}],
+            tools=[tool_schema], source="tool_infer", session_id=sid)
+        tc = resp.get("tool_calls") or []
+        if tc:
+            import json as _json
+            args = tc[0].get("function", {}).get("arguments", "{}")
+            if isinstance(args, str):
+                args = _json.loads(args)
+            return args if isinstance(args, dict) else {}
+        return {}
+
+    @staticmethod
+    def _infer_params_heuristic(tool_name: str, message: str) -> dict:
+        """LLM 不可用时的启发式正则匹配（退化兜底）。"""
+        if tool_name == "memory_search":
+            return {"query": message}
+        if tool_name == "memory_save":
+            # 兜底截断策略（正常路径由 _memory_save_params LLM 提炼标题/摘要）；
+            # 标题/摘要剔除指令前缀后截断，详情始终保留用户原始描述
+            import re
+            text = re.sub(r"^(请|麻烦)?(帮我?)?(记住|记录一下|remember|/remember)[：:，,\s]*",
+                          "", message).strip() or message
+            return {"title": text[:30], "summary": text[:30],
+                    "detail": message, "domain": "general"}
+        if tool_name == "file_write":
+            return self._heuristic_file_write(message)
+        if tool_name == "web_search":
+            return {"query": message}
+        if tool_name == "web_fetch":
+            import re
+            m = re.search(r"https?://\S+", message)
+            return {"url": m.group(0)} if m else {"url": ""}
+        if tool_name == "datetime_now":
+            return {}
+        if tool_name == "calculator":
+            import re
+            m = re.search(r"[\d\.\+\-\*/\(\)\s]+", message)
+            return {"expression": m.group(0).strip()} if m else {"expression": "0"}
+        return {}
+
+    @staticmethod
+    def _heuristic_file_write(message: str) -> dict:
+        """file_write 参数启发式推断：从消息中提取文件名，消息体作为内容。
+        LLM 推断失败或超时时兜底，避免因缺少必填参数导致工具链中断。"""
+        import re
+        # 尝试从消息中提取文件名（支持中英文、常见扩展名）
+        path_match = re.search(
+            r'(?:文件|输出|生成|保存|写入|命名|叫|为)\s*[：:，,]*\s*["\']?([^\s"\',，。：:]+(?:\.\w{1,10}))',
+            message)
+        if path_match:
+            path = path_match.group(1).strip()
+        else:
+            # 尝试匹配消息中任何带扩展名的词（HTML/代码文件）
+            ext_match = re.search(r'["\']?(\w[\w-]*\.(?:html|md|txt|py|js|css|json|xml|yaml|yml))["\']?',
+                                  message)
+            path = ext_match.group(1).strip() if ext_match else "output.html"
+        return {"path": path, "content": message}
+
+    # ---- prompt 构建 ------------------------------------------------------
+    def _build_system_prompt(self, onboarding: bool, location: str | None = None) -> str:
+        # 当前时间（北京时间），让模型始终知晓“现在”
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        try:
+            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            wd = "一二三四五六日"[now.weekday()]
+            time_hint = f"当前时间（北京时间 UTC+8）：{now:%Y-%m-%d %H:%M} 星期{wd}"
+        except Exception:  # noqa: BLE001
+            time_hint = ""
+        if onboarding:
+            return (ONBOARDING_PERSONA + "\n\n" + time_hint) if time_hint else ONBOARDING_PERSONA
+        parts = [self.soul.read_core(), self.soul.full_style_text()]
+        if time_hint:
+            parts.append(time_hint)
+        # 用户位置（浏览器定位，随请求携带）：天气/附近/本地类查询直接可用
+        if location:
+            parts.append(f"用户当前位置：{location}（浏览器定位）。"
+                         f"涉及天气、附近、本地信息的查询时直接使用该位置，无需再询问用户在哪。")
+        hint = self.ctx_entry.read_consciousness_hint()
+        if hint:
+            parts.append(f"你已知的重要记忆关键词：{hint}")
+        ident = self.profile.identity_snippet()
+        if ident:
+            parts.append(ident)
+        # 技能预加载（Level 0 目录）
+        try:
+            skill_index = self.skills.load_index()
+            if skill_index.strip():
+                parts.append(f"可用技能目录（需要时可展开）：\n{skill_index[:500]}")
+        except Exception:  # noqa: BLE001
+            pass
+        # pending_soul_update：本轮需主动询问用户确认（路径 1）
+        pendings = self.ctx_entry.list_pending()
+        if pendings:
+            asks = "；".join(p.get("proposed_change", "") for p in pendings[:2])
+            parts.append(f"（本轮请自然地向用户确认以下风格调整：{asks}）")
+        else:
+            # low 待确认记忆：与 soul 询问共用槽位，soul 优先，每轮最多问一条
+            cand = self.lifecycle.next_low_confirm_candidate()
+            if cand:
+                self.lifecycle.mark_low_confirm_asked(cand["id"])
+                parts.append(
+                    f"（本轮回复末尾请自然地向用户确认一条早前的推断是否属实："
+                    f"「{cand['title']}——{cand.get('summary') or ''}」。"
+                    f"若用户在本轮消息中已明确表态，则在回复最末尾另起一行输出 "
+                    f'{{"memory_confirm":{{"id":"{cand["id"]}","confirmed":true或false}}}} '
+                    f"声明；用户未表态则不输出该声明。）")
+        # draft 技能待确认：AI 主动向用户提议启用
+        try:
+            drafts = self.skills.list_drafts()
+            if drafts:
+                names = "、".join(d.get("skill_name", "") for d in drafts[:2])
+                parts.append(
+                    f"（系统从最近工作模式中提炼出 {len(drafts)} 个技能模板：{names}。"
+                    f"本轮请在合适时机询问用户是否启用，告知用户可在记忆中心·健康度管理。）")
+        except Exception:  # noqa: BLE001
+            pass
+        return "\n\n".join(parts)
+
+    def _build_final_prompt(self, system_prompt, history, message, tool_results,
+                            memories, onboarding, skill_text="", preload_text=""):
+        if onboarding:
+            return [{"role": "system", "content": system_prompt}] + history + \
+                   [{"role": "user", "content": message}]
+        synth = rs.build_response_prompt(message, tool_results, memories)
+        # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能
+        merged_system = system_prompt + "\n\n" + synth[0]["content"]
+        if skill_text:
+            merged_system += "\n\n可参考的技能内容：" + skill_text
+        if preload_text:
+            merged_system += "\n\n预加载的外部内容（URL/附件）：\n" + preload_text
+        return [{"role": "system", "content": merged_system}] + history + \
+               [{"role": "user", "content": message}]
+
+    async def _post_process(self, sid, msg_id, content, loaded_ids, cited_ids,
+                            message, onboarding, intents=None):
+        if onboarding:
+            return None  # 引导期只写 conversations（已在 append 完成）
+        # 信号采集阶段一（context_label 复用第 4 步意图类型，零额外 LLM 成本）
+        shape = rs.collect_signal_shape(content)
+        self.signals.record_shape(
+            msg_id, shape, context_label=self._context_label(intents, message))
+        # 主动记忆检测：未识别 remember_intent 但含明确新事实 → 被动回顾候选
+        try:
+            self._mark_review_candidate(sid, msg_id, message, intents)
+        except Exception:  # noqa: BLE001
+            logger.warning("回顾候选标记失败", exc_info=True)
+        # 频次三类更新
+        self.lifecycle.update_access_stats(loaded_ids, cited_ids)
+        # 引用明细落表：记忆/知识库统一溯源（被哪条消息、何时引用）
+        self.lifecycle.record_citations(cited_ids, msg_id, sid)
+        # stale 命中恢复（强化门：仅真正被引用才恢复——候选池冒泡不算真实使用，
+        # 避免噪声检索污染生命周期与意识提示通路）
+        for mid in cited_ids:
+            await self.lifecycle.recover_on_hit(mid)
+        # lifecycle 流转检查（stable 升级）
+        for mid in cited_ids:
+            await self.lifecycle.check_stable_upgrade(mid)
+        # index 刷新
+        await self.fw.flush_pending_index()
+        # 成本控制：预算告警（over_budget_strategy 决定处置，当前 remind_only 仅提醒不阻断）
+        try:
+            self._check_budget_alert()
+        except Exception:  # noqa: BLE001
+            logger.warning("预算告警检查失败", exc_info=True)
+        if self.bus:
+            from infrastructure.event_bus import EVT_TURN_COMPLETED
+            await self.bus.publish(EVT_TURN_COMPLETED, {"session_id": sid})
+        return shape
+
+    @staticmethod
+    def _context_label(intents, message: str) -> str:
+        """问题类型标签：fact_query/opinion/chat/tech_help/other（供输出画像分箱）。"""
+        types = {getattr(i, "intent_type", "") for i in (intents or [])}
+        if any(k in (message or "") for k in ("怎么看", "你觉得", "建议", "评价", "意见", "值不值得")):
+            return "opinion"
+        if types & {"query_external", "query_knowledge", "query_memory"}:
+            return "fact_query"
+        if types & {"compute", "file_op"}:
+            return "tech_help"
+        if types and types <= {"chat", "meta"}:
+            return "chat"
+        return "other"
+
+    def _mark_review_candidate(self, sid: str, msg_id: int, message: str,
+                               intents) -> None:
+        """第 8 步主动记忆检测：含新事实句式且非记忆指令 → 写入回顾候选表。"""
+        types = {getattr(i, "intent_type", "") for i in (intents or [])}
+        if "remember_intent" in types or "remember_confirm" in types:
+            return  # 已走主动记忆路径
+        if not any(re.search(p, message or "") for p in _FACT_PATTERNS):
+            return
+        urow = self.db.query_one(
+            "SELECT id FROM conversations WHERE session_id=? AND role='user' "
+            "ORDER BY id DESC LIMIT 1", (sid,))
+        if not urow:
+            return
+        from datetime import datetime as _dt
+        self.db.execute(
+            "INSERT OR IGNORE INTO review_candidates(message_id,session_id,created_at) "
+            "VALUES(?,?,?)",
+            (urow["id"], sid, _dt.now().isoformat(timespec="seconds")))
+
+    def _check_budget_alert(self) -> None:
+        """成本控制（产品文档 §预算告警 / 超预算策略）。
+
+        统计今日 / 本月 token 用量，达到 budget_alert_ratio（默认 80%）或 100%
+        时按 over_budget_strategy 处置。当前唯一策略 remind_only：仅推系统通知
+        提醒（配合 NotificationManager 24h 去重），不阻断对话。
+        """
+        from datetime import datetime
+        strategy = self.config.get("over_budget_strategy", "remind_only")
+        alert_ratio = self.config.get("budget_alert_ratio", 80)
+        now = datetime.now()
+        checks = [
+            ("今日", "daily", self.config.get("daily_token_budget", 500000),
+             now.strftime("%Y-%m-%d")),
+            ("本月", "monthly", self.config.get("monthly_token_budget", 10000000),
+             now.strftime("%Y-%m")),
+        ]
+        for label, scope, budget, prefix in checks:
+            if not budget:  # 预算为 0 视为不限额，不告警
+                continue
+            used = self.db.query_one(
+                "SELECT COALESCE(SUM(input_tokens+output_tokens),0) t FROM token_usage "
+                "WHERE create_time LIKE ?", (f"{prefix}%",))["t"]
+            ratio = used / budget * 100
+            if ratio >= 100:
+                self._notify_budget(
+                    strategy, f"budget_exceeded_{scope}",
+                    f"{label} Token 预算已用完（{used}/{budget}），继续对话将超额。")
+            elif ratio >= alert_ratio:
+                self._notify_budget(
+                    strategy, f"budget_alert_{scope}",
+                    f"{label}已使用 {ratio:.0f}% Token 预算（{used}/{budget}）。")
+
+    def _notify_budget(self, strategy: str, ntype: str, message: str) -> None:
+        """按超预算策略处置。remind_only：仅提醒不阻断（当前唯一策略）。"""
+        if strategy == "remind_only":
+            self.notify(ntype, message)
