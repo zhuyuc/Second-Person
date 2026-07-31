@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request
 
+from infrastructure.timeutil import now_cst, now_iso
 from memory.md_file import parse_memory_md
 
 router = APIRouter()
@@ -334,7 +335,7 @@ async def graph_search(q: str, limit: int = 20):
 async def timeline(event_type: str = None, days: int = 7):
     c = _c()
     from datetime import datetime, timedelta
-    cutoff = (datetime.now() - timedelta(days=days)
+    cutoff = (now_cst() - timedelta(days=days)
               ).isoformat(timespec="seconds")
     q = ("SELECT t.memory_id, t.event_type, t.event_time, t.detail,"
          " m.title, m.summary FROM memory_timeline t"
@@ -396,16 +397,16 @@ async def accept_suggestion(request: Request):
         # 后续若出现相似记忆，提炼/矛盾检测/批量补链路径仍会自动建链。
         linked = await c.linker.suggest_and_link_orphan(row["primary_memory_id"])
         c.db.execute(
-            "UPDATE lint_suggestions SET status='adopted', resolved_at=datetime('now') "
-            "WHERE suggestion_id=?", (sid,))
+            "UPDATE lint_suggestions SET status='adopted', resolved_at=? "
+            "WHERE suggestion_id=?", (now_iso(), sid,))
         return {"code": 200, "data": {"linked": bool(linked), "linked_to": linked}}
     # duplicate → 合并：删除重复方，幸存者记 merged 时间线事件
     await c.fw.submit("memory", {"op": "delete", "memory_id": row["related_memory_id"]}, wait=True)
     with c.db.transaction() as conn:
         c.palace.add_timeline(conn, row["primary_memory_id"], "merged",
                               f"采纳重复建议，合并 {row['related_memory_id']}")
-    c.db.execute("UPDATE lint_suggestions SET status='adopted', resolved_at=datetime('now') "
-                 "WHERE suggestion_id=?", (sid,))
+    c.db.execute("UPDATE lint_suggestions SET status='adopted', resolved_at=? "
+                 "WHERE suggestion_id=?", (now_iso(), sid,))
     return {"code": 200, "data": {"linked": True}}
 
 
@@ -414,8 +415,8 @@ async def dismiss_suggestion(request: Request):
     body = await request.json()
     c = _c()
     c.db.execute("UPDATE lint_suggestions SET status='dismissed', dismiss_reason=?, "
-                 "resolved_at=datetime('now') WHERE suggestion_id=?",
-                 (body.get("reason"), body["suggestion_id"]))
+                 "resolved_at=? WHERE suggestion_id=?",
+                 (body.get("reason"), now_iso(), body["suggestion_id"]))
     return {"code": 200, "data": {}}
 
 
@@ -431,9 +432,9 @@ async def relink_orphans():
         if linked_to:
             relinked.append({"memory_id": mid, "linked_to": linked_to})
             c.db.execute(
-                "UPDATE lint_suggestions SET status='adopted', resolved_at=datetime('now') "
+                "UPDATE lint_suggestions SET status='adopted', resolved_at=? "
                 "WHERE suggestion_type='orphan' AND status='open' AND primary_memory_id=?",
-                (mid,))
+                (now_iso(), mid,))
         else:
             no_candidate.append(mid)
     await c.fw.drain()  # 等建链写请求落库，响应即可反映最新孤立数

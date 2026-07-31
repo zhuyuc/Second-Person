@@ -331,5 +331,5 @@ VALUES(
         'web',
         1,
         'healthy',
-        datetime('now')
+        strftime('%Y-%m-%dT%H:%M:%S', datetime('now', '+8 hours'))
     );

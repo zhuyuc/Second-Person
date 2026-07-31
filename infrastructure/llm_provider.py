@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator
 import httpx
 
 from .observability import get_trace_id
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.llm")
 
@@ -118,7 +119,7 @@ class TokenRecorder:
                 "INSERT INTO token_usage(model_name,source,session_id,input_tokens,"
                 "output_tokens,trace_id,create_time) VALUES(?,?,?,?,?,?,?)",
                 (model_name, source, session_id, input_tokens, output_tokens,
-                 get_trace_id(), datetime.now().isoformat(timespec="seconds")))
+                 get_trace_id(), now_cst().isoformat(timespec="seconds")))
         except Exception:  # noqa: BLE001
             logger.exception("token_usage 记录失败")
 

@@ -17,10 +17,12 @@ from typing import Any
 
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
 from memory.naming import session_id as make_session_id
+from infrastructure.prompt_loader import PROMPTS
+from infrastructure.timeutil import now_cst
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return now_cst().isoformat(timespec="seconds")
 
 
 class SessionStore:
@@ -247,7 +249,8 @@ class SessionStore:
                     msgs.append({"role": r["role"], "content": r["content"],
                                  "id": r["id"]})
             msgs.append({"role": "system",
-                         "content": f"[CONTEXT COMPACTION] 会话历史摘要：\n{summary_text}"})
+                         "content": PROMPTS.load_raw("agent/prompts/compact_prefix")
+                         + "\n" + summary_text})
         for r in tail_rows:
             if r["role"] in ("user", "assistant"):
                 msgs.append({"role": r["role"], "content": r["content"],

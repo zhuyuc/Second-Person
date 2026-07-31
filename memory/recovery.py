@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .md_file import parse_memory_md
 from .palace import Palace
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.recovery")
 
@@ -58,7 +59,7 @@ def rebuild_index(db, data_dir) -> dict:
                 conn.execute(
                     "INSERT INTO vectors(memory_id,embedding,vector_status,embedding_version,"
                     "updated_at) VALUES(?,NULL,'pending','v1',?)",
-                    (doc.id, datetime.now().isoformat(timespec="seconds")))
+                    (doc.id, now_cst().isoformat(timespec="seconds")))
         count += 1
     # 孤儿清理：md 已不存在的记忆，其旧建议与引用事件会成为幽灵条目
     with db.transaction() as conn:
@@ -82,7 +83,7 @@ async def recompile(db, data_dir, distiller, backup_manager=None) -> dict:
 
     # 备份现有 memories 目录
     import shutil
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    ts = now_cst().strftime("%Y%m%d_%H%M")
     backup_mem = data_dir / f"memories_backup_{ts}"
     if (data_dir / "memories").exists():
         shutil.copytree(data_dir / "memories", backup_mem, dirs_exist_ok=True)
@@ -112,7 +113,7 @@ async def recompile(db, data_dir, distiller, backup_manager=None) -> dict:
 
     after = db.query_one("SELECT count(*) c FROM memories")["c"]
     report_path = data_dir / f"recompile_report_{ts}.md"
-    report = (f"# Recompile 差异报告 {datetime.now():%Y-%m-%d %H:%M}\n"
+    report = (f"# Recompile 差异报告 {now_cst():%Y-%m-%d %H:%M}\n"
               f"- 重建前 {before} 条 / 重建后 {after} 条\n"
               f"- 备份目录：{backup_mem}\n")
     report_path.write_text(report, encoding="utf-8")
@@ -186,7 +187,7 @@ def reindex_changed(db, data_dir, paths, vector_store=None) -> dict:
                 conn.execute(
                     "INSERT INTO vectors(memory_id,embedding,vector_status,"
                     "embedding_version,updated_at) VALUES(?,NULL,'pending','v1',?)",
-                    (doc.id, datetime.now().isoformat(timespec="seconds")))
+                    (doc.id, now_cst().isoformat(timespec="seconds")))
         reindexed += 1
     return {"reindexed": reindexed, "missing": missing,
             "invalid": invalid, "invalid_files": notify_msgs}

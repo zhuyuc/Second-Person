@@ -16,6 +16,7 @@ import threading
 from datetime import datetime
 
 import numpy as np
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.vector_store")
 
@@ -216,7 +217,7 @@ class VectorStore:
             "vector_status=excluded.vector_status, dim=excluded.dim, "
             "embedding_version=excluded.embedding_version, updated_at=excluded.updated_at",
             (memory_id, serialize_vector(arr), status, arr.shape[0],
-             embedding_version, datetime.now().isoformat(timespec="seconds")))
+             embedding_version, now_cst().isoformat(timespec="seconds")))
 
     # ---- Embedding 迁移双缓冲（产品文档 §存储层 vectors / §LLM Provider） ----
     def begin_migration(self) -> None:

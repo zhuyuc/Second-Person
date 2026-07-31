@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, UploadFile, File
+from infrastructure.timeutil import now_cst
 
 router = APIRouter()
 
@@ -89,7 +90,7 @@ async def soul_confirm(request: Request):
     from datetime import datetime
     if not c.config.get_raw("first_installed", None):
         c.config.set_raw("first_installed",
-                         datetime.now().strftime("%Y-%m-%d"))
+                         now_cst().strftime("%Y-%m-%d"))
     return {"code": 200, "data": {}}
 
 

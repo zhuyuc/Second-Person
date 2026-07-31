@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from infrastructure.event_bus import (EVT_EMBEDDING_MIGRATION_COMPLETED,
                                       EVT_TASK_PROGRESS)
 from memory.vector_store import deserialize_vector
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.emb_migration")
 
@@ -115,7 +116,7 @@ class MigrationRunner:
             self.vs.abort_migration()
 
     def _backup_old_vectors(self) -> None:
-        now = datetime.now().isoformat(timespec="seconds")
+        now = now_cst().isoformat(timespec="seconds")
         rows = self.db.query_all(
             "SELECT memory_id, embedding, dim, embedding_version FROM vectors "
             "WHERE embedding IS NOT NULL")
@@ -147,7 +148,7 @@ class MigrationRunner:
         return len(rows)
 
     def purge_old_backups(self, days: int = 30) -> int:
-        cutoff = (datetime.now() - timedelta(days=days)
+        cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         cur = self.db.execute(
             "DELETE FROM vectors_old_backup WHERE backed_at < ?", (cutoff,))

@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from memory.naming import backup_filename
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.backup")
 
@@ -62,7 +63,7 @@ class BackupManager:
             manifest = {
                 "product_version": PRODUCT_VERSION, "schema_version": SCHEMA_VERSION,
                 "md_schema_version": MD_SCHEMA_VERSION,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "created_at": now_cst().isoformat(timespec="seconds"),
                 "memory_count": mem_count, "protective": protective,
             }
             with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:

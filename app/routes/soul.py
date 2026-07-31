@@ -141,8 +141,8 @@ async def output_style():
         files = sorted((_history_dir(c.data_dir)).glob("auto_v*.md"),
                        key=lambda f: f.stat().st_mtime, reverse=True)
         if files:
-            from datetime import datetime as _dt
-            last_built = _dt.fromtimestamp(
+            from infrastructure.timeutil import from_ts
+            last_built = from_ts(
                 files[0].stat().st_mtime).isoformat(timespec="seconds")
     except Exception:  # noqa: BLE001
         pass

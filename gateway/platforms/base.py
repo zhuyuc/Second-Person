@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.adapter")
 
@@ -194,7 +195,7 @@ class BasePlatformAdapter:
         self.db.execute(
             "INSERT OR IGNORE INTO message_dedup(platform,message_id,processed_at) "
             "VALUES(?,?,?)", (self.platform_type, message_id,
-                              datetime.now().isoformat(timespec="seconds")))
+                              now_cst().isoformat(timespec="seconds")))
 
     def _resolve_session(self, platform_user_id: str) -> str:
         row = self.db.query_one(
@@ -211,13 +212,13 @@ class BasePlatformAdapter:
             "INSERT OR REPLACE INTO platform_sessions(platform,platform_user_id,"
             "session_id,created_at) VALUES(?,?,?,?)",
             (self.platform_type, platform_user_id, sid,
-             datetime.now().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds")))
 
     def _record_failure(self, reason: str) -> None:
         self._failures += 1
         self.db.execute(
             "UPDATE platforms SET failure_count=?, last_failure_time=?, last_failure_reason=? "
-            "WHERE id=?", (self._failures, datetime.now().isoformat(timespec="seconds"),
+            "WHERE id=?", (self._failures, now_cst().isoformat(timespec="seconds"),
                            reason, self.platform_id))
         if self._failures >= CIRCUIT_THRESHOLD:
             self.paused = True

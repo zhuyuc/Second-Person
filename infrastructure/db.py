@@ -23,6 +23,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from infrastructure.timeutil import now_iso
+
 logger = logging.getLogger("second_person.db")
 
 # 组提交单批上限：批内一次 commit，减少 fsync 次数
@@ -277,7 +279,7 @@ class Database:
                 conn.executescript(sql_file.read_text(encoding="utf-8"))
                 conn.execute(
                     "INSERT INTO schema_migrations(version, applied_at) "
-                    "VALUES(?, datetime('now'))", (version,))
+                    "VALUES(?, ?)", (version, now_iso()))
                 conn.commit()
             newly.append(sql_file.name)
         return newly

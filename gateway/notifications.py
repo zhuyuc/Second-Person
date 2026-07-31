@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.notify")
 
@@ -40,14 +41,14 @@ class NotificationManager:
             self._pending.append((notification_type, message))
             return
         # 24h 去重
-        cutoff = (datetime.now() - timedelta(hours=24)
+        cutoff = (now_cst() - timedelta(hours=24)
                   ).isoformat(timespec="seconds")
         dup = self.db.query_one(
             "SELECT id FROM conversations WHERE notification_type=? AND create_time>=? "
             "ORDER BY id DESC LIMIT 1", (notification_type, cutoff))
         if dup:
             self.db.execute("UPDATE conversations SET create_time=? WHERE id=?",
-                            (datetime.now().isoformat(timespec="seconds"), dup["id"]))
+                            (now_cst().isoformat(timespec="seconds"), dup["id"]))
             return
         self.sessions.append_message(
             sid, "assistant", message, message_type="system_notification",

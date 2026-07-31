@@ -1,0 +1,86 @@
+# Prompt 注册清单（PROMPT_REGISTRY）
+
+本清单登记项目全部外部化 prompt（.md 文件）与全部 LLM 调用点。
+`tests/test_prompt_registry.py` 会做双层机器对账：
+
+- **md 文件层**（A/B 类）：代码引用 ↔ md 文件 ↔ 注册表一一对应，
+  `${var}` 占位符与 render 传参一致；
+- **调用点层**（A/B/C 全部）：全库 `llm.chat/stream/function_call` 调用点
+  与调用点注册表双向对账，构成列登记的 md 必须在同文件内被引用。
+
+**新增/删除/改名 prompt 或 LLM 调用点时必须同步更新本清单，否则测试失败**。
+
+## 归类约定
+
+1. **放置**：prompt 按归属模块放入该模块的 `prompts/` 目录——
+   - `agent/prompts/`：Agent 运行时链路（意图、压缩、合成、Replan 等）
+   - `app/prompts/`：container 装配回调与路由（提炼、判定、标题等）
+   - `soul/prompts/`：人格基线常量（SOUL 默认值、引导人格、元规则）
+2. **命名**：用途语义名（如 `merge_judge`）；同一能力的 system/user 成对
+   prompt，user 侧加 `_user` 后缀（如 `extract_image` / `extract_image_user`）。
+3. **加载**：一律经 `infrastructure.prompt_loader.PROMPTS`；无变量用
+   `load_raw`，有变量用 `render`（`${var}` 占位符，禁用 str.format）。
+4. **不外部化（C 类）判定标准**：文本含运行时才能确定的内容（工具 schema、
+   记忆列表、错误信息等动态拼装），保留在代码中。
+
+## 注册表
+
+| # | 文件 | 用途 | 加载点 | 加载时机 | 变量 | 分类 |
+| --- | ------ | ------ | -------- | ---------- | ------ | ------ |
+| 1 | agent/prompts/intent_system.md | 意图识别 system | agent/intent_parser.py | 惰性 | tool_names | A |
+| 2 | agent/prompts/compress_system.md | 上下文压缩 system | agent/compression.py | 导入时 | - | A |
+| 3 | agent/prompts/compact_prefix.md | 压缩摘要注入前缀 | agent/compression.py、agent/core.py、agent/session_context.py | 惰性 | - | A |
+| 4 | agent/prompts/replan.md | 工具失败 Replan 判定 system | agent/core.py | 惰性 | - | A |
+| 5 | agent/prompts/memory_card.md | 主动记忆标题/摘要提炼 system | agent/core.py | 惰性 | - | A |
+| 6 | agent/prompts/profile_rebuild.md | 用户画像重建 system | agent/system_agents.py | 导入时 | - | A |
+| 7 | agent/prompts/initial_soul.md | 引导期初始 SOUL 生成 system | agent/system_agents.py | 导入时 | - | A |
+| 8 | agent/prompts/output_style.md | 输出画像提炼 system | agent/system_agents.py | 导入时 | - | A |
+| 9 | agent/prompts/response_synth.md | 最终回复合成 system 基底 | agent/response_synthesizer.py | 惰性 | - | A |
+| 10 | agent/prompts/synth_disputed_notice.md | disputed 记忆告知指令（条件注入） | agent/response_synthesizer.py | 惰性 | names | A |
+| 11 | agent/prompts/synth_doc_export.md | 文档导出只写正文指令（条件注入） | agent/response_synthesizer.py | 惰性 | - | A |
+| 12 | app/prompts/distill.md | 对话记忆提炼 system | app/container.py | 导入时 | - | A |
+| 13 | app/prompts/distill_document.md | 文档导入专用提炼 system | app/container.py | 导入时 | - | A |
+| 14 | app/prompts/extract_image.md | VLM 图片解析 system | app/container.py | 导入时 | - | A |
+| 15 | app/prompts/extract_image_user.md | VLM 图片解析 user 话术 | app/container.py | 导入时 | - | A |
+| 16 | app/prompts/domain_label.md | 领域名中文化翻译 system | app/container.py | 惰性 | - | A |
+| 17 | app/prompts/memory_refine.md | 第 2 层记忆精筛 system | app/container.py | 惰性 | - | A |
+| 18 | app/prompts/merge_judge.md | 记忆合并关系判定 system | app/container.py | 惰性 | - | A |
+| 19 | app/prompts/title_gen.md | 会话标题生成 system | app/routes/chat.py | 惰性 | - | A |
+| 20 | soul/prompts/onboarding_persona.md | 引导期临时人格 | soul/constants.py | 导入时 | - | B |
+| 21 | soul/prompts/default_soul_core.md | SOUL_CORE 基线/兜底 | soul/constants.py | 导入时 | - | B |
+| 22 | soul/prompts/default_soul_style_dialog.md | SOUL_STYLE 对话风格+行为原则基线 | soul/constants.py | 导入时 | - | B |
+| 23 | soul/prompts/default_soul_style_output.md | SOUL_STYLE 输出样式空段 | soul/constants.py | 导入时 | - | B |
+| 24 | soul/prompts/output_style_meta_rule.md | 输出样式防僵化元规则 | soul/constants.py | 导入时 | - | B |
+
+分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
+
+## LLM 调用点注册表（含 C 类动态拼装）
+
+注册单位：`文件::函数` 的 chat/stream/function_call 调用。C 类（动态拼装）
+没有 md 文件可对账，但调用点本身受机器对账约束：新增 LLM 调用不登记即
+测试失败。构成列只登记**同文件内直接引用**的 md；跨文件组合、运行时拼装
+均计入“动态”。
+
+| # | 调用点（文件::函数） | 方法 | source | prompt 构成 | 用途 |
+| --- | ---------------------- | ------ | -------- | ------------- | ------ |
+| 1 | agent/compression.py::_compress_once | chat | system_agent | agent/prompts/compress_system.md | 上下文压缩 |
+| 2 | agent/core.py::_pipeline_impl | stream | main_chat | agent/prompts/compact_prefix.md + SOUL/合成动态拼装（C） | 主对话回复 |
+| 3 | agent/core.py::_replan_fn | chat | replan | agent/prompts/replan.md | 工具失败 Replan 判定 |
+| 4 | agent/core.py::_memory_save_params | chat | system_agent | agent/prompts/memory_card.md | 主动记忆标题/摘要提炼 |
+| 5 | agent/core.py::_infer_params_llm | function_call | tool_infer | 动态（工具 schema 拼装，C） | 工具参数推断 |
+| 6 | agent/intent_parser.py::parse | chat | intent_parse | agent/prompts/intent_system.md | 意图识别 |
+| 7 | agent/system_agents.py::rebuild | chat | system_agent | agent/prompts/profile_rebuild.md | 用户画像重建 |
+| 8 | agent/system_agents.py::build_initial_soul | chat | system_agent | agent/prompts/initial_soul.md | 引导期初始 SOUL 生成 |
+| 9 | agent/system_agents.py::build | chat | system_agent | agent/prompts/output_style.md | 输出画像提炼 |
+| 10 | app/container.py::domain_translate_fn | chat | system_agent | app/prompts/domain_label.md | 领域名中文化翻译 |
+| 11 | app/container.py::llm_refine | chat | agent | app/prompts/memory_refine.md | 第 2 层记忆精筛 |
+| 12 | app/container.py::extract_fn | chat | system_agent | app/prompts/distill.md、app/prompts/distill_document.md | 对话/文档记忆提炼 |
+| 13 | app/container.py::image_extract_fn | chat | vision | app/prompts/extract_image.md、app/prompts/extract_image_user.md | VLM 图片解析 |
+| 14 | app/container.py::merge_judge_fn | chat | system_agent | app/prompts/merge_judge.md | 记忆合并关系判定 |
+| 15 | app/routes/chat.py::_call_llm | chat | title_gen | app/prompts/title_gen.md | 会话标题生成 |
+| 16 | app/routes/misc.py::test_connection | chat | main_chat | 无（连通性 ping） | 引导页模型连通测试 |
+| 17 | app/routes/settings.py::_probe_snapshot | chat | main_chat | 无（连通性 ping） | 设置页模型探活 |
+
+备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
+synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入
+调用点 2；md 存在性由上方 md 文件层对账覆盖。

@@ -13,6 +13,7 @@ import logging
 from datetime import datetime
 
 from .llm_provider import ProviderSnapshot
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.provider_registry")
 
@@ -38,7 +39,7 @@ class ProviderRegistry:
             "VALUES(?,?,?,?,?,?,?,?,?,'healthy',?)",
             (pid, display_name, provider_type, base_url, model_id, cred_id,
              input_price, output_price, context_window,
-             datetime.now().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds")))
         return pid
 
     def update_provider(self, pid: str, fields: dict, api_key: str | None = None) -> None:
@@ -97,7 +98,7 @@ class ProviderRegistry:
             "INSERT INTO model_assignment(task_type,provider_id,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(task_type) DO UPDATE SET provider_id=excluded.provider_id, "
             "updated_at=excluded.updated_at",
-            (task_type, provider_id, datetime.now().isoformat(timespec="seconds")))
+            (task_type, provider_id, now_cst().isoformat(timespec="seconds")))
 
     def snapshot_for(self, task_type: str) -> ProviderSnapshot | None:
         """按任务类型解析快照；agent 未配则回退 chat；intent/vision 未配则回退

@@ -16,6 +16,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.scheduler")
 TZ = ZoneInfo("Asia/Shanghai")
@@ -48,7 +49,7 @@ class TaskScheduler:
         task = self._tasks.get(task_id)
         if not task:
             return False
-        start = datetime.now()
+        start = now_cst()
         for attempt in range(TASK_RETRY + 1):
             try:
                 # 同步任务丢线程池执行，避免备份/布局重算等重操作阻塞事件循环
@@ -76,12 +77,12 @@ class TaskScheduler:
             if not ok:
                 # 整链中断，后续跳过
                 for skipped in self._chains[chain_id][self._chains[chain_id].index(task_id) + 1:]:
-                    self._log(skipped, datetime.now(), "skipped",
+                    self._log(skipped, now_cst(), "skipped",
                               f"因前驱 {task_id} 失败而跳过", trigger_source)
                 break
 
     def _log(self, task_id, start, result, fail_reason, trigger_source) -> None:
-        dur = int((datetime.now() - start).total_seconds() * 1000)
+        dur = int((now_cst() - start).total_seconds() * 1000)
         self.db.execute(
             "INSERT INTO task_logs(task_id,run_time,duration_ms,result,fail_reason,"
             "trigger_source) VALUES(?,?,?,?,?,?)",
@@ -128,7 +129,7 @@ class TaskScheduler:
                             "passive_review_interval_days", 3)
                         if self._should_run_memory_chain(interval) \
                                 and not self._ran_today("memory_chain_marker"):
-                            self._log("memory_maintenance", datetime.now(),
+                            self._log("memory_maintenance", now_cst(),
                                       "skipped", "03:00 链首未启动/失败，本轮整链跳过",
                                       "schedule")
                         self._mark_ran("fallback_check_marker")
@@ -142,7 +143,7 @@ class TaskScheduler:
         if not row or not row["last_run"]:
             return False
         try:
-            return datetime.fromisoformat(row["last_run"]).date() == datetime.now().date()
+            return datetime.fromisoformat(row["last_run"]).date() == now_cst().date()
         except ValueError:
             return False
 
@@ -150,7 +151,7 @@ class TaskScheduler:
         self.db.execute(
             "INSERT OR REPLACE INTO scheduled_tasks(task_id,name,schedule,status,last_run,next_run) "
             "VALUES(?,?,?,'completed',?,'')",
-            (marker, marker, "", datetime.now().isoformat(timespec="seconds")))
+            (marker, marker, "", now_cst().isoformat(timespec="seconds")))
 
     def _should_run_memory_chain(self, interval_days: int) -> bool:
         row = self.db.query_one(
@@ -159,7 +160,7 @@ class TaskScheduler:
             return True
         try:
             last = datetime.fromisoformat(row["last_run"])
-            return (datetime.now() - last) >= timedelta(days=interval_days)
+            return (now_cst() - last) >= timedelta(days=interval_days)
         except ValueError:
             return True
 
@@ -177,7 +178,7 @@ class TaskScheduler:
         return [dict(r) for r in rows]
 
     def purge_old_logs(self) -> int:
-        cutoff = (datetime.now() - timedelta(days=30)
+        cutoff = (now_cst() - timedelta(days=30)
                   ).isoformat(timespec="seconds")
         cur = self.db.execute(
             "DELETE FROM task_logs WHERE run_time < ?", (cutoff,))

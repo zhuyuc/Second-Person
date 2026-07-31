@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timedelta
 
 from .naming import suggestion_id as make_sug_id
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.lint")
 
@@ -41,7 +42,7 @@ class LintEngine:
         duplicate = db.query_one(
             "SELECT count(*) c FROM lint_suggestions "
             "WHERE status='open' AND suggestion_type='duplicate'")["c"]
-        cutoff = (datetime.now() - timedelta(days=30)
+        cutoff = (now_cst() - timedelta(days=30)
                   ).isoformat(timespec="seconds")
         low_unconfirmed = db.query_one(
             "SELECT count(*) c FROM memories WHERE confidence='low' "
@@ -81,7 +82,7 @@ class LintEngine:
                     "UPDATE lint_suggestions SET status='dismissed', "
                     "dismiss_reason='no_longer_orphan', resolved_at=? "
                     "WHERE suggestion_id=?",
-                    (datetime.now().isoformat(timespec="seconds"),
+                    (now_cst().isoformat(timespec="seconds"),
                      r["suggestion_id"]))
         sug_ids = []
         for mid in orphan_set:
@@ -98,7 +99,7 @@ class LintEngine:
                 "primary_memory_id,detail,status,created_at) "
                 "VALUES(?,?,'orphan',?,?,'open',?)",
                 (sid, lint_run_id, mid, "零连接，建议按语义相似度建立 related 引用",
-                 datetime.now().isoformat(timespec="seconds")))
+                 now_cst().isoformat(timespec="seconds")))
             sug_ids.append(sid)
         return sug_ids
 
@@ -141,7 +142,7 @@ class LintEngine:
                     "VALUES(?,?,'duplicate',?,?,?,'open',?)",
                     (sid, lint_run_id, pair[0], pair[1],
                      f"相似度 {score:.2f} 疑似重复",
-                     datetime.now().isoformat(timespec="seconds")))
+                     now_cst().isoformat(timespec="seconds")))
                 sug_ids.append(sid)
         return sug_ids
 
@@ -224,7 +225,7 @@ class LintEngine:
 
     # ---- 待确认检测：confidence=low 超 30 天 ------------------------------
     def detect_low_unconfirmed(self) -> list[str]:
-        cutoff = (datetime.now() - timedelta(days=30)
+        cutoff = (now_cst() - timedelta(days=30)
                   ).isoformat(timespec="seconds")
         rows = self.db.query_all(
             "SELECT id FROM memories WHERE confidence='low' "

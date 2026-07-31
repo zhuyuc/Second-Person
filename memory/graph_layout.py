@@ -19,6 +19,7 @@ import math
 import random
 import time
 from datetime import datetime
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.graph_layout")
 
@@ -57,7 +58,7 @@ def place_missing(db) -> int:
     的孤儿坐标行。整体单事务执行，与 compute_layout 的原子替换事务互斥，
     不存在"读到精排中间态误判全表缺坐标"的竞态窗口。返回新布点数。
     """
-    now = datetime.now().isoformat(timespec="seconds")
+    now = now_cst().isoformat(timespec="seconds")
     with db.transaction() as conn:
         conn.execute(
             "DELETE FROM graph_layout WHERE entity_id NOT IN "
@@ -219,7 +220,7 @@ def compute_layout(db) -> int:
             if not moved:
                 break
 
-    now = datetime.now().isoformat(timespec="seconds")
+    now = now_cst().isoformat(timespec="seconds")
     rows = [(ids[i], round(px[i], 2), round(py[i], 2), now) for i in range(n)]
     # 单事务原子替换：清表+写入对并发读者不可见中间态，避免精排期间
     # place_missing 误判全表缺坐标、用近似布点覆盖精排结果的竞态

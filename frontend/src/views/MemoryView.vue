@@ -250,6 +250,7 @@ function dimText(d) {
 const docs = ref([])
 const docUploading = ref(false)
 const docProgress = ref(null)   // { filename, index, totalFiles, stage, current, total }
+const docQueue = ref([])        // 多文件导入队列：[{ name, status: pending|processing|done|failed }]
 const docFileInput = ref(null)
 const docDetail = ref(null)
 async function loadDocs() { docs.value = await api.get('/import/documents') }
@@ -262,6 +263,21 @@ function docStageLabel(p) {
   if (p.stage === 'chunked') return '准备提炼…'
   if (p.stage === 'distilling') return `提炼记忆 ${p.current}/${p.total}`
   return '处理中…'
+}
+// 多文件导入总进度（%）：已完成文件数 + 当前文件按阶段折算
+const docOverallPct = computed(() => {
+  const p = docProgress.value
+  if (!p || !p.totalFiles) return 0
+  let frac = 0.05
+  if (p.stage === 'chunked') frac = 0.35
+  else if (p.stage === 'distilling') frac = p.total ? 0.35 + 0.6 * (p.current / p.total) : 0.35
+  return Math.min(100, Math.round(((p.index - 1) + frac) / p.totalFiles * 100))
+})
+function docQueueIcon(s) {
+  if (s === 'processing') return 'ti-loader-2'
+  if (s === 'done') return 'ti-circle-check'
+  if (s === 'failed') return 'ti-circle-x'
+  return 'ti-clock'
 }
 // 单文件流式导入：读 SSE 进度事件，逐阶段回调 onEvent(event, data)
 async function uploadDocStream(file, onEvent) {
@@ -291,11 +307,13 @@ async function uploadDocs(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length || docUploading.value) return
   docUploading.value = true
+  docQueue.value = files.map(f => ({ name: f.name, status: 'pending' }))
   let ok = 0, fail = 0
   try {
     // 逐个文件独立导入：单个失败不影响其余文件，实时进度经 SSE 展示
     for (let fi = 0; fi < files.length; fi++) {
       const f = files[fi]
+      docQueue.value[fi].status = 'processing'
       docProgress.value = {
         filename: f.name, index: fi + 1, totalFiles: files.length,
         stage: 'extracting', current: 0, total: 0,
@@ -316,8 +334,9 @@ async function uploadDocs(fileList) {
           }
         })
       } catch { errored = true }
-      if (errored || !result) { fail++; continue }
+      if (errored || !result) { fail++; docQueue.value[fi].status = 'failed'; continue }
       ok++
+      docQueue.value[fi].status = 'done'
       if (result.preview) {
         // 预览模式（已关闭静默导入）：提炼结果先进勾选确认队列
         previewQueue.push({
@@ -331,6 +350,7 @@ async function uploadDocs(fileList) {
     }
   } finally {
     docProgress.value = null
+    docQueue.value = []
     await loadDocs()
     docUploading.value = false
     if (files.length > 1) {
@@ -675,7 +695,24 @@ onActivated(() => selectTab(tab.value))
             docProgress.totalFiles }}）</template>
         </div>
         <div class="muted" style="margin-top:4px">{{ docStageLabel(docProgress) }}</div>
-        <div v-if="docProgress.stage === 'distilling' && docProgress.total"
+        <!-- 多文件：总进度条 + 逐文件状态队列 -->
+        <template v-if="docProgress.totalFiles > 1">
+          <div style="margin:12px auto 0;max-width:320px;display:flex;align-items:center;gap:8px">
+            <div style="flex:1;height:6px;border-radius:var(--radius-pill);background:var(--bd);overflow:hidden">
+              <div
+                :style="{ width: docOverallPct + '%', height: '100%', background: 'var(--acctx)', transition: '.25s' }">
+              </div>
+            </div>
+            <span class="muted" style="font-size:11px;min-width:32px;text-align:right">{{ docOverallPct }}%</span>
+          </div>
+          <div class="doc-queue">
+            <div v-for="(q, i) in docQueue" :key="i" class="doc-queue-item" :class="q.status">
+              <i class="ti" :class="docQueueIcon(q.status)"></i>
+              <span class="doc-queue-name">{{ q.name }}</span>
+            </div>
+          </div>
+        </template>
+        <div v-else-if="docProgress.stage === 'distilling' && docProgress.total"
           style="margin:10px auto 0;max-width:280px;height:6px;border-radius:var(--radius-pill);background:var(--bd);overflow:hidden">
           <div
             :style="{ width: (docProgress.current / docProgress.total * 100) + '%', height: '100%', background: 'var(--acctx)', transition: '.25s' }">

@@ -20,6 +20,7 @@ from typing import Any
 import yaml
 
 from memory.naming import pending_id as make_pending_id
+from infrastructure.timeutil import now_cst
 
 SECTIONS = ["系统状态", "阅读顺序", "近期变化摘要", "待处理"]
 
@@ -162,7 +163,7 @@ class ContextEntryManager:
             items.append({
                 "id": pid, "type": ptype, "original_text": original_text,
                 "proposed_change": proposed_change,
-                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "created_at": now_cst().isoformat(timespec="seconds"),
             })
             self._write_pending(items)
             return pid
@@ -184,13 +185,13 @@ class ContextEntryManager:
         """清理近期变化摘要中超过 N 天的条目（定时任务调用）。"""
         with self._lock:
             sections = self._read_sections()
-            cutoff = datetime.now() - timedelta(days=days)
+            cutoff = now_cst() - timedelta(days=days)
             kept = []
             for ln in sections["近期变化摘要"].splitlines():
                 m = re.search(r"\[(\d{1,2})/(\d{1,2})\]", ln)
                 if m:
                     month, day = int(m.group(1)), int(m.group(2))
-                    year = datetime.now().year
+                    year = now_cst().year
                     try:
                         d = datetime(year, month, day)
                         if d < cutoff:

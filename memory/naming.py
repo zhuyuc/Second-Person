@@ -8,6 +8,7 @@ import re
 import unicodedata
 import uuid
 from datetime import datetime
+from infrastructure.timeutil import now_cst
 
 # md 文件名与 domain 目录中需要替换为下划线的非法字符
 _ILLEGAL_FS = re.compile(r'[/\\:*?"<>|\x00-\x1f]')
@@ -53,7 +54,7 @@ def memory_filename(mid: str, title: str, existing: set[str] | None = None) -> s
 
 
 def _ts() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return now_cst().strftime("%Y%m%d_%H%M%S")
 
 
 def backup_filename(label: str | None = None) -> str:

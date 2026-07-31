@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.credentials")
 
@@ -83,7 +84,7 @@ class CredentialStore:
             "INSERT INTO credentials(name,credential_type,encrypted_value,created_at) "
             "VALUES(?,?,?,?)",
             (name, credential_type, self._encrypt(value),
-             datetime.now().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds")))
         return cur.lastrowid
 
     def update(self, credential_id: int, value: str) -> None:

@@ -48,12 +48,14 @@ from soul.soul_manager import SoulManager
 from tools.base import ToolRegistry
 from tools.builtin import register_builtins
 from tools.sandbox import Sandbox
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.container")
 
 DISTILL_PROMPT = PROMPTS.load_raw("app/prompts/distill")
 DISTILL_DOC_PROMPT = PROMPTS.load_raw("app/prompts/distill_document")
 EXTRACT_IMAGE_PROMPT = PROMPTS.load_raw("app/prompts/extract_image")
+EXTRACT_IMAGE_USER_PROMPT = PROMPTS.load_raw("app/prompts/extract_image_user")
 
 
 class AppContainer:
@@ -251,7 +253,7 @@ class AppContainer:
                 url = image_to_data_url(path)
                 resp = await self.llm.chat(
                     snap, [{"role": "system", "content": EXTRACT_IMAGE_PROMPT},
-                           {"role": "user", "content": "请解析这张图片。"}],
+                           {"role": "user", "content": EXTRACT_IMAGE_USER_PROMPT}],
                     images=[url], source="vision")
                 return (resp.get("content") or "").strip()
             except Exception:  # noqa: BLE001
@@ -407,7 +409,7 @@ class AppContainer:
         """清理超 output_style_signal_retention_days（默认 90）天的 response_signals。"""
         from datetime import datetime, timedelta
         days = self.config.get("output_style_signal_retention_days", 90)
-        cutoff = (datetime.now() - timedelta(days=days)
+        cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         cur = self.db.execute(
             "DELETE FROM response_signals WHERE create_time < ?", (cutoff,))

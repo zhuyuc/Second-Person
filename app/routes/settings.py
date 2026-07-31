@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Request, UploadFile, File
 
+from infrastructure.timeutil import now_cst, now_iso
+
 router = APIRouter()
 
 
@@ -194,7 +196,7 @@ async def embedding_migrate(request: Request):
     cur = c.db.execute(
         "INSERT INTO embedding_migration(from_model,to_model,total_count,done_count,"
         "status,started_at) VALUES('old',?,0,0,'running',?)",
-        (body["target_provider_id"], datetime.now().isoformat(timespec="seconds")))
+        (body["target_provider_id"], now_cst().isoformat(timespec="seconds")))
     mid = cur.lastrowid
     total = c.db.query_one("SELECT count(*) c FROM vectors")["c"]
     c.db.execute(
@@ -341,7 +343,7 @@ def _usage_where(source: str, model: str) -> tuple[str, list]:
 @router.get("/settings/usage/summary")
 async def usage_summary(source: str = "", model: str = ""):
     c = _c()
-    now = datetime.now()
+    now = now_cst()
     today = now.strftime("%Y-%m-%d")
     month = now.strftime("%Y-%m")
     extra, eargs = _usage_where(source, model)
@@ -386,7 +388,7 @@ async def usage_trend(period: str = "30d", source: str = "", model: str = ""):
     """用量趋势：30d=近30天按天 / month=本月按天 / year=当年按月。"""
     c = _c()
     out = []
-    now = datetime.now()
+    now = now_cst()
     extra, eargs = _usage_where(source, model)
     if period == "year":
         for m in range(1, 13):
@@ -418,7 +420,7 @@ async def usage_trend(period: str = "30d", source: str = "", model: str = ""):
 async def usage_month_cost():
     """本月费用：当月 1 日至今各模型实际消耗 token × 单价，每次请求实时计算。未配单价不计入。"""
     c = _c()
-    since = datetime.now().strftime("%Y-%m-01")
+    since = now_cst().strftime("%Y-%m-01")
     rows = c.db.query_all(
         "SELECT model_name, SUM(input_tokens) i, SUM(output_tokens) o FROM token_usage "
         "WHERE create_time >= ? GROUP BY model_name", (f"{since}",))
@@ -620,8 +622,9 @@ async def add_platform(request: Request):
     c.db.execute(
         "INSERT OR REPLACE INTO platforms(id,platform_type,enabled,status,"
         "whitelist_user_id,callback_url,credential_id,created_at) "
-        "VALUES(?,?,0,'healthy',?,?,?,datetime('now'))",
-        (pid, ptype, body.get("whitelist_user_id"), body.get("callback_url"), cred_id))
+        "VALUES(?,?,0,'healthy',?,?,?,?)",
+        (pid, ptype, body.get("whitelist_user_id"), body.get("callback_url"), cred_id,
+         now_iso()))
     return {"code": 200, "data": {"id": pid}}
 
 

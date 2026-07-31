@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from memory.naming import raw_doc_id
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.ingest")
 
@@ -323,8 +324,18 @@ class IngestManager:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
 
     def _next_doc_id(self) -> str:
-        n = self.db.query_one("SELECT count(*) c FROM raw_docs")["c"] + 1
-        return raw_doc_id(n)
+        # 以现存 id 的最大数字后缀 +1 生成，而非 count(*)+1：
+        # 删除文档会在序号中留下空洞，count 方案会重算出已存在的较小 id
+        # 从而触发 raw_docs.id UNIQUE 约束冲突，导致后续导入全部失败。
+        row = self.db.query_one(
+            "SELECT MAX(CAST(SUBSTR(id, 5) AS INTEGER)) m FROM raw_docs "
+            "WHERE id LIKE 'doc_%'")
+        seq = (row["m"] or 0) + 1
+        # 收尾兜底：极端并发/历史脏数据下仍可能撞号，递增直至空闲
+        while self.db.query_one(
+                "SELECT 1 FROM raw_docs WHERE id=?", (raw_doc_id(seq),)):
+            seq += 1
+        return raw_doc_id(seq)
 
     async def ingest_file(self, filename: str, content: bytes,
                           source: str = "web_ui", progress_cb=None) -> dict:
@@ -369,7 +380,7 @@ class IngestManager:
                 if chunks and failed == len(chunks):
                     raise last_err or RuntimeError("文档提炼全部失败")
                 import json
-                now = datetime.now().isoformat(timespec="seconds")
+                now = now_cst().isoformat(timespec="seconds")
                 self.db.execute(
                     "INSERT INTO raw_docs(id,filename,file_path,file_size,mime_type,"
                     "source,extracted_memory_ids,imported_at,extracted_text,"
@@ -408,7 +419,9 @@ class IngestManager:
             # 所有分块均失败（如模型熔断）→ 视为导入失败，回滚并抛出原始错误
             if chunks and failed == len(chunks):
                 raise last_err or RuntimeError("文档提炼全部失败")
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            # 含前端断开（刷新/关页）导致的任务取消：CancelledError 继承自
+            # BaseException，必须显式捕获才能回滚落盘文件，否则残留孤儿文件。
             try:
                 stored.unlink()
             except OSError:
@@ -421,7 +434,7 @@ class IngestManager:
             "extracted_memory_ids,imported_at,extracted_text) VALUES(?,?,?,?,?,?,?,?,?)",
             (doc_id, filename, str(stored.relative_to(self.data_dir)), len(content),
              stored.suffix, source, json.dumps(written, ensure_ascii=False),
-             datetime.now().isoformat(timespec="seconds"),
+             now_cst().isoformat(timespec="seconds"),
              text if is_image else None))
         self._check_capacity()
         # 图片启用解析后仍无文本：明确告知用户仅缓存，消除“以为已收录”的静默隐患
@@ -452,7 +465,7 @@ class IngestManager:
             "source_url,extracted_memory_ids,imported_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (doc_id, url[:80], "", len(text), "text/html", "url", url,
              json.dumps(written, ensure_ascii=False),
-             datetime.now().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds")))
         self.notify("doc_imported", f"已从网页提取 {len(written)} 条记忆")
         return {"doc_id": doc_id, "extracted": len(written)}
 

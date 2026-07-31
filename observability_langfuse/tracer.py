@@ -25,8 +25,9 @@ from __future__ import annotations
 import contextvars
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from .client import IngestionClient
 from .config import LangfuseConfig
@@ -42,9 +43,12 @@ _active_obs: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 _MAX_STR = 32000
 _MAX_GEN_INPUT = 64000
 
+_CST = ZoneInfo("Asia/Shanghai")
+
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    # 中国标准时间（带 +08:00 偏移的 aware ISO，Langfuse 按绝对时刻解析，语义不变）
+    return datetime.now(_CST).isoformat()
 
 
 def _uid() -> str:

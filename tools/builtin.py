@@ -22,6 +22,7 @@ from .base import ToolRegistry, ToolSpec
 from .sandbox import Sandbox
 from .web_fetch import web_fetch as _web_fetch
 from .web_search import web_search as _web_search
+from infrastructure.timeutil import now_cst
 
 # ---- 安全计算器（只允许算术表达式） --------------------------------------
 _OPS = {
@@ -52,7 +53,7 @@ def datetime_now(tz: str = "Asia/Shanghai") -> str:
     try:
         return datetime.now(ZoneInfo(tz)).isoformat(timespec="seconds")
     except Exception:  # noqa: BLE001
-        return datetime.now().isoformat(timespec="seconds")
+        return now_cst().isoformat(timespec="seconds")
 
 
 def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
@@ -66,7 +67,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         seq = palace.next_memory_seq()
         from memory.naming import memory_id as mk
         mid = mk(seq)
-        now = datetime.now()
+        now = now_cst()
         fm = {"id": mid, "title": title[:30], "domain": domain,
               "confidence": confidence, "lifecycle": "active", "source_type": "memory",
               "access_count": 0, "created_at": now.strftime("%Y-%m-%d"),

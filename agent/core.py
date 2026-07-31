@@ -25,6 +25,7 @@ from . import response_synthesizer as rs
 from .compression import Compressor, assemble_context, render_summary_body
 from .dag_scheduler import SharedState, build_dag
 from .intent_parser import IntentParser
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
 
@@ -561,7 +562,7 @@ class AgentCore:
                                          "error": str(e),
                                          "deferred_done": False,
                                          "path": dw["path"]})
-        
+
         # 延迟导出：generate_document 将主回复正文导出为文档。
         # doc_only 模式：正文只进文档，对话回复改为简短确认 + 下载卡片
         if shared.deferred_docs and assistant_text.strip():
@@ -581,7 +582,8 @@ class AgentCore:
                     await emit("thinking_delta",
                                {"text": f"【工具调用】generate_document 导出完成：{dd['title']}\n"})
                 except Exception as e:  # noqa: BLE001
-                    logger.warning("延迟 generate_document 失败：%s %s", dd["title"], e)
+                    logger.warning(
+                        "延迟 generate_document 失败：%s %s", dd["title"], e)
                     tool_results.append({"tool": "generate_document",
                                          "result": None, "ok": False,
                                          "error": str(e), "deferred_done": False})
@@ -606,7 +608,7 @@ class AgentCore:
                 if _card:
                     assistant_text += _card
                     await emit("content_delta", {"text": _card})
-        
+
         # 第 8 步 后置处理
         _sp = tracer.span_start("post_process", input={
                                 "session_id": sid, "cited_ids": cited_ids[:10]})
@@ -819,7 +821,9 @@ class AgentCore:
         body: list[dict] = []
         for m in history:
             if m["role"] == "system" and "[CONTEXT COMPACTION]" in m.get("content", ""):
-                prev_text = m["content"].split("会话历史摘要：\n", 1)[-1]
+                # 前缀固定占首行（compact_prefix.md 及旧版硬编码均如此），
+                # 按首行切分取摘要正文，不再依赖具体文案
+                prev_text = m["content"].split("\n", 1)[-1]
             else:
                 body.append(m)
         head_n = self.config.get("head_protected_messages", 3)
@@ -856,8 +860,10 @@ class AgentCore:
                         "上下文压缩连续 3 次失败，建议新建会话继续对话")
         degraded = list(head)
         if prev_text:
+            # 前缀与 assemble_context 统一走 compact_prefix.md，避免文案漂移
             degraded.append({"role": "system",
-                             "content": f"[CONTEXT COMPACTION] 会话历史摘要：\n{prev_text}"})
+                             "content": PROMPTS.load_raw("agent/prompts/compact_prefix")
+                             + "\n" + prev_text})
         degraded.extend(tail)
         return degraded, False
 
@@ -1284,7 +1290,7 @@ class AgentCore:
         from datetime import datetime
         strategy = self.config.get("over_budget_strategy", "remind_only")
         alert_ratio = self.config.get("budget_alert_ratio", 80)
-        now = datetime.now()
+        now = now_cst()
         checks = [
             ("今日", "daily", self.config.get("daily_token_budget", 500000),
              now.strftime("%Y-%m-%d")),

@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.distiller")
 
@@ -241,7 +242,7 @@ class Distiller:
         seq = self.palace.next_memory_seq()
         from .naming import memory_id as mk_mid
         mid = mk_mid(seq)
-        now = datetime.now()
+        now = now_cst()
         fm = {
             "id": mid, "title": item.get("title", "")[:30],
             "domain": item.get("domain", "general"), "confidence": confidence,
@@ -275,7 +276,7 @@ class Distiller:
                                       "memory", None, item.get("entities", []))
         f = Path(self.fw.data_dir) / row["md_path"]
         doc = parse_memory_md(f.read_text(encoding="utf-8"))
-        now = datetime.now()
+        now = now_cst()
         old_detail = doc.detail.strip()
         # 已分层过的旧详情不重复包裹“当前观点”头，只降级为历史段
         # （### 为当前写入格式；## 兄容早期数据，当时与结构段标题同级）
@@ -309,7 +310,7 @@ class Distiller:
             return await self._create(item, confidence, "memory", None, item.get("entities", []))
         f = Path(self.fw.data_dir) / row["md_path"]
         doc = parse_memory_md(f.read_text(encoding="utf-8"))
-        now = datetime.now()
+        now = now_cst()
         merge_count = sum(1 for h in doc.change_history if "跨时间合并" in h)
         # 第 2 次起升级 confidence（medium→strong）
         new_conf = row["confidence"]
@@ -401,7 +402,7 @@ class Distiller:
         if not sf.exists():
             return
         sdoc = parse_memory_md(sf.read_text(encoding="utf-8"))
-        now = datetime.now()
+        now = now_cst()
         merge_count = sum(1 for h in sdoc.change_history if "合并" in h)
         if merge_count >= 1 and surv["confidence"] == "medium":
             sdoc.frontmatter["confidence"] = "strong"

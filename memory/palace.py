@@ -19,12 +19,13 @@ from typing import Any
 
 from .naming import entity_id as make_entity_id
 from .naming import normalize_entity_name
+from infrastructure.timeutil import now_cst
 
 _COUNTABLE = ("active", "stable", "stale")
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return now_cst().isoformat(timespec="seconds")
 
 
 class Palace:

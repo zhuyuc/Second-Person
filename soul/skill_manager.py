@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
+from infrastructure.timeutil import now_cst
 
 
 def _skills_dir(data_dir) -> Path:
@@ -30,7 +31,7 @@ def apply_skill_write(data_dir, db, payload: dict) -> None:
     op = payload.get("op")
     name = payload.get("skill_name", "")
     sdir = _skills_dir(data_dir) / name
-    now = datetime.now().isoformat(timespec="seconds")
+    now = now_cst().isoformat(timespec="seconds")
 
     if op == "create_draft":
         sdir.mkdir(parents=True, exist_ok=True)
@@ -183,7 +184,7 @@ class SkillManager:
     def record_use(self, name: str) -> None:
         self.db.execute(
             "UPDATE skill_usage SET use_count=use_count+1, last_used=? WHERE skill_name=?",
-            (datetime.now().isoformat(timespec="seconds"), name))
+            (now_cst().isoformat(timespec="seconds"), name))
 
     def archive_unused(self, days: int = 90) -> list[str]:
         """90 天未使用的 active 技能归档（Lint 第七项调用）。返回归档技能名。"""

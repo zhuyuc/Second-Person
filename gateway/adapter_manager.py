@@ -17,6 +17,7 @@ from .platforms.dingtalk import DingtalkAdapter
 from .platforms.feishu import FeishuAdapter
 from .platforms.telegram import TelegramAdapter
 from .platforms.wecom import WecomAdapter
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.gateway")
 
@@ -73,7 +74,7 @@ class AdapterManager:
             self.db.execute(
                 "UPDATE platforms SET status='paused', last_failure_time=?, "
                 "last_failure_reason=? WHERE id=?",
-                (datetime.now().isoformat(timespec="seconds"),
+                (now_cst().isoformat(timespec="seconds"),
                  f"连接失败：{e}", row["id"]))
 
     async def reload(self) -> None:

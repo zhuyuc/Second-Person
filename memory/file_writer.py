@@ -27,6 +27,7 @@ from infrastructure.event_bus import (EVT_MEMORY_CREATED, EVT_MEMORY_UPDATED,
 
 from .md_file import MemoryDoc, parse_memory_md, serialize_memory_md
 from .naming import memory_filename
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.file_writer")
 
@@ -116,7 +117,7 @@ class FileWriter:
                 "INSERT INTO pending_writes(write_type,payload,status,retry_count,created_at)"
                 " VALUES(?,?,'pending',0,?)",
                 (write_type, json.dumps(payload, ensure_ascii=False),
-                 datetime.now().isoformat(timespec="seconds")))
+                 now_cst().isoformat(timespec="seconds")))
             write_id = cur.lastrowid
         else:
             self._mem_seq -= 1
@@ -333,13 +334,13 @@ class FileWriter:
                         "vector_status='ready',dim=excluded.dim,updated_at=excluded.updated_at",
                         (mid, __import__("numpy").asarray(emb, dtype="float32").tobytes(),
                          "ready", len(emb), self.embedding_version,
-                         datetime.now().isoformat(timespec="seconds")))
+                         now_cst().isoformat(timespec="seconds")))
                 else:
                     conn.execute(
                         "INSERT OR IGNORE INTO vectors(memory_id,embedding,vector_status,"
                         "embedding_version,updated_at) VALUES(?,NULL,'pending',?,?)",
                         (mid, self.embedding_version,
-                         datetime.now().isoformat(timespec="seconds")))
+                         now_cst().isoformat(timespec="seconds")))
         except Exception:
             # 事务失败时清理本次新建的 md，避免孤儿文件导致重试时被当作命名冲突
             if created_file:
@@ -429,7 +430,7 @@ class FileWriter:
             if deleted_mid not in ids:
                 continue
             fm["status"] = "resolved"
-            fm["resolved_at"] = datetime.now().strftime("%Y-%m-%d")
+            fm["resolved_at"] = now_cst().strftime("%Y-%m-%d")
             body += f"\n- 裁决：来源记忆 {deleted_mid} 已删除，自动关闭 @ {fm['resolved_at']}\n"
             f.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
             for other in ids:
@@ -451,7 +452,7 @@ class FileWriter:
             l for l in doc.links if l.get("type") != "contradicts"]
         doc.links = doc.frontmatter["links"]
         doc.change_history.insert(
-            0, f"[{datetime.now():%Y-%m-%d}] 对立记忆已删除，恢复 confidence={doc.frontmatter['confidence']}")
+            0, f"[{now_cst():%Y-%m-%d}] 对立记忆已删除，恢复 confidence={doc.frontmatter['confidence']}")
         f.write_text(serialize_memory_md(doc), encoding="utf-8")
         self._mark_internal(f)
         with self.db.transaction() as conn:
@@ -484,7 +485,7 @@ class FileWriter:
         with self.db.transaction() as conn:
             conn.execute("UPDATE memories SET lifecycle=?, md_path=?, updated_at=?, "
                          "stale_lint_runs=0 WHERE id=?",
-                         (new_life, md_rel, datetime.now().isoformat(timespec="seconds"), mid))
+                         (new_life, md_rel, now_cst().isoformat(timespec="seconds"), mid))
             self.palace.add_timeline(conn, mid, evt,
                                      "归档" if to_archived else "恢复")
             if to_archived:
@@ -492,7 +493,7 @@ class FileWriter:
                 conn.execute(
                     "UPDATE lint_suggestions SET status='dismissed', dismiss_reason='archived', "
                     "resolved_at=? WHERE status='open' AND (primary_memory_id=? OR related_memory_id=?)",
-                    (datetime.now().isoformat(timespec="seconds"), mid, mid))
+                    (now_cst().isoformat(timespec="seconds"), mid, mid))
         if to_archived:
             self.vs.remove(mid)
         else:

@@ -1,50 +1,31 @@
 """
 代码内置常量（开发文档 §6.3 代码内置常量）。
 
-ONBOARDING_PERSONA —— 引导期临时人格，硬编码不落盘
+常量文本已外部化至 soul/prompts/*.md（B 类 prompt md 化），本模块在导入时
+经 PromptLoader 加载（启动即 fail-fast），常量名与语义保持不变：
+
+ONBOARDING_PERSONA —— 引导期临时人格，不落盘
 DEFAULT_SOUL_CORE  —— SOUL_CORE 基线（跳过引导初始值 / 文件丢失兜底 / 恢复默认目标）
 DEFAULT_SOUL_STYLE —— SOUL_STYLE 三段基线（输出样式段默认为空）
+
+注意：load_raw 会去除首尾空白，而消费点依赖既有换行语义（写盘文件以换行
+结尾、元规则前置空行分隔），故此处显式补回，勿删。
 """
 from __future__ import annotations
 
-ONBOARDING_PERSONA = """你是 Second Person，一个正在与新用户初次见面的个人智能体助手。
-请用简短、友好的方式做自我介绍，并通过几个问题了解用户是谁、主要关注什么领域、
-偏好怎样的沟通方式。保持简洁，不要长篇大论，一次问一到两个问题。"""
+from infrastructure.prompt_loader import PROMPTS
 
-DEFAULT_SOUL_CORE = """# 身份
-你是 Second Person —— 用户的私人顾问、知识管理伙伴、思考辅助者。
+ONBOARDING_PERSONA = PROMPTS.load_raw("soul/prompts/onboarding_persona")
 
-# 核心价值观
-- 诚实优先于讨好
-- 保护用户长期利益
-- 记忆驱动，基于对用户的了解给出建议
-
-# 性格特征
-- 直接、诚实、有观点、记忆驱动
-
-# 禁止行为
-- 不编造事实
-- 不在不确定时表现确定
-- 不主动修改本文件（SOUL_CORE）
-"""
+DEFAULT_SOUL_CORE = PROMPTS.load_raw("soul/prompts/default_soul_core") + "\n"
 
 # SOUL_STYLE 三段：对话风格 / 行为原则 / 输出样式（输出样式初始为空）
-DEFAULT_SOUL_STYLE_DIALOG = """## 对话风格
-- 中文对话，技术术语保持英文
-- 不加客套，直接切入
-- 语气简洁直接
+DEFAULT_SOUL_STYLE_DIALOG = (
+    PROMPTS.load_raw("soul/prompts/default_soul_style_dialog") + "\n")
 
-## 行为原则
-- 优先自己找答案
-- 发现矛盾主动提醒
-- 不做无条件附和
-"""
+DEFAULT_SOUL_STYLE_OUTPUT = (
+    PROMPTS.load_raw("soul/prompts/default_soul_style_output") + "\n")
 
-DEFAULT_SOUL_STYLE_OUTPUT = """## 输出样式
-"""
-
-# 输出样式段末尾固定附加的防僵化元规则
+# 输出样式段末尾固定附加的防僵化元规则（前置换行用于与正文分隔）
 OUTPUT_STYLE_META_RULE = (
-    "\n（元规则：当用户在当次问题中明确要求了具体格式或长度时，"
-    "优先遵循当次要求，画像作为默认倾向让位于显式指令。）"
-)
+    "\n" + PROMPTS.load_raw("soul/prompts/output_style_meta_rule"))

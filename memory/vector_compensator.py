@@ -13,6 +13,7 @@ import asyncio
 import logging
 from datetime import datetime
 from typing import Awaitable, Callable
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.vector_compensator")
 
@@ -81,7 +82,7 @@ class VectorCompensator:
                     self.db.execute(
                         "UPDATE vectors SET vector_status='failed', updated_at=? "
                         "WHERE memory_id=?",
-                        (datetime.now().isoformat(timespec="seconds"), mid))
+                        (now_cst().isoformat(timespec="seconds"), mid))
                     self.notify("vector_failed", f"记忆 {mid} 向量化失败：{e}")
             return len(ids)
 

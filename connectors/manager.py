@@ -18,6 +18,7 @@ from tools.base import ToolSpec
 
 from .mcp_client import MCPClient
 from .tool_filter import apply_tool_filter
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.connectors")
 
@@ -52,7 +53,7 @@ class ConnectorManager:
             "tools_filter,status,created_at) VALUES(?,?,?,?,?,?,?,'connected',?)",
             (cid, name, transport, json.dumps(clean_config, ensure_ascii=False), cred_id,
              timeout, json.dumps(tools_filter or {}, ensure_ascii=False),
-             datetime.now().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds")))
         try:
             await self.connect(cid)
         except Exception:  # noqa: BLE001

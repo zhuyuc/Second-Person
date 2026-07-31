@@ -11,6 +11,7 @@ import re
 from datetime import datetime
 
 from infrastructure.prompt_loader import PROMPTS
+from infrastructure.timeutil import now_cst
 
 # 隐式关键词词表（本地正则匹配，零成本）
 IMPLICIT_KEYWORDS = [
@@ -45,18 +46,13 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
     disputed = [m for m in memories if m.get("confidence") == "disputed"]
     if disputed:
         names = "、".join(m.get("title", m.get("id", "")) for m in disputed[:3])
-        ctx_parts.append(
-            f"注意：命中的记忆「{names}」存在矛盾（disputed）。请在回复中主动简要告知"
-            "用户存在不一致的信息来源，并建议到记忆中心·健康度 Tab 的矛盾处理区裁决。")
+        ctx_parts.append(PROMPTS.render(
+            "agent/prompts/synth_disputed_notice", names=names))
     # 延迟导出文档：本次回复正文只会被导出为文档，不会在对话中展示，
     # 故正文只写文档内容本身，禁止对话式开场白/结尾或“手动另存为”等替代步骤
     if any(r.get("tool") == "generate_document" and r.get("deferred")
            for r in (tool_results or [])):
-        ctx_parts.append(
-            "重要：用户要求导出文档。你这次输出的全部内容会被直接写入文档文件，"
-            "不会在对话界面展示。因此请只写文档应有的完整正文内容本身："
-            "不要写对话式的开场白、结尾语（如‘以上内容已整理完成’‘好的，为您生成’），"
-            "不要叫用户手动复制/粘贴/另存为，也不要说自己没有生成文档的能力。")
+        ctx_parts.append(PROMPTS.load_raw("agent/prompts/synth_doc_export"))
     system = (PROMPTS.load_raw("agent/prompts/response_synth")
               + "\n\n" + "\n\n".join(ctx_parts))
     return [{"role": "system", "content": system},
@@ -133,7 +129,7 @@ class SignalCollector:
             (message_id, shape["char_count"], shape["paragraph_count"],
              shape["bullet_count"], shape["code_block_count"], shape["table_count"],
              shape["conclusion_position"], context_label,
-             datetime.now().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds")))
         return cur.lastrowid
 
     def backfill_reaction(self, message_id: int, implicit_reaction: str,

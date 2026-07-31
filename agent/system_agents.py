@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from infrastructure.json_repair import repair_json
 from infrastructure.prompt_loader import PROMPTS
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.sysagent")
 
@@ -35,7 +36,7 @@ class ReviewAgent:
         """读近 N 天对话原文 + 会话压缩摘要 + 新导入文档 → Distiller。
         超 context 上限时按时间（按天）切分为多个子任务串行。"""
         days = self.config.get("passive_review_interval_days", 3)
-        cutoff = (datetime.now() - timedelta(days=days)
+        cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         total = 0
         # 1) 近 N 天对话原文（按天切分）；携带用户赞/踩反馈作为提炼修正信号
@@ -319,10 +320,10 @@ class ProfileBuilder:
         except Exception as e:  # noqa: BLE001
             logger.warning("画像重建失败：%s", e)
             return False
-        fm_head = (f"---\nlast_rebuilt: {datetime.now().isoformat(timespec='seconds')}\n"
+        fm_head = (f"---\nlast_rebuilt: {now_cst().isoformat(timespec='seconds')}\n"
                    f"source_memory_count: {len(rows)}\n---\n")
         await self.fw.submit("profile", {"content": fm_head + resp["content"],
-                                         "rebuilt_at": datetime.now().isoformat()})
+                                         "rebuilt_at": now_cst().isoformat()})
         return True
 
     async def build_initial_soul(self, welcome_conversation: str,
@@ -371,7 +372,7 @@ class OutputStyleBuilder:
             "INSERT OR REPLACE INTO scheduled_tasks(task_id,name,schedule,status,"
             "last_run,next_run) VALUES('output_style_last_built','output_style_last_built',"
             "'','completed',?,'')",
-            (datetime.now().isoformat(timespec="seconds"),))
+            (now_cst().isoformat(timespec="seconds"),))
 
     def should_build(self) -> bool:
         """触发条件（统一表述）：signal<50 不执行；首次达 50 立即；
@@ -379,7 +380,7 @@ class OutputStyleBuilder:
         if not self.config.get("output_style_auto_evolve_enabled", True):
             return False
         # 回滚后 14 天内不自动更新（避免刚回滚又被覆盖）
-        cooldown = (datetime.now() - timedelta(days=14)
+        cooldown = (now_cst() - timedelta(days=14)
                     ).isoformat(timespec="seconds")
         rolled = self.db.query_one(
             "SELECT 1 FROM operation_logs WHERE operation='soul_style_rollback' "
@@ -397,7 +398,7 @@ class OutputStyleBuilder:
         except ValueError:
             return True
         interval = self.config.get("output_style_review_interval_days", 7)
-        if (datetime.now() - last_dt) >= timedelta(days=interval):
+        if (now_cst() - last_dt) >= timedelta(days=interval):
             return True
         batch = self.config.get("output_style_signal_batch_threshold", 100)
         new_signals = self.db.query_one(
@@ -416,7 +417,7 @@ class OutputStyleBuilder:
         if snap is None:
             return False
         window = self.config.get("output_style_signal_window_days", 30)
-        cutoff = (datetime.now() - timedelta(days=window)
+        cutoff = (now_cst() - timedelta(days=window)
                   ).isoformat(timespec="seconds")
         rows = self.db.query_all(
             "SELECT char_count,bullet_count,table_count,conclusion_position,"
