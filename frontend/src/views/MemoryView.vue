@@ -5,12 +5,14 @@ import { api } from '@/api/client'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useSessions } from '@/stores/sessions'
+import { useBusy } from '@/composables/useBusy'
 import KnowledgeGraph from '@/components/graph/KnowledgeGraph.vue'
 import { domainLabel, loadDomainLabels } from '@/utils/domainLabel'
 
 const router = useRouter()
 const toast = useToast()
 const confirm = useConfirm()
+const { busy, run } = useBusy()
 const sessStore = useSessions()
 const tab = ref(0)
 const tabs = ['知识图谱', '记忆列表', '时间线', '用户画像', '健康度', '知识库']
@@ -117,6 +119,17 @@ const CONF_MAP = { strong: '强', medium: '中', low: '弱', disputed: '争议' 
 const LIFE_MAP = { active: '活跃', stable: '稳定', stale: '过期', archived: '已归档', missing: '缺失' }
 const SRC_MAP = { memory: '对话记忆', knowledge: '外部知识' }
 const ATTR_MAP = { imported: '外部导入', verified: '已验证经验', inferred: '待验证推断' }
+// 用户画像维度状态中文化（未知值兜底显示原文）
+const DIM_STATUS = { active: '活跃', building: '积累中', stable: '稳定', mature: '成熟', sparse: '样本较少', empty: '暂无内容' }
+function dimStatus(s) { return DIM_STATUS[s] || s }
+// SOUL 风格来源中文化
+const SOUL_SRC = { dialog: '对话确认', auto: '自动演化' }
+// 健康度扣分维度中文映射（与 score_breakdown.reason 对应）
+const DEDUCT_MAP = {
+  disputed: '矛盾记忆', low_unconfirmed: '低置信未确认', stale: '过期记忆',
+  orphan: '孤立记忆', duplicate: '疑似重复', missing: 'md 文件缺失',
+  failed_writes: '写入失败',
+}
 
 async function loadProfile() {
   try {
@@ -169,14 +182,31 @@ async function confirmPending(pid, approved) {
 }
 async function loadHealth() { health.value = await api.get('/memory/health') }
 
-// 重复检测：并排对比两条疑似重复记忆
+// 重复检测：并排对比两条疑似重复记忆（携建议对象，弹窗内可直接裁决）
 const dupCompare = ref(null)
 async function openDupCompare(sug) {
   const [a, b] = await Promise.all([
     api.get('/memory/detail?id=' + sug.memory_a.id),
     api.get('/memory/detail?id=' + sug.memory_b.id),
   ])
-  dupCompare.value = { a, b }
+  dupCompare.value = { a, b, sug }
+}
+// 重复裁决（与矛盾处理四选一对齐）：keep_a / keep_b / keep_both / delete_both
+async function resolveDup(sug, res) {
+  const labels = {
+    keep_a: '已保留 A，删除 B', keep_b: '已保留 B，删除 A',
+    keep_both: '已确认非重复，两条均保留', delete_both: '已删除两条重复记忆',
+  }
+  if (res !== 'keep_both' && !await confirm.ask({
+    message: res === 'delete_both' ? '删除这两条记忆？此操作不可撤销。'
+      : `保留${res === 'keep_a' ? ' A ' : ' B '}并删除另一条？此操作不可撤销。`,
+    danger: true,
+  })) return
+  await api.post('/memory/lint/duplicates/resolve',
+    { suggestion_id: sug.id || sug, resolution: res })
+  dupCompare.value = null
+  toast.push('success', labels[res])
+  await refreshMemoryViews()
 }
 
 async function acceptSug(id) {
@@ -192,7 +222,24 @@ async function resolveConflict(cid, res) {
   conflictCompare.value = null
   await refreshMemoryViews()
 }
-async function runLint() { await api.post('/memory/lint/run', {}); toast.push('success', 'Lint 已执行'); await loadHealth() }
+// Lint 全量检查含矛盾逐对 LLM 判定，实测需十几秒以上：
+// 必须有进行中状态 + 完成后按分数变化给出明确反馈，否则用户以为按钮无效
+const lintRunning = ref(false)
+async function runLint() {
+  if (lintRunning.value) return
+  lintRunning.value = true
+  const prev = health.value?.health_score
+  toast.push('info', '健康检查已启动，含矛盾/重复的 AI 判定，预计需要十几秒…')
+  try {
+    await api.post('/memory/lint/run', {})
+    await refreshMemoryViews()
+    const cur = health.value?.health_score
+    toast.push('success', cur === prev ? `检查完成，健康度 ${cur} 分（无变化）`
+      : `检查完成，健康度 ${prev} → ${cur} 分`)
+  } finally {
+    lintRunning.value = false
+  }
+}
 async function buildOutputStyle() { await api.post('/output-style/build-now', {}); toast.push('success', '已触发提炼'); await loadProfile() }
 async function buildProfile() {
   const r = await api.post('/profile/build-now', {})
@@ -386,10 +433,27 @@ async function submitImportPreview(discardAll = false) {
     previewSubmitting.value = false
   }
 }
-async function deleteDoc(id) {
-  if (!await confirm.ask({ message: '删除该文档？已提炼的记忆不会自动删除，但会影响记忆重建完整性。', danger: true })) return
-  await api.del('/import/documents/' + id)
-  await loadDocs(); toast.push('success', '已删除')
+async function deleteDoc(d) {
+  const n = d.memory_count || 0
+  const r = await confirm.ask({
+    message: `删除文档「${d.filename}」？原始文件与来源溯源将被移除，且影响记忆重建完整性。`,
+    danger: true,
+    // 有提炼记忆时才展示级联勾选项；级联删除不可撤销，仅能靠备份找回
+    checkbox: n ? `同时删除由该文档提炼的 ${n} 条记忆（重要记忆将保留，此操作不可撤销）` : '',
+  })
+  if (!r) return
+  const cascade = !!(r && r.checked)
+  const res = await api.del('/import/documents/' + d.id + (cascade ? '?cascade=true' : ''))
+  await loadDocs()
+  if (cascade) {
+    toast.push(res.failed ? 'warning' : 'success',
+      `文档已删除，连带删除 ${res.deleted_memories} 条记忆`
+      + (res.kept_important ? `（保留 ${res.kept_important} 条重要记忆）` : '')
+      + (res.failed ? `，${res.failed} 条删除失败` : ''))
+    loadList() // 记忆列表/统计卡片同步刷新，图谱切回时按现有逻辑重拉
+  } else {
+    toast.push('success', '已删除')
+  }
 }
 function fmtSize(bytes) {
   if (!bytes) return '-'
@@ -431,7 +495,7 @@ onActivated(() => selectTab(tab.value))
       <div class="card">
         <div class="label">记忆总数</div>
         <div class="val">{{ stats.total_active + stats.total_stable + stats.total_stale || 0 }}</div>
-        <div class="muted">archived {{ stats.total_archived || 0 }}</div>
+        <div class="muted">已归档 {{ stats.total_archived || 0 }}</div>
       </div>
       <div class="card">
         <div class="label">重要记忆</div>
@@ -461,7 +525,7 @@ onActivated(() => selectTab(tab.value))
         <option value="archived">已归档</option>
         <option value="missing">缺失</option>
       </select>
-      <label class="fg" style="gap:4px;font-size:13px;cursor:pointer;white-space:nowrap">
+      <label class="fg" style="gap:4px;font-size:var(--fs-base);cursor:pointer;white-space:nowrap">
         <input type="checkbox" v-model="importantOnly" @change="loadList" /> 只看重要记忆
       </label>
     </div>
@@ -471,7 +535,7 @@ onActivated(() => selectTab(tab.value))
         <div>
           <div style="font-weight:500">{{ m.title }}</div>
           <div class="muted">{{ m.summary }}</div>
-          <div v-if="m.lifecycle === 'missing'" style="font-size:12px;color:var(--warntx);margin-top:4px">
+          <div v-if="m.lifecycle === 'missing'" style="font-size:var(--fs-sm);color:var(--warntx);margin-top:4px">
             <i class="ti ti-alert-triangle"></i> 文件丢失，可从备份恢复文件后自动重建，或删除此索引
           </div>
         </div>
@@ -490,8 +554,8 @@ onActivated(() => selectTab(tab.value))
   <!-- 时间线 -->
   <div v-else-if="tab === 2">
     <div class="fg" style="gap:8px;margin-bottom:12px;flex-wrap:wrap">
-      <button class="tab" :class="{ active: tlType === '' }" @click="tlType = ''; loadTimeline()">全部</button>
-      <button v-for="(label, key) in EVT_MAP" :key="key" class="tab" :class="{ active: tlType === key }"
+      <button class="chip" :class="{ active: tlType === '' }" @click="tlType = ''; loadTimeline()">全部</button>
+      <button v-for="(label, key) in EVT_MAP" :key="key" class="chip" :class="{ active: tlType === key }"
         @click="tlType = key; loadTimeline()">{{ label }}</button>
       <select v-model="tlDays" @change="loadTimeline" style="margin-left:auto">
         <option :value="7">近 7 天</option>
@@ -508,7 +572,7 @@ onActivated(() => selectTab(tab.value))
           <span class="badge badge-a">{{ EVT_MAP[t.event_type] || t.event_type }}</span>
           <span class="muted" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.summary ||
             t.detail }}</span>
-          <button v-if="tlLinkTarget(t)" style="font-size:11px;flex-shrink:0"
+          <button v-if="tlLinkTarget(t)" class="btn-xs" style="flex-shrink:0"
             @click.stop="openDetail(tlLinkTarget(t))"><i class="ti ti-link"></i> 查看关联</button>
           <span class="muted">{{ formatTime(t.event_time) }}</span>
         </div>
@@ -519,81 +583,86 @@ onActivated(() => selectTab(tab.value))
   <!-- 用户画像 -->
   <div v-else-if="tab === 3">
     <div class="row" style="margin-bottom:10px">
-      <div class="muted" style="font-weight:500;color:var(--acctx)">区一 · 用户画像</div>
-      <button style="font-size:12px" @click="buildProfile">手动提炼</button>
+      <div class="section-sub" style="margin-bottom:0">区一 · 用户画像</div>
+      <button class="btn-sm" @click="buildProfile">手动提炼</button>
     </div>
     <div v-if="!profile.dimensions.length" class="empty"><i class="ti ti-user"></i>用户画像积累中<br>系统在观察你的偏好</div>
     <div class="g2">
       <div v-for="(d, i) in profile.dimensions" :key="i" class="cw" style="cursor:pointer" @click="openDimDetail(d)">
-        <div class="row"><b>{{ d.name }}</b><span class="badge badge-g">{{ d.status }}</span></div>
+        <div class="row"><b>{{ d.name }}</b><span class="badge badge-g">{{ dimStatus(d.status) }}</span></div>
         <div class="dim-preview">{{ dimText(d) }}</div>
       </div>
     </div>
     <div class="sep"></div>
-    <div class="muted" style="margin-bottom:10px;font-weight:500;color:var(--acctx)">区二 · AI 人格</div>
+    <div class="section-sub">区二 · AI 人格</div>
     <div v-if="pendings.length" class="cw" style="border:1px solid var(--warntx);background:var(--warnbg)">
       <b style="color:var(--warntx)">待确认风格调整</b>
       <div v-for="p in pendings" :key="p.id" style="margin-top:8px">
         <div class="muted">触发：{{ p.original_text }}</div>
-        <div style="font-size:13px">提议：{{ p.proposed_change }}</div>
+        <div style="font-size:var(--fs-base)">提议：{{ p.proposed_change }}</div>
         <div class="fg" style="gap:6px;margin-top:6px">
-          <button style="font-size:11px" @click="confirmPending(p.id, true)">确认</button>
-          <button style="font-size:11px" @click="confirmPending(p.id, false)">忽略</button>
+          <button class="btn-xs" :disabled="busy('pend' + p.id)"
+            @click="run('pend' + p.id, () => confirmPending(p.id, true))">确认</button>
+          <button class="btn-xs" :disabled="busy('pend' + p.id)"
+            @click="run('pend' + p.id, () => confirmPending(p.id, false))">忽略</button>
         </div>
       </div>
     </div>
     <div class="cw">
       <div class="row"><b>SOUL_CORE 核心人格</b>
         <div class="fg" style="gap:6px">
-          <button style="font-size:12px" @click="openSoulCoreEdit"><i class="ti ti-edit"></i> 编辑</button>
-          <button style="font-size:12px" @click="resetSoulCore">恢复默认</button>
+          <button class="btn-sm" @click="openSoulCoreEdit"><i class="ti ti-edit"></i> 编辑</button>
+          <button class="btn-sm" :disabled="busy('resetSoul')" @click="run('resetSoul', resetSoulCore)"><i
+              v-if="busy('resetSoul')" class="ti ti-loader-2"></i> 恢复默认</button>
         </div>
       </div>
       <pre style="white-space:pre-wrap;margin-top:8px">{{ soul.soul_core }}</pre>
     </div>
     <div class="cw">
       <div class="tabs" style="margin-bottom:12px">
-        <button class="tab" :class="{ active: soulSource === 'dialog' }" @click="switchSoulSource('dialog')">对话确认
-          dialog</button>
-        <button class="tab" :class="{ active: soulSource === 'auto' }" @click="switchSoulSource('auto')">自动演化
-          auto</button>
+        <button class="tab" :class="{ active: soulSource === 'dialog' }"
+          @click="switchSoulSource('dialog')">对话确认</button>
+        <button class="tab" :class="{ active: soulSource === 'auto' }" @click="switchSoulSource('auto')">自动演化</button>
       </div>
       <!-- 当前序列实际内容：有则展示，无则明确告知暂无 -->
       <div style="margin-bottom:14px">
         <div v-for="s in currentStyleSections" :key="s.name" style="margin-bottom:10px">
           <div class="muted" style="font-weight:500;margin-bottom:4px">{{ s.name }}</div>
-          <pre v-if="s.text" style="white-space:pre-wrap;font-size:13px;color:var(--sec);margin:0">{{ s.text }}</pre>
-          <div v-else class="muted" style="font-size:13px">暂时还没有内容</div>
+          <pre v-if="s.text"
+            style="white-space:pre-wrap;font-size:var(--fs-base);color:var(--sec);margin:0">{{ s.text }}</pre>
+          <div v-else class="muted" style="font-size:var(--fs-base)">暂时还没有内容</div>
         </div>
       </div>
       <div v-if="!soulHistory.length" class="muted">暂无版本历史</div>
       <div v-for="h in soulHistory" :key="h.version" class="row"
-        style="padding:8px 0;border-bottom:.5px solid var(--bd)">
+        style="padding:8px 0;border-bottom:1px solid var(--bd)">
         <div><b>v{{ h.version }}</b> <span v-if="h.current" class="badge badge-a">当前</span>
           <div class="muted">{{ h.diff_summary }}</div>
         </div>
         <div class="fg" style="gap:6px">
-          <button style="font-size:11px" @click="showDiff(h.version)">对比</button>
-          <button v-if="!h.current" style="font-size:11px" @click="rollback(h.version)">回滚</button>
+          <button class="btn-xs" @click="showDiff(h.version)">对比</button>
+          <button v-if="!h.current" class="btn-xs" :disabled="busy('rb' + h.version)"
+            @click="run('rb' + h.version, () => rollback(h.version))">回滚</button>
         </div>
       </div>
     </div>
     <div class="sep"></div>
-    <div class="muted" style="margin-bottom:10px;font-weight:500;color:var(--acctx)">区三 · 输出样式画像</div>
+    <div class="section-sub">区三 · 输出样式画像</div>
     <div class="cw">
       <div class="row"><b>当前画像</b>
         <div class="fg" style="gap:8px">
-          <label class="fg" style="gap:4px;font-size:12px;cursor:pointer;white-space:nowrap">
+          <label class="fg" style="gap:4px;font-size:var(--fs-sm);cursor:pointer;white-space:nowrap">
             <input type="checkbox" :checked="outputStyle.auto_evolve_enabled" @change="toggleAutoEvolve" />
             自动演化
           </label>
-          <button style="font-size:12px" @click="buildOutputStyle">手动提炼</button>
+          <button class="btn-sm" :disabled="busy('buildOut')" @click="run('buildOut', buildOutputStyle)"><i
+              v-if="busy('buildOut')" class="ti ti-loader-2"></i> 手动提炼</button>
         </div>
       </div>
       <div style="margin-top:8px;color:var(--sec)">{{ outputStyle.profile_text || '（积累中，信号数 ' +
         (outputStyle.signal_count || 0) + '/50）' }}</div>
       <!-- 信号积累进度：已采集 / 上次提炼 / 下次触发条件 -->
-      <div class="muted" style="margin-top:10px;font-size:12px">
+      <div class="muted" style="margin-top:10px;font-size:var(--fs-sm)">
         已采集 {{ outputStyle.signal_count || 0 }} 条信号
         <template v-if="outputStyle.last_built"> · 上次提炼 {{ formatTime(outputStyle.last_built) }}</template>
         <template v-if="outputStyle.is_cold_start"> · 首次提炼需满 50 条</template>
@@ -621,12 +690,21 @@ onActivated(() => selectTab(tab.value))
               health.health_score }}</text>
         </svg>
         <div class="muted">健康度</div>
-        <button style="margin-top:8px;font-size:12px" @click="runLint">立即检查</button>
+        <button class="btn-sm" style="margin-top:8px" :disabled="lintRunning" @click="runLint">
+          <i v-if="lintRunning" class="ti ti-loader-2"></i> {{ lintRunning ? '检查中…' : '立即检查' }}</button>
+        <!-- 扣分原因：不满 100 分时明示哪一项在扣分，消除“不知道哪里有问题” -->
+        <div v-if="health.health_score < 100 && (health.score_breakdown || []).some(b => b.deduct > 0)"
+          style="margin-top:8px;font-size:var(--fs-xs);line-height:1.6">
+          <div v-for="b in health.score_breakdown.filter(b => b.deduct > 0)" :key="b.reason"
+            style="color:var(--warntx)">
+            {{ DEDUCT_MAP[b.reason] || b.reason }} {{ b.count }} 条，扣 {{ b.deduct }} 分
+          </div>
+        </div>
       </div>
       <div class="card">
         <div class="label">记忆总数</div>
         <div class="val">{{ (health.stats.total || 0) }}</div>
-        <div class="muted">archived {{ health.stats.archived || 0 }} 单列</div>
+        <div class="muted">已归档 {{ health.stats.archived || 0 }} 单列</div>
       </div>
       <div class="card">
         <div class="label">待确认 / 矛盾</div>
@@ -642,13 +720,13 @@ onActivated(() => selectTab(tab.value))
     <div v-if="conflicts.length" class="cw">
       <div class="row" style="justify-content:space-between;align-items:center">
         <b>矛盾记忆</b>
-        <span class="muted" style="font-size:12px">{{ conflicts.length }} 条待处理</span>
+        <span class="muted" style="font-size:var(--fs-sm)">{{ conflicts.length }} 条待处理</span>
       </div>
       <div v-for="cf in conflicts" :key="cf.conflict_id" class="cw" style="margin-top:8px">
         <div class="row" style="justify-content:space-between;align-items:center">
           <div style="font-weight:500;cursor:pointer;flex:1;min-width:0" @click="openConflictCompare(cf)">
             {{ cf.title }}
-            <span class="muted" style="font-size:11px;margin-left:8px"><i class="ti ti-columns"></i> 查看对比</span>
+            <span class="muted" style="font-size:var(--fs-xs);margin-left:8px"><i class="ti ti-columns"></i> 查看对比</span>
           </div>
         </div>
       </div>
@@ -657,7 +735,7 @@ onActivated(() => selectTab(tab.value))
     <div v-if="health" class="cw">
       <b>Lint 检查明细</b>
       <div v-for="chk in health.lint_details.filter(c => !c.actionable)" :key="chk.check" class="row"
-        style="padding:6px 0;border-bottom:.5px solid var(--bd)">
+        style="padding:6px 0;border-bottom:1px solid var(--bd)">
         <span>{{ chk.check }} <span class="muted">· {{ chk.desc }}</span></span>
         <span class="badge" :class="chk.status === 'ok' ? 'badge-g' : ''"
           :style="chk.status === 'warning' && chk.count ? 'color:var(--warntx)' : ''">{{ chk.count }}</span>
@@ -672,14 +750,19 @@ onActivated(() => selectTab(tab.value))
             sug.memory_b?.title || sug.memory_b?.id }}</template>
           <template v-else>{{ sug.id || sug }}</template>
         </span>
-        <button v-if="chk.check === '孤立检测'" style="font-size:11px" @click="openDetail(sug.memory_id, sug)"><i
+        <button v-if="chk.check === '孤立检测'" class="btn-xs" @click="openDetail(sug.memory_id, sug)"><i
             class="ti ti-eye"></i>
           查看</button>
-        <template v-else-if="chk.check === '重复检测'">
-          <button style="font-size:11px" @click="openDupCompare(sug)"><i class="ti ti-columns"></i> 对比查看</button>
+        <!-- 重复检测：列表行仅入口按钮，四选一裁决在对比弹窗内完成 -->
+        <template v-if="chk.check === '重复检测'">
+          <button class="btn-xs" @click="openDupCompare(sug)"><i class="ti ti-columns"></i> 对比查看</button>
         </template>
-        <button style="font-size:11px" @click="acceptSug(sug.id || sug)">采纳</button>
-        <button style="font-size:11px" @click="dismissSug(sug.id || sug)">忽略</button>
+        <template v-else>
+          <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
+            @click="run('sug' + (sug.id || sug), () => acceptSug(sug.id || sug))">采纳</button>
+          <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
+            @click="run('sug' + (sug.id || sug), () => dismissSug(sug.id || sug))">忽略</button>
+        </template>
       </div>
     </div>
   </div>
@@ -703,7 +786,8 @@ onActivated(() => selectTab(tab.value))
                 :style="{ width: docOverallPct + '%', height: '100%', background: 'var(--acctx)', transition: '.25s' }">
               </div>
             </div>
-            <span class="muted" style="font-size:11px;min-width:32px;text-align:right">{{ docOverallPct }}%</span>
+            <span class="muted" style="font-size:var(--fs-xs);min-width:32px;text-align:right">{{ docOverallPct
+            }}%</span>
           </div>
           <div class="doc-queue">
             <div v-for="(q, i) in docQueue" :key="i" class="doc-queue-item" :class="q.status">
@@ -738,36 +822,51 @@ onActivated(() => selectTab(tab.value))
           formatTime(d.imported_at) }}</div>
       </div>
       <div class="fg" style="gap:6px;flex-shrink:0">
-        <button style="font-size:12px" @click="openDocDetail(d.id)"><i class="ti ti-eye"></i>
+        <button class="btn-sm" :disabled="busy('docV' + d.id)" @click="run('docV' + d.id, () => openDocDetail(d.id))"><i
+            class="ti ti-eye"></i>
           查看</button>
-        <button class="dang" style="font-size:12px" @click="deleteDoc(d.id)"><i class="ti ti-trash"></i>
+        <button class="btn-sm btn-danger" @click="deleteDoc(d)"><i class="ti ti-trash"></i>
           删除</button>
       </div>
     </div>
   </div>
 
   <!-- 记忆详情弹窗（可从文档详情/知识图谱抽屉等二级弹窗内打开，需置于其上层） -->
-  <div v-if="detail" class="overlay" style="z-index:130" @click.self="detail = null">
+  <div v-if="detail" class="overlay" style="z-index:var(--z-modal-2)" @click.self="detail = null">
     <div class="modal">
       <div class="mt">记忆详情</div>
-      <h3 style="font-size:16px;margin-bottom:8px">{{ detail.frontmatter?.title }}</h3>
+      <h3 class="modal-subtitle">{{ detail.frontmatter?.title }}</h3>
       <!-- missing：文件丢失提示 -->
       <div v-if="detail.degraded || detail.frontmatter?.lifecycle === 'missing'" class="banner"
         style="background:var(--warnbg);color:var(--warntx);margin-bottom:12px">
         <i class="ti ti-alert-triangle"></i> 该记忆的 md 文件丢失。可从备份恢复文件后自动重建索引，或直接删除此索引。
       </div>
-      <!-- frontmatter 元数据 -->
-      <div class="fg" style="gap:6px;margin-bottom:10px;flex-wrap:wrap;font-size:12px">
-        <span v-if="detail.frontmatter?.domain" class="badge">领域：{{ domainLabel(detail.frontmatter.domain) }}</span>
-        <span v-if="detail.frontmatter?.source_type" class="badge">来源：{{ SRC_MAP[detail.frontmatter.source_type] ||
-          detail.frontmatter.source_type }}</span>
-        <span v-if="detail.frontmatter?.created_by" class="badge">创建方：{{ detail.frontmatter.created_by ===
-          'user_explicit' ? '用户主动' : detail.frontmatter.created_by === 'import' ? '导入' : '提炼引擎' }}</span>
-        <span class="badge">创建：{{ detail.frontmatter?.created_at || '-' }}</span>
-        <span class="badge">更新：{{ detail.frontmatter?.updated_at || '-' }}</span>
-        <span class="badge">被引用 {{ detail.access_count || 0 }} 次</span>
-        <span v-if="detail.last_accessed" class="badge">最近命中：{{ formatTime(detail.last_accessed) }}</span>
-      </div>
+      <!-- frontmatter 元数据（键值对展示，避免 badge 标签墙） -->
+      <dl class="kv">
+        <template v-if="detail.frontmatter?.domain">
+          <dt>领域</dt>
+          <dd>{{ domainLabel(detail.frontmatter.domain) }}</dd>
+        </template>
+        <template v-if="detail.frontmatter?.source_type">
+          <dt>来源</dt>
+          <dd>{{ SRC_MAP[detail.frontmatter.source_type] || detail.frontmatter.source_type }}</dd>
+        </template>
+        <template v-if="detail.frontmatter?.created_by">
+          <dt>创建方</dt>
+          <dd>{{ detail.frontmatter.created_by === 'user_explicit' ? '用户主动' : detail.frontmatter.created_by === 'import'
+            ? '导入' : '提炼引擎' }}</dd>
+        </template>
+        <dt>创建</dt>
+        <dd>{{ detail.frontmatter?.created_at || '-' }}</dd>
+        <dt>更新</dt>
+        <dd>{{ detail.frontmatter?.updated_at || '-' }}</dd>
+        <dt>被引用</dt>
+        <dd>{{ detail.access_count || 0 }} 次</dd>
+        <template v-if="detail.last_accessed">
+          <dt>最近命中</dt>
+          <dd>{{ formatTime(detail.last_accessed) }}</dd>
+        </template>
+      </dl>
       <div class="label">摘要</div>
       <p style="color:var(--sec);margin-bottom:12px">{{ detail.summary }}</p>
       <div class="label">详情</div>
@@ -785,7 +884,7 @@ onActivated(() => selectTab(tab.value))
           <option value="stable">稳定</option>
           <option value="stale">过期</option>
         </select>
-        <label class="fg" style="gap:4px;font-size:13px;cursor:pointer">
+        <label class="fg" style="gap:4px;font-size:var(--fs-base);cursor:pointer">
           <input type="checkbox" :checked="!!detail.frontmatter?.is_important"
             @change="e => saveAttr('is_important', e.target.checked)" /> 重要记忆
         </label>
@@ -803,7 +902,7 @@ onActivated(() => selectTab(tab.value))
         <div class="label">变更历史（{{ detail.change_history.length }}）</div>
         <div style="max-height:150px;overflow-y:auto;margin-bottom:12px">
           <div v-for="(h, hi) in detail.change_history" :key="hi" class="muted"
-            style="font-size:13px;padding:4px 0;border-bottom:1px solid var(--bd)">{{ h }}</div>
+            style="font-size:var(--fs-base);padding:4px 0;border-bottom:1px solid var(--bd)">{{ h }}</div>
         </div>
       </div>
       <!-- 被引用记录：记忆资产的使用凭证（可跳转回引用它的对话） -->
@@ -811,11 +910,11 @@ onActivated(() => selectTab(tab.value))
         <div class="label">被引用记录（{{ detail.citations.length }}）</div>
         <div style="max-height:180px;overflow-y:auto;margin-bottom:12px">
           <div v-for="(ct, ci) in detail.citations" :key="ci" class="fg"
-            style="gap:8px;padding:6px 0;font-size:13px;border-bottom:1px solid var(--bd)">
+            style="gap:8px;padding:6px 0;font-size:var(--fs-base);border-bottom:1px solid var(--bd)">
             <span class="muted" style="flex-shrink:0">{{ formatTime(ct.cited_at) }}</span>
             <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="ct.session_title">{{
               ct.session_title }}</span>
-            <button style="font-size:11px;flex-shrink:0" @click="jumpToSession(ct.session_id)">
+            <button class="btn-xs" style="flex-shrink:0" @click="jumpToSession(ct.session_id)">
               <i class="ti ti-message"></i> 查看对话</button>
           </div>
         </div>
@@ -823,22 +922,25 @@ onActivated(() => selectTab(tab.value))
       <div class="fg" style="justify-content:flex-end;gap:8px">
         <!-- 从 Lint 建议打开时：支持在详情内直接采纳/忽略该建议 -->
         <template v-if="detailSug">
-          <button class="btn-primary" @click="acceptDetailSug"><i class="ti ti-check"></i> 采纳</button>
-          <button @click="dismissDetailSug">忽略</button>
+          <button class="btn-primary" :disabled="busy('accSug')" @click="run('accSug', acceptDetailSug)"><i
+              v-if="busy('accSug')" class="ti ti-loader-2"></i> 采纳</button>
+          <button :disabled="busy('disSug')" @click="run('disSug', dismissDetailSug)">忽略</button>
         </template>
         <button @click="detail = null">关闭</button>
-        <button v-if="detail.frontmatter?.lifecycle === 'archived'" @click="restore(detail.id)">
+        <button v-if="detail.frontmatter?.lifecycle === 'archived'" :disabled="busy('mAct')"
+          @click="run('mAct', () => restore(detail.id))">
           <i class="ti ti-restore"></i> 恢复</button>
-        <button v-else-if="detail.frontmatter?.lifecycle !== 'missing' && !detail.degraded"
-          @click="archive(detail.id)">归档</button>
-        <button class="dang" @click="del(detail.id)">{{ detail.degraded || detail.frontmatter?.lifecycle === 'missing'
+        <button v-else-if="detail.frontmatter?.lifecycle !== 'missing' && !detail.degraded" :disabled="busy('mAct')"
+          @click="run('mAct', () => archive(detail.id))">归档</button>
+        <button class="btn-danger" @click="del(detail.id)">{{ detail.degraded || detail.frontmatter?.lifecycle ===
+          'missing'
           ? '删除索引' : '删除' }}</button>
       </div>
     </div>
   </div>
   <!-- 导入预览确认弹窗（silent_doc_import=false） -->
-  <div v-if="importPreview" class="overlay" style="z-index:140">
-    <div class="modal" style="max-width:640px">
+  <div v-if="importPreview" class="overlay" style="z-index:var(--z-modal-2)">
+    <div class="modal modal-lg">
       <div class="mt">确认导入内容</div>
       <div class="muted" style="margin-bottom:10px">「{{ importPreview.filename }}」提炼出 {{ importPreview.items.length
       }} 条候选记忆，勾选需要写入的条目（未勾选的将丢弃）：</div>
@@ -881,18 +983,19 @@ onActivated(() => selectTab(tab.value))
       <div class="mt">编辑 SOUL_CORE 核心人格</div>
       <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 核心人格影响全局行为，保存前会二次确认，下次会话生效。</div>
       <textarea v-model="soulCoreDraft"
-        style="width:100%;height:280px;font-family:var(--mono);font-size:12px"></textarea>
+        style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
       <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
         <button @click="showSoulCoreEdit = false">取消</button>
-        <button class="btn-primary" @click="saveSoulCore">保存</button>
+        <button class="btn-primary" :disabled="busy('saveSoul')" @click="run('saveSoul', saveSoulCore)"><i
+            v-if="busy('saveSoul')" class="ti ti-loader-2"></i> 保存</button>
       </div>
     </div>
   </div>
   <!-- 知识库文档详情弹窗 -->
-  <div v-if="docDetail" class="overlay" style="z-index:110" @click.self="docDetail = null">
+  <div v-if="docDetail" class="overlay" style="z-index:var(--z-modal)" @click.self="docDetail = null">
     <div class="modal">
       <div class="mt">文档详情</div>
-      <h3 style="font-size:16px;margin-bottom:8px">
+      <h3 class="modal-subtitle">
         <i class="ti ti-file-text" style="margin-right:6px;color:var(--acctx)"></i>{{ docDetail.filename }}
       </h3>
       <div class="muted" style="margin-bottom:12px">{{ fmtSize(docDetail.size) }} · 提炼 {{ docDetail.memory_count }} 条记忆
@@ -900,7 +1003,7 @@ onActivated(() => selectTab(tab.value))
         {{ formatTime(docDetail.imported_at) }}</div>
       <div class="label">文档正文</div>
       <pre
-        style="white-space:pre-wrap;max-height:280px;overflow:auto;margin-bottom:12px;background:var(--s1);padding:12px;border-radius:8px;font-family:var(--mono);font-size:12px">
+        style="white-space:pre-wrap;max-height:280px;overflow:auto;margin-bottom:12px;background:var(--surface-2);padding:12px;border-radius:8px;font-family:var(--mono);font-size:var(--fs-sm)">
       {{ docDetail.content || '（无法解析正文或内容为空）' }}</pre>
       <div class="label">提炼的记忆（{{ docDetail.memories.length }}）</div>
       <div v-for="m in docDetail.memories" :key="m.id" class="cw" style="cursor:pointer;padding:12px"
@@ -914,11 +1017,11 @@ onActivated(() => selectTab(tab.value))
         <div class="label" style="margin-top:12px">被引用记录（{{ docDetail.citations.length }}）</div>
         <div style="max-height:180px;overflow-y:auto">
           <div v-for="(ct, ci) in docDetail.citations" :key="ci" class="fg"
-            style="gap:8px;padding:6px 0;font-size:13px;border-bottom:1px solid var(--bd)">
+            style="gap:8px;padding:6px 0;font-size:var(--fs-base);border-bottom:1px solid var(--bd)">
             <span class="muted" style="flex-shrink:0">{{ formatTime(ct.cited_at) }}</span>
             <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
               :title="ct.memory_title + ' · ' + ct.session_title">{{ ct.memory_title }} · {{ ct.session_title }}</span>
-            <button style="font-size:11px;flex-shrink:0" @click="jumpToSession(ct.session_id)">
+            <button class="btn-xs" style="flex-shrink:0" @click="jumpToSession(ct.session_id)">
               <i class="ti ti-message"></i> 查看对话</button>
           </div>
         </div>
@@ -928,20 +1031,51 @@ onActivated(() => selectTab(tab.value))
       </div>
     </div>
   </div>
-  <!-- 重复检测：并排对比弹窗 -->
-  <div v-if="dupCompare" class="overlay" style="z-index:110" @click.self="dupCompare = null">
-    <div class="modal" style="max-width:860px;width:92vw">
-      <div class="mt">疑似重复对比</div>
-      <div class="g2">
-        <div v-for="(m, k) in [dupCompare.a, dupCompare.b]" :key="k" class="cw" style="margin:0">
-          <div class="row" style="margin-bottom:6px">
-            <b>{{ k === 0 ? 'A' : 'B' }} · {{ m.frontmatter?.title }}</b>
-            <span class="badge badge-a">{{ CONF_MAP[m.frontmatter?.confidence] || m.frontmatter?.confidence }}</span>
+  <!-- 重复检测：并排对比弹窗（裁决按钮与信息维度均与矛盾对比弹窗对齐） -->
+  <div v-if="dupCompare" class="overlay" style="z-index:var(--z-modal)" @click.self="dupCompare = null">
+    <div class="modal modal-xl">
+      <div class="row"
+        style="margin-bottom:14px;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+        <span class="mt" style="margin:0">疑似重复对比</span>
+        <div class="fg" style="gap:6px">
+          <button class="btn-xs" :disabled="busy('dup')"
+            @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_a'))">保留 A</button>
+          <button class="btn-xs" :disabled="busy('dup')"
+            @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_b'))">保留 B</button>
+          <button class="btn-xs btn-primary" :disabled="busy('dup')"
+            @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_both'))">都保留</button>
+          <button class="btn-xs btn-danger" :disabled="busy('dup')"
+            @click="run('dup', () => resolveDup(dupCompare.sug, 'delete_both'))">全部删除</button>
+        </div>
+      </div>
+      <div class="g2" style="gap:16px;align-items:stretch">
+        <div v-for="(m, k) in [dupCompare.a, dupCompare.b]" :key="k" class="cw"
+          style="margin:0;display:flex;flex-direction:column;min-height:0">
+          <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
+            <b :style="{ color: k === 0 ? 'var(--acctx)' : 'var(--warntx)' }">记忆 {{ k === 0 ? 'A' : 'B' }}</b>
+            <button v-if="m" class="btn-xs" @click.stop="openDetail(m.id); dupCompare = null">
+              <i class="ti ti-external-link"></i> 查看来源
+            </button>
           </div>
-          <div class="label">摘要</div>
-          <p style="color:var(--sec);margin-bottom:10px">{{ m.summary }}</p>
-          <div class="label">详情</div>
-          <p style="color:var(--sec);white-space:pre-wrap;max-height:240px;overflow:auto">{{ m.detail }}</p>
+          <template v-if="m">
+            <div style="font-weight:500;font-size:var(--fs-md);margin-bottom:8px">{{ m.frontmatter?.title || m.id }}
+            </div>
+            <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:var(--fs-xs)">
+              <span class="badge">{{ CONF_MAP[m.frontmatter?.confidence] || m.frontmatter?.confidence }}</span>
+              <span class="badge">{{ LIFE_MAP[m.frontmatter?.lifecycle] || m.frontmatter?.lifecycle }}</span>
+              <span v-if="m.frontmatter?.domain" class="badge">{{ domainLabel(m.frontmatter.domain) }}</span>
+              <span v-if="m.frontmatter?.source_type" class="badge">{{ SRC_MAP[m.frontmatter.source_type] ||
+                m.frontmatter.source_type }}</span>
+              <span class="muted">{{ m.frontmatter?.created_at }}</span>
+              <span class="muted">引用 {{ m.access_count || 0 }} 次</span>
+            </div>
+            <p
+              style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
+              {{ m.summary }}
+
+              {{ m.detail }}</p>
+          </template>
+          <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">记忆不存在</div>
         </div>
       </div>
       <div class="fg" style="justify-content:flex-end;margin-top:16px">
@@ -950,21 +1084,23 @@ onActivated(() => selectTab(tab.value))
     </div>
   </div>
   <!-- 矛盾记忆：左右对比弹窗 -->
-  <div v-if="conflictCompare" class="overlay" style="z-index:120" @click.self="conflictCompare = null">
-    <div class="modal" style="max-width:960px;width:92vw">
+  <div v-if="conflictCompare" class="overlay" style="z-index:var(--z-modal)" @click.self="conflictCompare = null">
+    <div class="modal modal-xl">
       <div class="row"
         style="margin-bottom:14px;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
         <span class="mt" style="margin:0">矛盾记忆对比</span>
         <div class="fg" style="gap:6px">
-          <button style="font-size:11px" @click="resolveConflict(conflictCompare.conflict_id, 'keep_a')">保留 A</button>
-          <button style="font-size:11px" @click="resolveConflict(conflictCompare.conflict_id, 'keep_b')">保留 B</button>
-          <button style="font-size:11px" class="btn-primary"
-            @click="resolveConflict(conflictCompare.conflict_id, 'keep_both')">都保留</button>
-          <button style="font-size:11px" class="dang"
-            @click="resolveConflict(conflictCompare.conflict_id, 'delete_both')">全部删除</button>
+          <button class="btn-xs" :disabled="busy('conf')"
+            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_a'))">保留 A</button>
+          <button class="btn-xs" :disabled="busy('conf')"
+            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_b'))">保留 B</button>
+          <button class="btn-xs btn-primary" :disabled="busy('conf')"
+            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_both'))">都保留</button>
+          <button class="btn-xs btn-danger" :disabled="busy('conf')"
+            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'delete_both'))">全部删除</button>
         </div>
       </div>
-      <div v-if="conflictCompare.detectedAt" class="muted" style="font-size:12px;margin-bottom:12px">检测于 {{
+      <div v-if="conflictCompare.detectedAt" class="muted" style="font-size:var(--fs-sm);margin-bottom:12px">检测于 {{
         conflictCompare.detectedAt }}</div>
       <div v-if="conflictCompare.loading" class="muted" style="text-align:center;padding:40px 0">加载中…</div>
       <template v-else>
@@ -973,15 +1109,15 @@ onActivated(() => selectTab(tab.value))
           <div class="cw" style="margin:0;display:flex;flex-direction:column;min-height:0">
             <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
               <b style="color:var(--acctx)">记忆 A</b>
-              <button v-if="conflictCompare.detailA" style="font-size:11px"
+              <button v-if="conflictCompare.detailA" class="btn-xs"
                 @click.stop="openDetail(conflictCompare.detailA.id); conflictCompare = null">
                 <i class="ti ti-external-link"></i> 查看来源
               </button>
             </div>
             <template v-if="conflictCompare.detailA">
-              <div style="font-weight:500;font-size:14px;margin-bottom:8px">{{
+              <div style="font-weight:500;font-size:var(--fs-md);margin-bottom:8px">{{
                 conflictCompare.detailA.frontmatter?.title || conflictCompare.detailA.id }}</div>
-              <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:11px">
+              <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:var(--fs-xs)">
                 <span class="badge">{{ CONF_MAP[conflictCompare.detailA.frontmatter?.confidence] ||
                   conflictCompare.detailA.frontmatter?.confidence }}</span>
                 <span class="badge">{{ LIFE_MAP[conflictCompare.detailA.frontmatter?.lifecycle] ||
@@ -995,27 +1131,27 @@ onActivated(() => selectTab(tab.value))
                 <span class="muted">引用 {{ conflictCompare.detailA.access_count || 0 }} 次</span>
               </div>
               <p
-                style="color:var(--sec);font-size:13px;line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
+                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
                 {{ conflictCompare.detailA.summary }}
 
                 {{ conflictCompare.detailA.detail }}</p>
             </template>
-            <div v-else class="muted" style="font-size:13px;padding:20px 0;text-align:center">{{
+            <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">{{
               conflictCompare.sourceA?.content || '记忆不存在' }}</div>
           </div>
           <!-- 右侧：记忆 B -->
           <div class="cw" style="margin:0;display:flex;flex-direction:column;min-height:0">
             <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
               <b style="color:var(--warntx)">记忆 B</b>
-              <button v-if="conflictCompare.detailB" style="font-size:11px"
+              <button v-if="conflictCompare.detailB" class="btn-xs"
                 @click.stop="openDetail(conflictCompare.detailB.id); conflictCompare = null">
                 <i class="ti ti-external-link"></i> 查看来源
               </button>
             </div>
             <template v-if="conflictCompare.detailB">
-              <div style="font-weight:500;font-size:14px;margin-bottom:8px">{{
+              <div style="font-weight:500;font-size:var(--fs-md);margin-bottom:8px">{{
                 conflictCompare.detailB.frontmatter?.title || conflictCompare.detailB.id }}</div>
-              <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:11px">
+              <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:var(--fs-xs)">
                 <span class="badge">{{ CONF_MAP[conflictCompare.detailB.frontmatter?.confidence] ||
                   conflictCompare.detailB.frontmatter?.confidence }}</span>
                 <span class="badge">{{ LIFE_MAP[conflictCompare.detailB.frontmatter?.lifecycle] ||
@@ -1029,12 +1165,12 @@ onActivated(() => selectTab(tab.value))
                 <span class="muted">引用 {{ conflictCompare.detailB.access_count || 0 }} 次</span>
               </div>
               <p
-                style="color:var(--sec);font-size:13px;line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
+                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
                 {{ conflictCompare.detailB.summary }}
 
                 {{ conflictCompare.detailB.detail }}</p>
             </template>
-            <div v-else class="muted" style="font-size:13px;padding:20px 0;text-align:center">{{
+            <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">{{
               conflictCompare.sourceB?.content || '记忆不存在' }}</div>
           </div>
         </div>
@@ -1045,14 +1181,14 @@ onActivated(() => selectTab(tab.value))
     </div>
   </div>
   <!-- 用户画像维度详情弹窗 -->
-  <div v-if="dimDetail" class="overlay" style="z-index:120" @click.self="dimDetail = null">
+  <div v-if="dimDetail" class="overlay" style="z-index:var(--z-modal)" @click.self="dimDetail = null">
     <div class="modal">
       <div class="row" style="margin-bottom:14px">
         <span class="mt" style="margin:0">{{ dimDetail.name }}</span>
-        <span class="badge badge-g">{{ dimDetail.status }}</span>
+        <span class="badge badge-g">{{ dimStatus(dimDetail.status) }}</span>
       </div>
       <div v-for="(it, j) in dimDetail.items" :key="j"
-        style="margin-bottom:10px;color:var(--sec);font-size:14px;line-height:1.6">
+        style="margin-bottom:10px;color:var(--sec);font-size:var(--fs-md);line-height:1.6">
         · {{ it.text }} <span v-if="it.inferred" class="muted">[推断]</span>
       </div>
       <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:24px 12px">该维度暂无内容</div>

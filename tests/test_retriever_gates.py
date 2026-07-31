@@ -44,6 +44,9 @@ class _FakePalace:
     def get(self, mid):
         return self._rows.get(mid)
 
+    def get_many(self, ids):
+        return {mid: self._rows[mid] for mid in ids if mid in self._rows}
+
     def outlinks(self, mid):
         return [{"target_id": t} for t in self._links.get(mid, [])]
 

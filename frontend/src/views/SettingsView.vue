@@ -3,9 +3,11 @@ import { ref, onMounted, onActivated, computed } from 'vue'
 import { api } from '@/api/client'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
+import { useBusy } from '@/composables/useBusy'
 
 const toast = useToast()
 const confirm = useConfirm()
+const { busy, run } = useBusy()
 const tab = ref(0)
 const tabs = ['模型配置', '连接器', '接入渠道', '参数', '用量统计', '备份', '状态']
 
@@ -36,16 +38,44 @@ const BAR_W = computed(() => {
   return Math.max(6, Math.min(36, (TREND_W - 60) / n - 8))
 })
 const trendMax = computed(() => trend.value.reduce((m, t) => Math.max(m, t.tokens || 0), 0))
+// 模型配色：按全区间总消耗降序给模型分配稳定颜色，同一模型跨柱色一致
+const MODEL_PALETTE = [
+  '#4f9df7', '#34c759', '#ff9f0a', '#af52de', '#ff6482',
+  '#5ac8fa', '#ffd60a', '#30d158', '#bf5af2', '#8e8e93',
+]
+const modelColorMap = computed(() => {
+  const totals = {}
+  for (const t of trend.value)
+    for (const m of (t.models || [])) totals[m.name] = (totals[m.name] || 0) + m.tokens
+  const names = Object.keys(totals).sort((a, b) => totals[b] - totals[a])
+  const map = {}
+  names.forEach((n, i) => { map[n] = MODEL_PALETTE[i % MODEL_PALETTE.length] })
+  return map
+})
+// 图例：只展示当前区间有消耗的模型
+const trendLegend = computed(() =>
+  Object.keys(modelColorMap.value).map(name => ({ name, color: modelColorMap.value[name] })))
 const trendBars = computed(() => {
   const mx = trendMax.value || 1
   const y0 = TREND_H - 20  // bottom baseline (above labels)
+  const usable = y0 - 10
   return trend.value.map((t, i) => {
-    const h = Math.max(2, (t.tokens / mx) * (y0 - 10))
     const x = 40 + i * (BAR_W.value + 8)
-    return {
-      ...t, x, y: y0 - h, height: h, width: BAR_W.value,
-      color: 'var(--succtx)'
-    }  // 统一单色，不做峰值高亮
+    // 堆叠段：自底向上按模型依次堆叠，段高按 token 占总高比例
+    const models = t.models && t.models.length
+      ? t.models
+      : (t.tokens > 0 ? [{ name: '未知', tokens: t.tokens }] : [])
+    let cursor = y0
+    const segs = models.map(m => {
+      const h = (m.tokens / mx) * usable
+      cursor -= h
+      return {
+        name: m.name, tokens: m.tokens, x, y: cursor, height: h,
+        width: BAR_W.value, color: modelColorMap.value[m.name] || 'var(--succtx)'
+      }
+    })
+    const totalH = Math.max(0, (t.tokens / mx) * usable)
+    return { ...t, x, width: BAR_W.value, segs, y: y0 - totalH, height: totalH }
   })
 })
 
@@ -55,21 +85,34 @@ function dateLabel(t) {
   return raw.replace(/^(\d{2})-(\d{2}).*/, '$1/$2')
 }
 
+// 堆叠柱顶段：只圆上方两角，下方直角，与下段无缝衔接（保证整体感）
+function segPath(s) {
+  const r = Math.min(2, s.width / 2, s.height)
+  const { x, y, width: w, height: h } = s
+  return `M${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} `
+    + `Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} L${x},${y + h} Z`
+}
+
 // 横轴标签稀疏化：年视图（12个月）全部显示，日粒度每 3 个显示一个
 function labelVisible(i) {
   if (trendPeriod.value === 'year') return true
   return i % 3 === 0 || i === trendBars.value.length - 1
 }
 
-// hover 即时浮层：锚定在柱子正上方，贴边时自动内收防溢出
+// hover 即时浮层：固定在柱子正上方，展示当天总量 + 逐模型明细，贴边时自动内收防溢出
 const hoverTip = computed(() => {
   if (hoveredIdx.value === null) return null
   const b = trendBars.value[hoveredIdx.value]
   if (!b) return null
-  const w = 92
+  const rows = (b.models || []).map(m => ({
+    name: m.name, value: formatNum(m.tokens), color: modelColorMap.value[m.name] || 'var(--succtx)'
+  }))
+  const w = 168
+  const lineH = 15
+  const h = 22 + rows.length * lineH  // 标题行 + 逐模型行
   const x = Math.min(Math.max(b.x + b.width / 2 - w / 2, 2), TREND_W - w - 2)
-  const y = b.y - 26 < 2 ? b.y + 4 : b.y - 26
-  return { x, y, w, text: `${dateLabel(b)}：${formatNum(b.tokens)}` }
+  const y = Math.max(2, b.y - h - 6)
+  return { x, y, w, h, lineH, title: `${dateLabel(b)}·共 ${formatNum(b.tokens)}`, rows }
 })
 const status = ref(null)
 const showAddProvider = ref(false)
@@ -310,6 +353,21 @@ function formatTime(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+// 耗时按时分秒可读展示：不足 1 秒显示毫秒，其余省略为 0 的高位单位（如 15分23秒、4秒）
+function formatDuration(ms) {
+  if (ms == null || isNaN(ms)) return '-'
+  if (ms === 0) return '<1毫秒'
+  if (ms < 1000) return `${ms}毫秒`
+  let s = Math.floor(ms / 1000)
+  const h = Math.floor(s / 3600); s %= 3600
+  const m = Math.floor(s / 60); s %= 60
+  let out = ''
+  if (h) out += `${h}时`
+  if (m) out += `${m}分`
+  if (s || !out) out += `${s}秒`
+  return out
+}
+
 function taskLabel(s) {
   return {
     completed: '已完成', success: '已完成', running: '运行中',
@@ -352,10 +410,10 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 模型配置 -->
   <div v-if="tab === 0">
-    <div style="font-weight:500;margin-bottom:12px">任务-模型分配</div>
+    <div class="section-title">任务-模型分配</div>
     <div class="cw">
       <div v-for="task in ['chat', 'agent', 'intent', 'embedding', 'vision']" :key="task" class="row"
-        style="padding:8px 0;border-bottom:.5px solid var(--bd)">
+        style="padding:8px 0;border-bottom:1px solid var(--bd)">
         <div style="flex:1;min-width:0;padding-right:16px">
           <b>{{ TASK_NAMES[task] }}</b>
           <div class="muted">{{ TASK_DESC[task] }}</div>
@@ -368,7 +426,7 @@ onActivated(() => selectTab(tab.value))
         </select>
       </div>
     </div>
-    <div style="font-weight:500;margin:20px 0 12px">已添加的模型</div>
+    <div class="section-title mt">已添加的模型</div>
     <div v-for="p in providers" :key="p.id" class="cw">
       <div class="row">
         <div class="fg" style="gap:8px"><span class="dot" style="background:var(--succtx)"></span>
@@ -377,9 +435,10 @@ onActivated(() => selectTab(tab.value))
           </div>
         </div>
         <div class="fg" style="gap:12px"><span class="muted">¥{{ p.input_price || 0 }}/M · ¥{{ p.output_price || 0
-        }}/M</span>
-          <button style="font-size:12px" @click="openEdit(p)">编辑</button>
-          <button class="dang" style="font-size:12px" @click="delProvider(p.id)">删除</button>
+            }}/M</span>
+          <button class="btn-sm" :disabled="busy('editP' + p.id)"
+            @click="run('editP' + p.id, () => openEdit(p))">编辑</button>
+          <button class="btn-sm btn-danger" @click="delProvider(p.id)">删除</button>
         </div>
       </div>
     </div>
@@ -392,7 +451,7 @@ onActivated(() => selectTab(tab.value))
   <!-- 连接器 -->
   <div v-else-if="tab === 1">
     <div class="row" style="margin-bottom:12px"><b>已连接的系统</b>
-      <button style="font-size:12px" @click="showAddConn = true">+ 添加</button>
+      <button class="btn-sm" @click="showAddConn = true">+ 添加</button>
     </div>
     <div v-if="!connectors.length" class="empty"><i class="ti ti-plug"></i>还没有连接任何外部系统<br>通过 MCP 协议接入 GitHub、ERP 等</div>
     <div v-for="c in connectors" :key="c.id" class="cw">
@@ -406,9 +465,11 @@ onActivated(() => selectTab(tab.value))
           : '已停用' }}</span>
       </div>
       <div class="fg" style="gap:6px;margin-top:10px">
-        <button style="font-size:11px" @click="toggleConn(c)">{{ c.status === 'connected' ? '断开' : '连接' }}</button>
-        <button style="font-size:11px" @click="refreshConn(c.id)">刷新工具</button>
-        <button style="font-size:11px" class="dang" @click="delConn(c.id)">删除</button>
+        <button class="btn-xs" :disabled="busy('togC' + c.id)" @click="run('togC' + c.id, () => toggleConn(c))">{{
+          c.status === 'connected' ? '断开' : '连接' }}</button>
+        <button class="btn-xs" :disabled="busy('refC' + c.id)" @click="run('refC' + c.id, () => refreshConn(c.id))"><i
+            v-if="busy('refC' + c.id)" class="ti ti-loader-2"></i> 刷新工具</button>
+        <button class="btn-xs btn-danger" @click="delConn(c.id)">删除</button>
       </div>
     </div>
   </div>
@@ -427,21 +488,23 @@ onActivated(() => selectTab(tab.value))
         </div>
         <div class="fg" style="gap:8px">
           <span v-if="p.enabled" class="badge badge-g">已启用</span>
-          <button v-if="p.id !== 'web_default'" style="font-size:12px" @click="openChannelEdit(p)">编辑</button>
-          <button v-if="p.id !== 'web_default' && !p.enabled" style="font-size:12px"
-            @click="enablePlatform(p.id)">启用</button>
-          <button v-if="p.id !== 'web_default' && p.enabled" style="font-size:12px"
-            @click="disablePlatform(p.id)">禁用</button>
-          <button v-if="p.status === 'paused'" style="font-size:12px" @click="resumePlatform(p.id)">恢复</button>
+          <button v-if="p.id !== 'web_default'" class="btn-sm" :disabled="busy('editCh' + p.id)"
+            @click="run('editCh' + p.id, () => openChannelEdit(p))">编辑</button>
+          <button v-if="p.id !== 'web_default' && !p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
+            @click="run('plat' + p.id, () => enablePlatform(p.id))">启用</button>
+          <button v-if="p.id !== 'web_default' && p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
+            @click="run('plat' + p.id, () => disablePlatform(p.id))">禁用</button>
+          <button v-if="p.status === 'paused'" class="btn-sm" :disabled="busy('plat' + p.id)"
+            @click="run('plat' + p.id, () => resumePlatform(p.id))">恢复</button>
         </div>
       </div>
     </div>
-    <div style="font-weight:500;margin:20px 0 12px">添加渠道</div>
+    <div class="section-title mt">添加渠道</div>
     <div class="g3">
       <div v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom']" :key="pt" class="cw"
         style="text-align:center;cursor:pointer;padding:20px"
         @click="newChannel.platform_type = pt; showChannelCfg = true">
-        <i class="ti ti-plug" style="font-size:24px;color:var(--acctx)"></i>
+        <i class="ti ti-plug" style="font-size:var(--icon-lg);color:var(--acctx)"></i>
         <div style="font-weight:500;margin-top:8px">{{ PLATFORM_MAP[pt] || pt }}</div>
         <div class="muted">Bot 私聊接入</div>
       </div>
@@ -451,7 +514,7 @@ onActivated(() => selectTab(tab.value))
   <!-- 参数（schema 驱动） -->
   <div v-else-if="tab === 3">
     <div v-for="g in groups" :key="g" class="cw">
-      <div style="font-weight:500;margin-bottom:12px">{{ groupNames[g] }}</div>
+      <div class="section-title">{{ groupNames[g] }}</div>
       <div v-for="s in schemaByGroup(g)" :key="s.key" class="row" style="margin-bottom:12px;align-items:flex-start">
         <div style="flex:1;min-width:0;padding-right:16px">
           <b>{{ s.label }}</b>
@@ -470,7 +533,8 @@ onActivated(() => selectTab(tab.value))
     </div>
     <div class="fg" style="justify-content:flex-end;gap:8px">
       <button @click="resetParams">恢复默认</button>
-      <button @click="saveParams">保存设置</button>
+      <button class="btn-primary" :disabled="busy('saveParams')" @click="run('saveParams', saveParams)"><i
+          v-if="busy('saveParams')" class="ti ti-loader-2"></i> 保存设置</button>
     </div>
   </div>
 
@@ -484,11 +548,11 @@ onActivated(() => selectTab(tab.value))
     <template v-else>
       <!-- 口径筛选：来源/模型，作用于下方全部统计卡片与图表 -->
       <div class="fg" style="gap:8px;margin-bottom:12px;justify-content:flex-end">
-        <select v-model="usageSource" style="font-size:12px" @change="loadUsage">
+        <select v-model="usageSource" style="font-size:var(--fs-sm)" @change="loadUsage">
           <option value="">全部来源</option>
           <option v-for="s in sourceOptions" :key="s" :value="s">{{ sourceName(s) }}</option>
         </select>
-        <select v-model="usageModel" style="font-size:12px" @change="loadUsage">
+        <select v-model="usageModel" style="font-size:var(--fs-sm)" @change="loadUsage">
           <option value="">全部模型</option>
           <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
         </select>
@@ -512,7 +576,7 @@ onActivated(() => selectTab(tab.value))
         <div class="row" style="margin-bottom:8px"><span class="muted">今日预算</span><span
             :style="{ color: (usage.today_ratio || 0) >= 80 ? 'var(--warntx)' : '' }">{{ usage.today_ratio || 0
             }}%</span></div>
-        <div style="height:6px;border-radius:3px;background:var(--s1)">
+        <div style="height:6px;border-radius:3px;background:var(--surface-2)">
           <div
             :style="{ height: '6px', borderRadius: '3px', background: (usage.today_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.today_ratio || 0) + '%' }">
           </div>
@@ -520,7 +584,7 @@ onActivated(() => selectTab(tab.value))
         <div class="row" style="margin-top:14px;margin-bottom:8px"><span class="muted">本月预算</span><span
             :style="{ color: (usage.month_ratio || 0) >= 80 ? 'var(--warntx)' : '' }">{{ usage.month_ratio || 0
             }}%</span></div>
-        <div style="height:6px;border-radius:3px;background:var(--s1)">
+        <div style="height:6px;border-radius:3px;background:var(--surface-2)">
           <div
             :style="{ height: '6px', borderRadius: '3px', background: (usage.month_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.month_ratio || 0) + '%' }">
           </div>
@@ -531,7 +595,7 @@ onActivated(() => selectTab(tab.value))
         <div class="fg" style="justify-content:space-between;margin-bottom:14px">
           <div class="fg" style="gap:4px">
             <button v-for="p in [{ k: '30d', n: '近 30 天' }, { k: 'month', n: '本月' }, { k: 'year', n: '当年' }]" :key="p.k"
-              class="tab" :class="{ active: trendPeriod === p.k }" style="font-size:12px" @click="switchTrend(p.k)">{{
+              class="chip" :class="{ active: trendPeriod === p.k }" @click="switchTrend(p.k)">{{
                 p.n }}</button>
           </div>
         </div>
@@ -545,20 +609,43 @@ onActivated(() => selectTab(tab.value))
           <!-- Y 轴标签 -->
           <text v-for="y in [0, .25, .5, .75, 1]" :key="'yl' + y" :x="44" :y="TREND_H - 20 - (TREND_H - 30) * y + 3"
             text-anchor="end" font-size="8" fill="var(--muted)">{{ formatNum(Math.round(trendMax * y)) }}</text>
-          <!-- 零值柱不渲染，仅有消耗的天数才绘制矩形 -->
-          <rect v-for="(b, i) in trendBars" :key="b.label" v-show="b.tokens > 0" :x="b.x" :y="b.y" :width="b.width"
-            :height="b.height" :fill="b.color" rx="2" :style="{ opacity: hoveredIdx === i ? .75 : 1 }"
-            @mouseenter="hoveredIdx = i" @mouseleave="hoveredIdx = null" />
-          <!-- hover 即时浮层（跟随柱子，pointer-events 关闭防闪烁） -->
+          <!-- 零值柱不渲染；堆叠段顶段圆上角（path）、其余直角（rect），保证整体感 -->
+          <g v-for="(b, i) in trendBars" :key="b.label" v-show="b.tokens > 0" @mouseenter="hoveredIdx = i"
+            @mouseleave="hoveredIdx = null">
+            <template v-for="(s, si) in b.segs" :key="si">
+              <path v-if="si === b.segs.length - 1" :d="segPath(s)" :fill="s.color"
+                :style="{ opacity: hoveredIdx === i ? .75 : 1 }" />
+              <rect v-else :x="s.x" :y="s.y" :width="s.width" :height="s.height" :fill="s.color"
+                :style="{ opacity: hoveredIdx === i ? .75 : 1 }" />
+            </template>
+          </g>
+          <!-- hover 即时浮层（跟随柱子，pointer-events 关闭防闪烁，展示多模型明细） -->
           <g v-if="hoverTip" pointer-events="none">
-            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" height="20" rx="4" fill="#333" opacity=".92" />
-            <text :x="hoverTip.x + hoverTip.w / 2" :y="hoverTip.y + 13" text-anchor="middle" font-size="10" fill="#fff"
-              font-weight="500">{{ hoverTip.text }}</text>
+            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" :height="hoverTip.h" rx="4" fill="#333"
+              opacity=".92" />
+            <text :x="hoverTip.x + 8" :y="hoverTip.y + 14" font-size="10" fill="#fff" font-weight="600">{{
+              hoverTip.title }}</text>
+            <g v-for="(r, ri) in hoverTip.rows" :key="ri">
+              <rect :x="hoverTip.x + 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 2" width="7" height="7" rx="1.5"
+                :fill="r.color" />
+              <text :x="hoverTip.x + 19" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" font-size="9" fill="#eee">{{
+                r.name }}</text>
+              <text :x="hoverTip.x + hoverTip.w - 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" text-anchor="end"
+                font-size="9" fill="#fff">{{ r.value }}</text>
+            </g>
           </g>
           <!-- 横轴标签：年视图逐月全显，日粒度每 3 个显示一个 -->
           <text v-for="(b, i) in trendBars" :key="b.label + 'l'" :x="b.x + b.width / 2" :y="TREND_H - 3"
             text-anchor="middle" font-size="9" fill="var(--muted)" v-show="labelVisible(i)">{{ dateLabel(b) }}</text>
         </svg>
+        <!-- 模型图例：颜色 ↔ 模型名，与堆叠段颜色一致 -->
+        <div v-if="trendLegend.length" class="fg" style="gap:12px;flex-wrap:wrap;margin-top:8px;font-size:var(--fs-xs)">
+          <span v-for="lg in trendLegend" :key="lg.name" class="fg" style="gap:4px">
+            <span
+              :style="{ width: '9px', height: '9px', borderRadius: '2px', background: lg.color, display: 'inline-block' }"></span>
+            <span class="muted">{{ lg.name }}</span>
+          </span>
+        </div>
         <div v-else class="muted" style="text-align:center;padding:20px 0">暂无数据</div>
       </div>
       <!-- 来源 / 模型分布 -->
@@ -583,9 +670,10 @@ onActivated(() => selectTab(tab.value))
   <div v-else-if="tab === 5">
     <div class="row" style="margin-bottom:12px"><b>备份记录</b>
       <div class="fg" style="gap:6px">
-        <button style="font-size:12px" @click="createBackup">立即备份</button>
-        <button style="font-size:12px" @click="exportData">导出JSON</button>
-        <button style="font-size:12px" @click="importFileInput?.click()">导入</button>
+        <button class="btn-sm" @click="createBackup">立即备份</button>
+        <button class="btn-sm" :disabled="busy('export')" @click="run('export', exportData)"><i v-if="busy('export')"
+            class="ti ti-loader-2"></i> 导出 JSON</button>
+        <button class="btn-sm" @click="importFileInput?.click()">导入</button>
         <input ref="importFileInput" type="file" accept=".zip" style="display:none" @change="importData" />
       </div>
     </div>
@@ -598,18 +686,20 @@ onActivated(() => selectTab(tab.value))
             <div class="muted">{{ (b.size_bytes / 1024 / 1024).toFixed(1) }} MB · {{ b.integrity }}</div>
           </div>
         </div>
-        <button style="font-size:12px" @click="restoreBackup(b.backup_id)">恢复</button>
+        <button class="btn-sm" :disabled="busy('restore' + b.backup_id)"
+          @click="run('restore' + b.backup_id, () => restoreBackup(b.backup_id))">恢复</button>
       </div>
     </div>
-    <div class="muted" style="margin-top:12px;font-size:12px">恢复前会自动保存当前数据作为保底备份（不占 3 份名额）。</div>
+    <div class="muted" style="margin-top:12px;font-size:var(--fs-sm)">恢复前会自动保存当前数据作为保底备份（不占 3 份名额）。</div>
     <!-- 备份命名弹窗 -->
     <div v-if="showBackupLabel" class="overlay" @click.self="showBackupLabel = false">
-      <div class="modal" style="max-width:360px">
+      <div class="modal modal-sm">
         <div class="mt">创建备份</div>
         <input v-model="backupLabel" placeholder="自定义标签（可选，默认按时间命名）" style="width:100%" @keyup.enter="doCreateBackup" />
         <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
           <button @click="showBackupLabel = false">取消</button>
-          <button class="btn-primary" @click="doCreateBackup">创建</button>
+          <button class="btn-primary" :disabled="busy('mkBackup')" @click="run('mkBackup', doCreateBackup)"><i
+              v-if="busy('mkBackup')" class="ti ti-loader-2"></i> 创建</button>
         </div>
       </div>
     </div>
@@ -621,7 +711,7 @@ onActivated(() => selectTab(tab.value))
       <div class="banner" :style="overallStyle(status.overall)">
         系统运行{{ overallLabel(status.overall) }} · 首次安装 {{ status.first_installed || '—' }}</div>
       <div v-for="s in status.subsystems" :key="s.name" class="row"
-        style="padding:10px 0;border-bottom:.5px solid var(--bd)">
+        style="padding:10px 0;border-bottom:1px solid var(--bd)">
         <div class="fg" style="gap:8px"><span class="dot"
             :style="{ background: s.status === 'healthy' ? 'var(--succtx)' : s.status === 'unhealthy' ? 'var(--dangtx)' : 'var(--warntx)' }"></span>
           <div><b>{{ s.name }}</b>
@@ -635,15 +725,18 @@ onActivated(() => selectTab(tab.value))
           产品版本 {{ status.system_info?.product_version }} · Schema {{ status.system_info?.schema_version }}
           · 记忆 {{ status.system_info?.memory_count }} 条 · 会话 {{ status.system_info?.session_count }} 个</div>
       </div>
-      <div style="font-weight:500;margin:20px 0 12px">定时任务</div>
-      <div v-for="t in tasks" :key="t.task_id" class="row" style="padding:8px 0;border-bottom:.5px solid var(--bd)">
+      <div class="section-title mt">定时任务</div>
+      <div v-for="t in tasks" :key="t.task_id" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
         <div><b>{{ t.name }}</b>
           <div class="muted">{{ t.schedule }} · 上次 {{ t.last_run ? formatTime(t.last_run) : '尚未执行' }}</div>
         </div>
         <div class="fg" style="gap:6px">
           <span class="badge" :class="taskBadge(t.status)">{{ taskLabel(t.status) }}</span>
-          <button style="font-size:11px" @click="showTaskLogs(t.task_id)">日志</button>
-          <button style="font-size:11px" @click="runTask(t.task_id)">立即执行</button>
+          <button class="btn-xs" :disabled="busy('log' + t.task_id)"
+            @click="run('log' + t.task_id, () => showTaskLogs(t.task_id))">日志</button>
+          <button class="btn-xs" :disabled="busy('runT' + t.task_id)"
+            @click="run('runT' + t.task_id, () => runTask(t.task_id))"><i v-if="busy('runT' + t.task_id)"
+              class="ti ti-loader-2"></i> 立即执行</button>
         </div>
       </div>
     </div>
@@ -653,38 +746,34 @@ onActivated(() => selectTab(tab.value))
   <div v-if="showAddProvider" class="overlay" @click.self="showAddProvider = false">
     <div class="modal">
       <div class="mt">添加 LLM Provider</div>
-      <div style="margin-bottom:10px"><label class="label">显示名称</label><input v-model="newProvider.display_name"
-          style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">类型</label>
-        <select v-model="newProvider.provider_type" style="width:100%">
+      <div class="form-group"><label class="label">显示名称</label><input v-model="newProvider.display_name" /></div>
+      <div class="form-group"><label class="label">类型</label>
+        <select v-model="newProvider.provider_type">
           <option value="openai_compatible">OpenAI 兼容</option>
           <option value="anthropic">Anthropic</option>
           <option value="google">Google</option>
           <option value="custom">自定义</option>
         </select>
       </div>
-      <div style="margin-bottom:10px"><label class="label">基础地址</label><input v-model="newProvider.base_url"
-          style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">API Key</label>
-        <div style="position:relative">
-          <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'"
-            style="width:100%;padding-right:40px" />
-          <i :class="showAddKey ? 'ti ti-eye-off' : 'ti ti-eye'" @click="showAddKey = !showAddKey"
-            style="position:absolute;right:12px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--muted)"></i>
+      <div class="form-group"><label class="label">基础地址</label><input v-model="newProvider.base_url" /></div>
+      <div class="form-group"><label class="label">API Key</label>
+        <div class="input-affix">
+          <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'" />
+          <i :class="showAddKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+            @click="showAddKey = !showAddKey"></i>
         </div>
       </div>
-      <div style="margin-bottom:10px"><label class="label">模型 ID</label><input v-model="newProvider.model_id"
-          style="width:100%" /></div>
-      <div class="g2">
-        <div><label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" style="width:100%" />
-        </div>
-        <div><label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" style="width:100%" />
-        </div>
+      <div class="form-group"><label class="label">模型 ID</label><input v-model="newProvider.model_id" /></div>
+      <div class="form-grid">
+        <div><label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" /></div>
+        <div><label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" /></div>
       </div>
       <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
         <button @click="showAddProvider = false">取消</button>
-        <button @click="testConn(newProvider)">测试连接</button>
-        <button class="btn-primary" @click="addProvider">保存</button>
+        <button :disabled="busy('testAdd')" @click="run('testAdd', () => testConn(newProvider))"><i
+            v-if="busy('testAdd')" class="ti ti-loader-2"></i> 测试连接</button>
+        <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)"><i v-if="busy('addP')"
+            class="ti ti-loader-2"></i> 保存</button>
       </div>
     </div>
   </div>
@@ -705,21 +794,24 @@ onActivated(() => selectTab(tab.value))
       </div>
       <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
         <button @click="embEstimate = null">取消</button>
-        <button @click="confirmMigrate">确认切换</button>
+        <button class="btn-primary" :disabled="busy('migrate')" @click="run('migrate', confirmMigrate)"><i
+            v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换</button>
       </div>
     </div>
   </div>
 
   <!-- 定时任务日志弹窗 -->
   <div v-if="taskLogs" class="overlay" @click.self="taskLogs = null">
-    <div class="modal" style="max-width:640px">
+    <div class="modal modal-lg">
       <div class="mt">执行日志 · {{ taskLogs.id }}</div>
       <div v-if="!taskLogs.logs.length" class="muted">该任务尚未执行过</div>
-      <div v-for="(l, i) in taskLogs.logs" :key="i" class="row"
-        style="padding:8px 0;border-bottom:.5px solid var(--bd)">
+      <div v-for="(l, i) in taskLogs.logs" :key="i" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
         <div><b>{{ formatTime(l.run_time) }}</b>
-          <div class="muted">耗时 {{ l.duration_ms }}ms
-            <span v-if="l.fail_reason" style="color:var(--dangtx)">· {{ l.fail_reason }}</span>
+          <div class="muted">
+            <template v-if="l.result === 'skipped'">{{ l.fail_reason || '未执行' }}</template>
+            <template v-else>耗时 {{ formatDuration(l.duration_ms) }}
+              <span v-if="l.fail_reason" style="color:var(--dangtx)">· {{ l.fail_reason }}</span>
+            </template>
           </div>
         </div>
         <span class="badge" :class="taskBadge(l.result)">{{ taskLabel(l.result) }}</span>
@@ -733,30 +825,30 @@ onActivated(() => selectTab(tab.value))
   <div v-if="showAddConn" class="overlay" @click.self="showAddConn = false">
     <div class="modal">
       <div class="mt">添加 MCP 连接器</div>
-      <div style="margin-bottom:10px"><label class="label">名称</label><input v-model="newConn.name"
-          placeholder="如：GitHub" style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">传输方式</label>
-        <select v-model="newConn.transport" style="width:100%">
+      <div class="form-group"><label class="label">名称</label><input v-model="newConn.name" placeholder="如：GitHub" />
+      </div>
+      <div class="form-group"><label class="label">传输方式</label>
+        <select v-model="newConn.transport">
           <option value="stdio">stdio — 本地子进程</option>
           <option value="http">Streamable HTTP</option>
         </select>
       </div>
       <template v-if="newConn.transport === 'stdio'">
-        <div style="margin-bottom:10px"><label class="label">启动命令</label><input v-model="newConn.command"
-            style="width:100%" /></div>
-        <div style="margin-bottom:10px"><label class="label">参数（JSON 数组）</label><input v-model="newConn.args"
-            placeholder='["-y","@modelcontextprotocol/server-github"]' style="width:100%" /></div>
-        <div style="margin-bottom:10px"><label class="label">环境变量（JSON 对象）</label><input v-model="newConn.env"
-            placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' style="width:100%" /></div>
+        <div class="form-group"><label class="label">启动命令</label><input v-model="newConn.command" /></div>
+        <div class="form-group"><label class="label">参数（JSON 数组）</label><input v-model="newConn.args"
+            placeholder='["-y","@modelcontextprotocol/server-github"]' /></div>
+        <div class="form-group"><label class="label">环境变量（JSON 对象）</label><input v-model="newConn.env"
+            placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' /></div>
       </template>
       <template v-else>
-        <div style="margin-bottom:10px"><label class="label">端点地址</label><input v-model="newConn.url"
-            style="width:100%" /></div>
+        <div class="form-group"><label class="label">端点地址</label><input v-model="newConn.url" /></div>
       </template>
       <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
         <button @click="showAddConn = false">取消</button>
-        <button @click="testConnector">测试连接</button>
-        <button class="btn-primary" @click="saveConnector">保存</button>
+        <button :disabled="busy('testConn')" @click="run('testConn', testConnector)"><i v-if="busy('testConn')"
+            class="ti ti-loader-2"></i> 测试连接</button>
+        <button class="btn-primary" :disabled="busy('saveConn')" @click="run('saveConn', saveConnector)"><i
+            v-if="busy('saveConn')" class="ti ti-loader-2"></i> 保存</button>
       </div>
     </div>
   </div>
@@ -765,27 +857,28 @@ onActivated(() => selectTab(tab.value))
   <div v-if="showChannelCfg" class="overlay" @click.self="showChannelCfg = false">
     <div class="modal">
       <div class="mt">配置接入渠道</div>
-      <div style="margin-bottom:10px"><label class="label">平台</label>
-        <select v-model="newChannel.platform_type" style="width:100%">
+      <div class="form-group"><label class="label">平台</label>
+        <select v-model="newChannel.platform_type">
           <option value="feishu">飞书</option>
           <option value="telegram">Telegram</option>
           <option value="dingtalk">钉钉</option>
           <option value="wecom">企业微信</option>
         </select>
       </div>
-      <div style="margin-bottom:10px"><label class="label">Bot Token / App ID</label><input
-          v-model="newChannel.bot_token" style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">App Secret（部分平台）</label><input
-          v-model="newChannel.app_secret" type="password" style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">绑定账户 ID（只对该账户响应）</label><input
-          v-model="newChannel.whitelist_user_id" style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url"
-          style="width:100%" /></div>
+      <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="newChannel.bot_token" />
+      </div>
+      <div class="form-group"><label class="label">App Secret（部分平台）</label><input v-model="newChannel.app_secret"
+          type="password" /></div>
+      <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
+          v-model="newChannel.whitelist_user_id" /></div>
+      <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url" /></div>
       <div class="muted" style="margin-bottom:12px">启用后会自动禁用当前已启用的 IM 平台。</div>
       <div class="fg" style="justify-content:flex-end;gap:8px">
         <button @click="showChannelCfg = false">取消</button>
-        <button @click="testChannel">测试连接</button>
-        <button class="btn-primary" @click="addChannel">启用</button>
+        <button :disabled="busy('testCh')" @click="run('testCh', testChannel)"><i v-if="busy('testCh')"
+            class="ti ti-loader-2"></i> 测试连接</button>
+        <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)"><i v-if="busy('addCh')"
+            class="ti ti-loader-2"></i> 启用</button>
       </div>
     </div>
   </div>
@@ -794,28 +887,27 @@ onActivated(() => selectTab(tab.value))
   <div v-if="showChannelEdit" class="overlay" @click.self="showChannelEdit = false">
     <div class="modal">
       <div class="mt">编辑接入渠道</div>
-      <div style="margin-bottom:10px"><label class="label">平台</label>
-        <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled
-          style="width:100%" />
+      <div class="form-group"><label class="label">平台</label>
+        <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled />
       </div>
-      <div style="margin-bottom:10px"><label class="label">Bot Token / App ID</label><input
-          v-model="editChannel.bot_token" style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">App Secret（部分平台）</label>
-        <div style="position:relative">
-          <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'"
-            style="width:100%;padding-right:40px" />
-          <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" @click="showEditSecret = !showEditSecret"
-            style="position:absolute;right:12px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--muted)"></i>
+      <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
+      </div>
+      <div class="form-group"><label class="label">App Secret（部分平台）</label>
+        <div class="input-affix">
+          <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'" />
+          <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+            @click="showEditSecret = !showEditSecret"></i>
         </div>
       </div>
-      <div style="margin-bottom:10px"><label class="label">绑定账户 ID（只对该账户响应）</label><input
-          v-model="editChannel.whitelist_user_id" style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">回调地址（需外网可达）</label><input v-model="editChannel.callback_url"
-          style="width:100%" /></div>
+      <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
+          v-model="editChannel.whitelist_user_id" /></div>
+      <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="editChannel.callback_url" /></div>
       <div class="fg" style="justify-content:flex-end;gap:8px">
         <button @click="showChannelEdit = false">取消</button>
-        <button @click="testEditChannel">测试连接</button>
-        <button class="btn-primary" @click="saveChannelEdit">保存</button>
+        <button :disabled="busy('testChE')" @click="run('testChE', testEditChannel)"><i v-if="busy('testChE')"
+            class="ti ti-loader-2"></i> 测试连接</button>
+        <button class="btn-primary" :disabled="busy('saveChE')" @click="run('saveChE', saveChannelEdit)"><i
+            v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存</button>
       </div>
     </div>
   </div>
@@ -824,40 +916,36 @@ onActivated(() => selectTab(tab.value))
   <div v-if="showEdit" class="overlay" @click.self="showEdit = false">
     <div class="modal">
       <div class="mt">编辑 LLM Provider</div>
-      <div style="margin-bottom:10px"><label class="label">显示名称</label><input v-model="editData.display_name"
-          style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">类型</label>
-        <select v-model="editData.provider_type" style="width:100%">
+      <div class="form-group"><label class="label">显示名称</label><input v-model="editData.display_name" /></div>
+      <div class="form-group"><label class="label">类型</label>
+        <select v-model="editData.provider_type">
           <option value="openai_compatible">OpenAI 兼容</option>
           <option value="anthropic">Anthropic</option>
           <option value="google">Google</option>
           <option value="custom">自定义</option>
         </select>
       </div>
-      <div style="margin-bottom:10px"><label class="label">基础地址</label><input v-model="editData.base_url"
-          style="width:100%" /></div>
-      <div style="margin-bottom:10px"><label class="label">API Key</label>
-        <div style="position:relative">
-          <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'"
-            style="width:100%;padding-right:40px" />
-          <i :class="showEditKey ? 'ti ti-eye-off' : 'ti ti-eye'" @click="showEditKey = !showEditKey"
-            style="position:absolute;right:12px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--muted)"></i>
+      <div class="form-group"><label class="label">基础地址</label><input v-model="editData.base_url" /></div>
+      <div class="form-group"><label class="label">API Key</label>
+        <div class="input-affix">
+          <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'" />
+          <i :class="showEditKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+            @click="showEditKey = !showEditKey"></i>
         </div>
       </div>
-      <div style="margin-bottom:10px"><label class="label">模型 ID</label><input v-model="editData.model_id"
-          style="width:100%" /></div>
-      <div class="g2">
-        <div><label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" style="width:100%" />
-        </div>
-        <div><label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" style="width:100%" />
-        </div>
+      <div class="form-group"><label class="label">模型 ID</label><input v-model="editData.model_id" /></div>
+      <div class="form-grid">
+        <div><label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" /></div>
+        <div><label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" /></div>
       </div>
-      <div style="margin:10px 0"><label class="label">上下文窗口</label><input v-model.number="editData.context_window"
-          style="width:100%" /></div>
+      <div class="form-group" style="margin-top:12px"><label class="label">上下文窗口</label><input
+          v-model.number="editData.context_window" /></div>
       <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
         <button @click="showEdit = false">取消</button>
-        <button @click="testConn(editData)">测试连接</button>
-        <button class="btn-primary" @click="saveEdit">保存</button>
+        <button :disabled="busy('testEdit')" @click="run('testEdit', () => testConn(editData))"><i
+            v-if="busy('testEdit')" class="ti ti-loader-2"></i> 测试连接</button>
+        <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)"><i
+            v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存</button>
       </div>
     </div>
   </div>

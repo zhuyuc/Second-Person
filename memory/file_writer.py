@@ -141,6 +141,10 @@ class FileWriter:
     # ---- 生命周期 ---------------------------------------------------------
     async def start(self) -> None:
         self._running = True
+        # 绑定主循环：_dispatch 在工作线程执行时，其内部 bus.publish_nowait
+        # 的协程订阅者需投递回主循环（避免临时循环串扰）
+        if self.bus and hasattr(self.bus, "bind_loop"):
+            self.bus.bind_loop()
         await self._recover_pending()
         self._consumer_task = asyncio.create_task(self._consume_loop())
         # 启动兜底：若已无 failed 残留（失败项早已重放成功），
@@ -199,9 +203,11 @@ class FileWriter:
 
             for attempt in range(1, MAX_RETRY + 1):
                 try:
-                    self._dispatch(req)
+                    # _dispatch 含大量同步文件读写 + 事务，丢工作线程避免阻塞事件循环；
+                    # FileWriter 单消费者逐条 await，仍串行，不引入内部并发
+                    await asyncio.to_thread(self._dispatch, req)
                     if req.write_type in PERSISTENT_TYPES:
-                        self.db.execute(
+                        await self.db.execute_async(
                             "UPDATE pending_writes SET status='done' WHERE id=?",
                             (req.write_id,))
                         # 重放/重扫成功：失败项全部消化后撤回失败横幅
@@ -214,7 +220,7 @@ class FileWriter:
                                      attempt, req.write_type)
                     if attempt >= MAX_RETRY:
                         if req.write_type in PERSISTENT_TYPES:
-                            self.db.execute(
+                            await self.db.execute_async(
                                 "UPDATE pending_writes SET status='failed', retry_count=? "
                                 "WHERE id=?", (attempt, req.write_id))
                         self.notify("filewriter_failed",

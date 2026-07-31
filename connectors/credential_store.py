@@ -26,12 +26,14 @@ def _ensure_master_key(data_dir: Path) -> bytes:
     key_path = data_dir / ".master_key"
     if key_path.exists():
         return key_path.read_bytes()
-    # 生成 32 字节随机密钥
+    # 生成 32 字节随机密钥（强制依赖 cryptography，不再降级 base64）
     try:
         from cryptography.fernet import Fernet
-        key = Fernet.generate_key()
-    except Exception:  # noqa: BLE001 - 无 cryptography 时退化
-        key = base64.urlsafe_b64encode(os.urandom(32))
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            "凭据加密依赖 cryptography 不可用，拒绝以明文/base64 弱编码存储凭据。"
+            "请先安装：pip install cryptography") from e
+    key = Fernet.generate_key()
     key_path.write_bytes(key)
     _lock_permissions(key_path)
     return key
@@ -55,18 +57,18 @@ class CredentialStore:
         self.db = db
         self.data_dir = Path(data_dir)
         self._key = _ensure_master_key(self.data_dir)
-        self._fernet = None
         try:
             from cryptography.fernet import Fernet
             self._fernet = Fernet(self._key)
-        except Exception:  # noqa: BLE001
-            logger.warning("cryptography 不可用，凭证将以弱编码存储（仅供本机）")
+        except Exception as e:  # noqa: BLE001
+            # 强制依赖：缺 cryptography 时 fail-fast，绝不降级为 base64 弱编码
+            raise RuntimeError(
+                "凭据加密依赖 cryptography 不可用。请先安装：pip install cryptography") from e
 
     # ---- 加解密 -----------------------------------------------------------
     def _encrypt(self, plaintext: str) -> bytes:
-        if self._fernet:
-            return self._fernet.encrypt(plaintext.encode("utf-8"))
-        return base64.b64encode(plaintext.encode("utf-8"))
+        # _fernet 已在 __init__ 保证可用（否则启动已 fail-fast），不再写弱编码
+        return self._fernet.encrypt(plaintext.encode("utf-8"))
 
     def _decrypt(self, blob: bytes) -> str:
         if self._fernet:

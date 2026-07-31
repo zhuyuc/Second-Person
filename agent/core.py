@@ -223,8 +223,10 @@ class AgentCore:
         core_query = _strip_attachment_context(message)
         if not onboarding and not regenerate:
             self._backfill_prev_signal(sid, message)
+        # 图片落盘含 base64 解码 + 写盘（可达数十毫秒），丢工作线程避免阻塞事件循环
+        persisted_imgs = await asyncio.to_thread(self._persist_images, images)
         user_msg_id = self.sessions.append_message(
-            sid, "user", message, images=self._persist_images(images))
+            sid, "user", message, images=persisted_imgs)
 
         # 输入预处理：检测 URL → web_fetch 预加载（失败不中断本轮，作为附加上下文注入）
         preload_text = ""
@@ -688,11 +690,17 @@ class AgentCore:
 
     def _format_retrieval_thinking(self, memories: list[dict]) -> str:
         """把检索命中结果格式化为思考过程文本，区分记忆与知识库来源。"""
+        ids = [m["id"] for m in memories]
+        stype: dict[str, str] = {}
+        if ids:
+            ph = ",".join("?" * len(ids))
+            for r in self.db.query_all(
+                    f"SELECT id, source_type FROM memories WHERE id IN ({ph})",
+                    tuple(ids)):
+                stype[r["id"]] = r["source_type"]
         personal, kb = [], []
         for m in memories:
-            row = self.db.query_one(
-                "SELECT source_type FROM memories WHERE id=?", (m["id"],))
-            if row and row["source_type"] == "knowledge":
+            if stype.get(m["id"]) == "knowledge":
                 kb.append(m["title"])
             else:
                 personal.append(m["title"])

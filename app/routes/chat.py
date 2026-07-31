@@ -64,7 +64,18 @@ async def _follow(buf: dict):
             continue
         if buf["done"]:
             break
-        await asyncio.sleep(0.05)
+        # 事件驱动：等生产者 nudge 唤醒，最长 1s 兑底（防 nudge 竞态/丢失），
+        # 替代固定 20Hz 轮询的空转；超时后重新检查缓冲区保证不丢事件
+        ev = buf.get("nudge")
+        if ev is not None:
+            try:
+                await asyncio.wait_for(ev.wait(), timeout=1.0)
+            except asyncio.TimeoutError:
+                pass
+            if ev.is_set():
+                ev.clear()
+        else:
+            await asyncio.sleep(0.05)
 
 
 @router.post("/chat/send")
@@ -89,7 +100,8 @@ async def chat_send(request: Request):
         c.notifications.flush_pending()
 
     buf = {"events": [], "dropped": 0, "done": False, "started": time.time(),
-           "finished": None, "size": 0, "sid": sid, "task": None}
+           "finished": None, "size": 0, "sid": sid, "task": None,
+           "nudge": asyncio.Event()}
     if crid:
         _BUFFERS[crid] = buf
 
@@ -119,6 +131,7 @@ async def chat_send(request: Request):
                     if cut > 0:
                         buf["events"] = buf["events"][-50:]
                         buf["dropped"] += cut
+                buf["nudge"].set()   # 唤醒跟读者
         except asyncio.CancelledError:
             buf["events"].append({"event": "error",
                                   "data": {"code": 499, "message": "已停止生成"}})
@@ -126,6 +139,7 @@ async def chat_send(request: Request):
         finally:
             buf["done"] = True
             buf["finished"] = time.time()
+            buf["nudge"].set()   # 终态唤醒，让跟读者及时退出
 
     buf["task"] = asyncio.create_task(produce())
     return EventSourceResponse(_follow(buf), ping=5)

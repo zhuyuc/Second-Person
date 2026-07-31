@@ -120,6 +120,8 @@ class AppContainer:
         def notifier(ntype: str, msg: str) -> None:
             self.notifications.push(ntype, msg)
         self.notifier = notifier
+        # 后台火忘式写入持续失败时上浮系统告警（防静默丢统计/日志）
+        self.db.alert_hook = notifier
 
         self.fw = FileWriter(self.db, self.palace,
                              self.vs, d, self.bus, notifier)
@@ -158,8 +160,15 @@ class AppContainer:
         def _on_memory_change(paths) -> None:
             try:
                 r = reindex_changed(self.db, d, paths, vector_store=self.vs)
-                self.index_builder.rebuild(force=True)
-                _refresh_consciousness_hint()
+                # _index.md 重建 + 意识提示刷新交由 FileWriter 单写者串行执行，
+                # 避免在 watcher 的 Timer 线程直接写盘与写线程产生竞态
+                loop = getattr(self, "_loop", None)
+                if loop is not None and not loop.is_closed():
+                    loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self.fw.submit("index", {})))
+                else:
+                    self.index_builder.rebuild(force=True)
+                    _refresh_consciousness_hint()
                 if r.get("invalid_files"):
                     notifier("md_format_error",
                              "以下记忆文件格式异常，未更新索引："
@@ -198,7 +207,9 @@ class AppContainer:
                              context_text: str | None = None) -> list[str]:
             snap = self.providers.snapshot_for("agent")
             if snap is None:
-                return [c["id"] for c in candidates[:3]]
+                # 精筛不可用：抛出令 Retriever 走其基于得分的降级挑选（过滤弱尾），
+                # 而非盲目返回 top-3 引入噪声
+                raise RuntimeError("agent 槽位未配置，第 2 层精筛不可用")
             listing = "\n".join(f"{c['id']}: {c['title']} - {c['summary']}"
                                 for c in candidates)
             ctx_part = f"最近对话：\n{context_text}\n\n" if context_text else ""
@@ -452,7 +463,12 @@ class AppContainer:
         s.register_task("log_cleanup", "日志清理", lambda: (
             s.purge_old_logs(), self.oplog.purge_expired(90),
             self.migration_runner.purge_old_backups(30),
-            self._purge_old_signals()))
+            self._purge_old_signals(),
+            self.db.execute(
+                "DELETE FROM pending_writes WHERE status='done' "
+                "AND created_at < ?",
+                ((now_cst() - __import__("datetime").timedelta(days=7)
+                  ).isoformat(timespec="seconds"),))))
         s.register_task("conflict_cleanup", "已解决矛盾清理",
                         lambda: self.conflict.purge_resolved(30))
         s.register_task("failed_rescan", "failed 写入重扫",
@@ -535,6 +551,8 @@ class AppContainer:
             logger.info("重置 %d 条 failed 向量为 pending，待本地模型回填", cur.rowcount)
 
     async def startup(self) -> None:
+        # 主事件循环引用：供 watcher 的 Timer 线程将索引重建投递回单写者
+        self._loop = asyncio.get_running_loop()
         await self.tracer.start()
         self._ensure_local_embedding_provider()
         self.vs.load()

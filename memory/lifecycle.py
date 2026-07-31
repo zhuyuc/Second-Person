@@ -13,6 +13,7 @@ Lifecycle —— 生命周期五态流转（产品文档 §生命周期流转规
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -183,29 +184,40 @@ class LifecycleManager:
 
     # ---- 频次更新（第 8 步）：last_accessed / access_count / implicit -----
     def update_access_stats(self, loaded_ids: list[str], cited_ids: list[str]) -> None:
-        """批量更新频次；走索引表直接更新（frontmatter 由后续 update 同步）。"""
+        """批量更新频次；走索引表直接更新（frontmatter 由后续 update 同步）。
+        全部改 executemany 批处理，避免逐条 execute 的 N+1。"""
         now = datetime.now().isoformat(timespec="seconds")
-        for mid in loaded_ids:
-            self.db.execute(
-                "UPDATE memories SET last_accessed=? WHERE id=?", (now, mid))
-        for mid in cited_ids:
-            self.db.execute(
-                "UPDATE memories SET access_count=access_count+1 WHERE id=?", (mid,))
+        if loaded_ids:
+            self.db.executemany(
+                "UPDATE memories SET last_accessed=? WHERE id=?",
+                [(now, mid) for mid in loaded_ids])
+        if cited_ids:
+            self.db.executemany(
+                "UPDATE memories SET access_count=access_count+1 WHERE id=?",
+                [(mid,) for mid in cited_ids])
         # implicit：加载了但未引用的，累计 3 转 1 次 access_count
         implicit = [m for m in loaded_ids if m not in cited_ids]
+        if not implicit:
+            return
+        rows_map = self.palace.get_many(implicit)
+        reset_rows: list[tuple] = []   # 达 3：置 0 + access_count+1
+        inc_rows: list[tuple] = []     # 未达 3：累加
         for mid in implicit:
-            row = self.db.query_one(
-                "SELECT implicit_use_count FROM memories WHERE id=?", (mid,))
+            row = rows_map.get(mid)
             if not row:
                 continue
             new_cnt = (row["implicit_use_count"] or 0) + 1
             if new_cnt >= 3:
-                self.db.execute(
-                    "UPDATE memories SET implicit_use_count=0, "
-                    "access_count=access_count+1 WHERE id=?", (mid,))
+                reset_rows.append((mid,))
             else:
-                self.db.execute(
-                    "UPDATE memories SET implicit_use_count=? WHERE id=?", (new_cnt, mid))
+                inc_rows.append((new_cnt, mid))
+        if reset_rows:
+            self.db.executemany(
+                "UPDATE memories SET implicit_use_count=0, "
+                "access_count=access_count+1 WHERE id=?", reset_rows)
+        if inc_rows:
+            self.db.executemany(
+                "UPDATE memories SET implicit_use_count=? WHERE id=?", inc_rows)
 
     # ---- 引用明细（第 8 步）：记忆/知识库统一引用溯源 -------------------
     def record_citations(self, cited_ids: list[str], message_id: int,
@@ -215,11 +227,20 @@ class LifecycleManager:
         if not cited_ids:
             return
         now = datetime.now().isoformat(timespec="seconds")
-        for mid in cited_ids:
-            doc = self.db.query_one(
-                "SELECT id FROM raw_docs WHERE extracted_memory_ids LIKE ?",
-                (f'%"{mid}"%',))
-            self.db.execute(
-                "INSERT INTO citation_events(memory_id,doc_id,message_id,"
-                "session_id,cited_at) VALUES(?,?,?,?,?)",
-                (mid, doc["id"] if doc else None, message_id, session_id, now))
+        # 一次性扫 raw_docs 构建 memory_id -> doc_id 映射，替代逐条 LIKE 查询（N+1）
+        doc_map: dict[str, int] = {}
+        for r in self.db.query_all(
+                "SELECT id, extracted_memory_ids FROM raw_docs "
+                "WHERE extracted_memory_ids IS NOT NULL "
+                "AND extracted_memory_ids != ''"):
+            try:
+                ids = json.loads(r["extracted_memory_ids"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            for mid in ids:
+                doc_map.setdefault(mid, r["id"])
+        self.db.executemany(
+            "INSERT INTO citation_events(memory_id,doc_id,message_id,"
+            "session_id,cited_at) VALUES(?,?,?,?,?)",
+            [(mid, doc_map.get(mid), message_id, session_id, now)
+             for mid in cited_ids])

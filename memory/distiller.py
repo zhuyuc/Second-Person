@@ -17,6 +17,7 @@ vector_status='pending' 由补偿协程后补
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Awaitable, Callable
@@ -275,7 +276,8 @@ class Distiller:
             return await self._create(item, item.get("confidence", "medium"),
                                       "memory", None, item.get("entities", []))
         f = Path(self.fw.data_dir) / row["md_path"]
-        doc = parse_memory_md(f.read_text(encoding="utf-8"))
+        doc = await asyncio.to_thread(
+            lambda: parse_memory_md(f.read_text(encoding="utf-8")))
         now = now_cst()
         old_detail = doc.detail.strip()
         # 已分层过的旧详情不重复包裹“当前观点”头，只降级为历史段
@@ -309,7 +311,8 @@ class Distiller:
         if not row:
             return await self._create(item, confidence, "memory", None, item.get("entities", []))
         f = Path(self.fw.data_dir) / row["md_path"]
-        doc = parse_memory_md(f.read_text(encoding="utf-8"))
+        doc = await asyncio.to_thread(
+            lambda: parse_memory_md(f.read_text(encoding="utf-8")))
         now = now_cst()
         merge_count = sum(1 for h in doc.change_history if "跨时间合并" in h)
         # 第 2 次起升级 confidence（medium→strong）
@@ -401,7 +404,8 @@ class Distiller:
         sf = Path(self.fw.data_dir) / surv["md_path"]
         if not sf.exists():
             return
-        sdoc = parse_memory_md(sf.read_text(encoding="utf-8"))
+        sdoc = await asyncio.to_thread(
+            lambda: parse_memory_md(sf.read_text(encoding="utf-8")))
         now = now_cst()
         merge_count = sum(1 for h in sdoc.change_history if "合并" in h)
         if merge_count >= 1 and surv["confidence"] == "medium":
@@ -413,7 +417,8 @@ class Distiller:
         # 迁移 dup 的出链到幸存者（跳过指向幸存者/自身/已存在的）
         df = Path(self.fw.data_dir) / dup["md_path"]
         if df.exists():
-            ddoc = parse_memory_md(df.read_text(encoding="utf-8"))
+            ddoc = await asyncio.to_thread(
+                lambda: parse_memory_md(df.read_text(encoding="utf-8")))
             existing = {l.get("target") for l in sdoc.links}
             for l in (ddoc.links or []):
                 t = l.get("target")
@@ -441,7 +446,8 @@ class Distiller:
         f = Path(self.fw.data_dir) / row["md_path"]
         if not f.exists():
             return
-        doc = parse_memory_md(f.read_text(encoding="utf-8"))
+        doc = await asyncio.to_thread(
+            lambda: parse_memory_md(f.read_text(encoding="utf-8")))
         if doc.frontmatter.get("dedup_pending") is False:
             return  # 已清除，避免无谓写入触发 watcher
         doc.frontmatter["dedup_pending"] = False

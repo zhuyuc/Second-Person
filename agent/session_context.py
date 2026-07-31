@@ -147,6 +147,7 @@ class SessionStore:
                         cit["title"] = mrow["title"]
             out.append({"id": r["id"], "role": r["role"],
                         "message_type": r["message_type"],
+                        "notification_type": r["notification_type"],
                         "content": r["content"], "citations": cites,
                         "feedback": r["feedback"], "create_time": r["create_time"],
                         "thinking": r["thinking"],

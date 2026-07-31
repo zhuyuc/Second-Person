@@ -144,8 +144,7 @@ defineExpose({ loadGraph })
     <div v-if="loading" class="empty"><i class="ti ti-loader-2"></i>图谱加载中…</div>
     <div v-else-if="!nodes.length" class="empty"><i class="ti ti-affiliate"></i>还没有记忆关联，先创建几条关联记忆吧</div>
     <div v-else class="kg-wrap">
-      <component :is="engine" :nodes="nodes" :edges="edges" :focus="focus"
-        @node-click="onNodeClick" />
+      <component :is="engine" :nodes="nodes" :edges="edges" :focus="focus" @node-click="onNodeClick" />
     </div>
     <div class="muted" style="margin-top:8px">
       节点=实体（大小与内部数字=关联记忆数，颜色=领域），连线=共现关系（粗细=共现条数）。
@@ -163,7 +162,7 @@ defineExpose({ loadGraph })
     </div>
     <!-- 图例全量弹窗 -->
     <teleport to="body">
-      <div v-if="showLegendModal" class="overlay" style="z-index:120" @click.self="showLegendModal = false">
+      <div v-if="showLegendModal" class="overlay" style="z-index:var(--z-modal)" @click.self="showLegendModal = false">
         <div class="modal">
           <div class="mt">领域图例（{{ domainLegend.length }}）</div>
           <div class="kg-legend-grid">
@@ -178,8 +177,8 @@ defineExpose({ loadGraph })
         </div>
       </div>
     </teleport>
-    <NodeDetailDrawer :entity="selectedEntity" :memories="entityMemories"
-      @close="focus.clearPinned()" @open-memory="id => emit('open-memory', id)" />
+    <NodeDetailDrawer :entity="selectedEntity" :memories="entityMemories" @close="focus.clearPinned()"
+      @open-memory="id => emit('open-memory', id)" />
   </div>
 </template>
 
@@ -190,7 +189,7 @@ defineExpose({ loadGraph })
   align-items: center;
   gap: 10px;
   margin-top: 6px;
-  font-size: 12px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   cursor: pointer;
 }
@@ -224,7 +223,7 @@ defineExpose({ loadGraph })
   margin-top: 10px;
   max-height: 50vh;
   overflow-y: auto;
-  font-size: 13px;
+  font-size: var(--fs-base);
   color: var(--sec);
 }
 

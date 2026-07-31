@@ -38,7 +38,17 @@ class LintEngine:
             "SELECT count(*) c FROM memories WHERE lifecycle='stale'")["c"]
         missing = db.query_one(
             "SELECT count(*) c FROM memories WHERE lifecycle='missing'")["c"]
-        orphan = len(self.palace.orphans())
+        # 健康扣分口径：零连接 且 未被用户采纳确认。采纳（adopted）= 用户已
+        # 确认保留该独立记忆，不再视为质量问题，与孤立建议列表口径一致；
+        # palace.orphans()（建议生成/批量补链用）仍为全量零连接口径，不受此影响。
+        orphan = db.query_one(
+            "SELECT count(*) c FROM memories m "
+            "WHERE m.lifecycle IN ('active','stable','stale') "
+            "AND NOT EXISTS (SELECT 1 FROM memory_links l "
+            "WHERE l.target_id=m.id OR l.source_id=m.id) "
+            "AND NOT EXISTS (SELECT 1 FROM lint_suggestions s "
+            "WHERE s.primary_memory_id=m.id AND s.suggestion_type='orphan' "
+            "AND s.status='adopted')")["c"]
         duplicate = db.query_one(
             "SELECT count(*) c FROM lint_suggestions "
             "WHERE status='open' AND suggestion_type='duplicate'")["c"]

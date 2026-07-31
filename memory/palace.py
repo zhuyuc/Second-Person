@@ -195,6 +195,17 @@ class Palace:
     def get(self, memory_id: str) -> sqlite3.Row | None:
         return self.db.query_one("SELECT * FROM memories WHERE id=?", (memory_id,))
 
+    def get_many(self, ids: list[str]) -> dict[str, sqlite3.Row]:
+        """批量取记忆索引行，返回 {id: row}；避免逐条 get 的 N+1 查询。
+        占位符仅由 id 个数生成（非用户输入拼接），无注入风险。"""
+        if not ids:
+            return {}
+        uniq = list(dict.fromkeys(ids))
+        ph = ",".join("?" * len(uniq))
+        rows = self.db.query_all(
+            f"SELECT * FROM memories WHERE id IN ({ph})", tuple(uniq))
+        return {r["id"]: r for r in rows}
+
     def stats(self) -> dict[str, int]:
         rows = self.db.query_all(
             "SELECT lifecycle, count(*) c FROM memories GROUP BY lifecycle")

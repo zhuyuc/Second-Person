@@ -24,7 +24,8 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMousedown))
     <div v-if="entity" ref="drawerRef" class="kg-drawer">
       <div class="kg-drawer-head">
         <div class="fg" style="gap:8px;min-width:0">
-          <span class="mt" style="margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ entity.name }}</span>
+          <span class="mt" style="margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ entity.name
+            }}</span>
           <span class="badge badge-a">{{ entity.type || 'entity' }}</span>
         </div>
         <button class="kg-drawer-x" @click="emit('close')"><i class="ti ti-x"></i></button>
@@ -44,14 +45,49 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMousedown))
 
 <style scoped>
 .kg-drawer {
-  position: fixed; top: 0; right: 0; width: 400px; max-width: 92vw; height: 100vh;
-  background: var(--surface); border-left: 1px solid var(--bd);
-  box-shadow: var(--shadow-2); z-index: 120; padding: 24px; overflow: auto;
-  display: flex; flex-direction: column;
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 400px;
+  max-width: 92vw;
+  height: 100vh;
+  background: var(--surface);
+  border-left: 1px solid var(--bd);
+  box-shadow: var(--shadow-2);
+  z-index: var(--z-drawer);
+  padding: 24px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
 }
-.kg-drawer-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.kg-drawer-x { background: none; border: none; cursor: pointer; font-size: 18px; color: var(--muted); }
-.kg-drawer-body { flex: 1; overflow: auto; }
-.kg-drawer-enter-active, .kg-drawer-leave-active { transition: transform .3s cubic-bezier(.2, .9, .3, 1); }
-.kg-drawer-enter-from, .kg-drawer-leave-to { transform: translateX(100%); }
+
+.kg-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.kg-drawer-x {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 18px;
+  color: var(--muted);
+}
+
+.kg-drawer-body {
+  flex: 1;
+  overflow: auto;
+}
+
+.kg-drawer-enter-active,
+.kg-drawer-leave-active {
+  transition: transform .3s cubic-bezier(.2, .9, .3, 1);
+}
+
+.kg-drawer-enter-from,
+.kg-drawer-leave-to {
+  transform: translateX(100%);
+}
 </style>

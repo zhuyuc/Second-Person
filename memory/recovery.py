@@ -27,8 +27,13 @@ def rebuild_index(db, data_dir) -> dict:
     count = 0
     with db.transaction() as conn:
         # 清空派生索引（保留 vectors BLOB 以免重算，但状态需校验）
+        # 白名单校验：表名不得拼接外部输入，仅允许下列固定派生索引表
+        _allowed = {"memories", "memory_links", "memory_entities",
+                    "memory_entity_links", "memory_timeline"}
         for tbl in ("memories", "memory_links", "memory_entities",
                     "memory_entity_links", "memory_timeline"):
+            if tbl not in _allowed:
+                raise ValueError(f"非法表名：{tbl}")
             conn.execute(f"DELETE FROM {tbl}")
         conn.execute("DELETE FROM memories_fts")
 

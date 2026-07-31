@@ -3,10 +3,12 @@ import { ref } from 'vue'
 import { api } from '@/api/client'
 import { useSSE } from '@/composables/useSSE'
 import { useToast } from '@/stores/toast'
+import { useBusy } from '@/composables/useBusy'
 
 const emit = defineEmits(['done'])
 const toast = useToast()
 const sse = useSSE()
+const { busy, run } = useBusy()
 const step = ref(1)
 const chat = ref({ provider_type: 'openai_compatible', display_name: '', base_url: '', api_key: '', model_id: '', context_window: 128000 })
 const emb = ref({ base_url: '', api_key: '', model_id: '' })
@@ -95,7 +97,7 @@ async function confirmSoul() {
 
 <template>
   <div class="overlay">
-    <div class="modal" style="max-width:560px">
+    <div class="modal modal-md">
       <div class="mt">首次使用引导 · 第 {{ step }}/4 步</div>
 
       <div v-if="step === 1">
@@ -117,8 +119,9 @@ async function confirmSoul() {
           <input v-model="chat.model_id" placeholder="deepseek-chat" style="width:100%" />
         </div>
         <div class="fg" style="justify-content:flex-end;gap:8px">
-          <button @click="testChat" :disabled="testing">测试连接</button>
-          <button @click="saveChatProvider" :disabled="!chatOk">下一步</button>
+          <button @click="testChat" :disabled="testing"><i v-if="testing" class="ti ti-loader-2"></i> 测试连接</button>
+          <button class="btn-primary" @click="run('saveChat', saveChatProvider)"
+            :disabled="!chatOk || busy('saveChat')"><i v-if="busy('saveChat')" class="ti ti-loader-2"></i> 下一步</button>
         </div>
       </div>
 
@@ -135,24 +138,27 @@ async function confirmSoul() {
         </div>
         <div class="fg" style="justify-content:flex-end;gap:8px">
           <button @click="step = 3">暂不配置，先用全文搜索</button>
-          <button @click="testEmb">测试</button>
-          <button @click="enterWelcome">下一步</button>
+          <button @click="run('testEmb', testEmb)" :disabled="busy('testEmb')"><i v-if="busy('testEmb')"
+              class="ti ti-loader-2"></i> 测试</button>
+          <button class="btn-primary" @click="run('enterW', enterWelcome)" :disabled="busy('enterW')"><i
+              v-if="busy('enterW')" class="ti ti-loader-2"></i> 下一步</button>
         </div>
       </div>
 
       <div v-else-if="step === 3">
         <p class="muted" style="margin-bottom:12px">欢迎对话（{{ wround }}/5 轮）：让 AI 了解你。</p>
         <div
-          style="max-height:300px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--bd);border-radius:8px;padding:10px;background:var(--s1)">
+          style="max-height:300px;overflow-y:auto;margin-bottom:12px;border:1px solid var(--bd);border-radius:8px;padding:10px;background:var(--surface-2)">
           <div v-if="!wmsgs.length && !wstream" class="muted" style="text-align:center;padding:30px 0">AI
             将主动向你提问，开始对话来介绍自己吧</div>
           <div v-for="(m, i) in wmsgs" :key="i" :class="['wbubble', m.role]" style="margin-bottom:8px;max-width:85%">
-            <span style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px">{{ m.role === 'user' ? '你' :
+            <span style="font-size:var(--fs-xs);color:var(--muted);display:block;margin-bottom:2px">{{ m.role === 'user'
+              ? '你' :
               'AI' }}</span>
             <span>{{ m.content }}</span>
           </div>
           <div v-if="wstream" :class="['wbubble', 'assistant']" style="margin-bottom:8px;max-width:85%">
-            <span style="font-size:11px;color:var(--muted);display:block;margin-bottom:2px">AI</span>
+            <span style="font-size:var(--fs-xs);color:var(--muted);display:block;margin-bottom:2px">AI</span>
             <span>{{ wstream }}<span class="typing-dot"></span></span>
           </div>
         </div>
@@ -162,7 +168,8 @@ async function confirmSoul() {
           <button @click="sendWelcome" :disabled="!winput.trim() || wsending || wround >= 5">发送</button>
         </div>
         <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:12px">
-          <button @click="finishWelcome">跳过，直接生成初始人格</button>
+          <button @click="run('finishW', finishWelcome)" :disabled="busy('finishW')"><i v-if="busy('finishW')"
+              class="ti ti-loader-2"></i> 跳过，直接生成初始人格</button>
         </div>
       </div>
 
@@ -170,12 +177,13 @@ async function confirmSoul() {
         <p class="muted" style="margin-bottom:12px">确认初始人格（可编辑）</p>
         <label class="label">SOUL_CORE 核心人格</label>
         <textarea v-model="soul.soul_core"
-          style="width:100%;height:120px;font-family:var(--mono);font-size:12px"></textarea>
+          style="width:100%;height:120px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
         <label class="label" style="margin-top:10px">SOUL_STYLE 对话风格</label>
         <textarea v-model="soul.soul_style"
-          style="width:100%;height:100px;font-family:var(--mono);font-size:12px"></textarea>
+          style="width:100%;height:100px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
         <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-          <button @click="confirmSoul">确认并开始使用</button>
+          <button class="btn-primary" @click="run('confSoul', confirmSoul)" :disabled="busy('confSoul')"><i
+              v-if="busy('confSoul')" class="ti ti-loader-2"></i> 确认并开始使用</button>
         </div>
       </div>
     </div>

@@ -40,12 +40,49 @@
     --acctx: var(--brand-tx);
     --mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    --radius: 16px;
+    --radius-xs: 6px;
     --radius-sm: 10px;
+    --radius: 16px;
+    --radius-lg: 20px;
     --radius-pill: 999px;
     --shadow-1: 0 1px 2px rgba(20, 22, 30, .04), 0 2px 8px rgba(20, 22, 30, .05);
     --shadow-2: 0 6px 24px rgba(20, 22, 30, .10);
     --shadow-brand: 0 6px 20px rgba(59, 110, 246, .28);
+    /* ===== SP-UI v4 规范 token（详见 docs/UI_UX_SPEC.md，新增功能必须复用，禁止硬编码数值）===== */
+    /* 字号阶梯（唯一来源，禁止在模板写死 px 字号） */
+    --fs-xs: 11px;
+    --fs-sm: 12px;
+    --fs-base: 13px;
+    --fs-md: 14px;
+    --fs-lg: 15px;
+    --fs-xl: 17px;
+    --fs-2xl: 20px;
+    --fs-3xl: 22px;
+    /* 间距阶梯（4 的倍数制，用于 margin/padding/gap） */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 20px;
+    --sp-6: 24px;
+    /* 动效时长（唯一来源） */
+    --dur-fast: .15s;
+    --dur: .2s;
+    --dur-slow: .3s;
+    /* z-index 分层（弹窗/抽屉/toast/确认框各归其位，禁止随手写魔法数字） */
+    --z-sticky: 10;
+    --z-menu: 50;
+    --z-drawer: 200;
+    --z-modal: 1000;
+    --z-modal-2: 1100;
+    --z-toast: 2500;
+    --z-confirm: 3000;
+    /* 内容列最大宽度（各页正文列统一） */
+    --content-max: 960px;
+    /* 图标尺寸（非文字排版，用于 <i> 元素） */
+    --icon-sm: 18px;
+    --icon-md: 22px;
+    --icon-lg: 24px;
 }
 
 @media(prefers-color-scheme:dark) {
@@ -129,7 +166,7 @@ textarea {
     border-radius: var(--radius-sm);
     padding: 9px 13px;
     outline: none;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 input:focus,
@@ -147,7 +184,7 @@ button {
     padding: 7px 15px;
     cursor: pointer;
     font-weight: 500;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 button:hover {
@@ -267,7 +304,7 @@ a:hover {
     color: var(--sec);
     font-size: 13.5px;
     font-weight: 500;
-    transition: background .15s, color .15s
+    transition: background var(--dur-fast), color var(--dur-fast)
 }
 
 .side-nav-item i {
@@ -301,7 +338,7 @@ a:hover {
 }
 
 .main>* {
-    max-width: 960px;
+    max-width: var(--content-max);
     margin-left: auto;
     margin-right: auto
 }
@@ -329,7 +366,7 @@ h1 {
 .tabs-sticky {
     position: sticky;
     top: -28px;
-    z-index: 10;
+    z-index: var(--z-sticky);
     background: var(--bg);
     padding: 8px 0 10px;
     margin-bottom: 14px
@@ -348,7 +385,7 @@ h1 {
     background: none;
     border: none;
     border-radius: var(--radius-pill);
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 .tab:hover {
@@ -509,7 +546,7 @@ code {
     display: flex;
     align-items: center;
     justify-content: center;
-    z-index: 100;
+    z-index: var(--z-modal);
     animation: fade .2s
 }
 
@@ -525,7 +562,7 @@ code {
 
 .modal {
     background: var(--surface);
-    border-radius: 20px;
+    border-radius: var(--radius-lg);
     border: 1px solid var(--bd);
     padding: 28px;
     width: 90%;
@@ -534,6 +571,24 @@ code {
     overflow: auto;
     box-shadow: var(--shadow-2);
     animation: pop .2s ease
+}
+
+/* 弹窗尺寸档位（唯一标准：新增弹窗必须用 .modal-sm/md/lg/xl，禁止内联 max-width） */
+.modal-sm {
+    max-width: 400px
+}
+
+.modal-md {
+    max-width: 560px
+}
+
+.modal-lg {
+    max-width: 720px
+}
+
+.modal-xl {
+    max-width: 960px;
+    width: 92vw
 }
 
 @keyframes pop {
@@ -578,7 +633,7 @@ code {
     position: fixed;
     top: 20px;
     right: 20px;
-    z-index: 200;
+    z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
     gap: 10px
@@ -840,7 +895,7 @@ code {
     background: transparent;
     color: var(--muted);
     cursor: pointer;
-    transition: .15s;
+    transition: var(--dur-fast);
     display: inline-flex;
     align-items: center;
     gap: 4px
@@ -895,7 +950,7 @@ code {
     background: var(--surface);
     border-left: 1px solid var(--bd);
     box-shadow: var(--shadow-2);
-    z-index: 200;
+    z-index: var(--z-drawer);
     display: flex;
     flex-direction: column
 }
@@ -924,7 +979,7 @@ code {
     right: 0;
     border-left: none;
     border-radius: 0;
-    z-index: 300
+    z-index: var(--z-modal-2)
 }
 
 /* 操作按钮行：默认弱化，悬浮消息块时恢复 */
@@ -939,7 +994,7 @@ code {
     color: var(--muted);
     cursor: pointer;
     opacity: .45;
-    transition: opacity .15s, background .15s, color .15s
+    transition: opacity var(--dur-fast), background var(--dur-fast), color var(--dur-fast)
 }
 
 .msg-ai:hover .msg-actions i {
@@ -977,7 +1032,7 @@ code {
     cursor: pointer;
     border-radius: 6px;
     padding: 1px 4px;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 .cite-link:hover {
@@ -1024,7 +1079,7 @@ code {
     padding: 0 12px 10px;
     font-size: 12.5px;
     line-height: 1.7;
-    color: #fff;
+    color: var(--fg);
     white-space: pre-wrap;
     word-break: break-word;
     max-height: 260px;
@@ -1034,7 +1089,7 @@ code {
 /* 用户气泡的操作：默认隐藏，悬浮该消息时才显示 */
 .user-actions {
     opacity: 0;
-    transition: opacity .15s
+    transition: opacity var(--dur-fast)
 }
 
 .msg-user:hover .user-actions {
@@ -1148,7 +1203,7 @@ code {
 /* 可点击附件胶囊（点击弹窗：粘贴文本/图片预览，其他格式详情+下载） */
 .attach-chip.attach-click {
     cursor: pointer;
-    transition: background .15s
+    transition: background var(--dur-fast)
 }
 
 .attach-chip.attach-click:hover {
@@ -1162,13 +1217,13 @@ code {
     gap: 10px;
     padding: 10px 14px;
     margin: 6px 0;
-    border: 1px solid var(--line);
+    border: 1px solid var(--bd);
     border-radius: 12px;
     background: var(--surface-2);
-    color: var(--txt);
+    color: var(--fg);
     text-decoration: none;
     max-width: 420px;
-    transition: border-color .15s, background .15s
+    transition: border-color var(--dur-fast), background var(--dur-fast)
 }
 
 .file-card:hover {
@@ -1234,7 +1289,7 @@ code {
     font-size: 18px;
     color: var(--fg);
     cursor: pointer;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 .scroll-latest:hover {
@@ -1310,7 +1365,7 @@ code {
     cursor: pointer;
     border-radius: 8px;
     user-select: none;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 .sess-group-hd:hover {
@@ -1358,7 +1413,7 @@ code {
     border-radius: 12px;
     cursor: pointer;
     margin-bottom: 3px;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 .sess-item:hover {
@@ -1381,7 +1436,7 @@ code {
     border-radius: 6px;
     cursor: pointer;
     opacity: 0;
-    transition: .15s
+    transition: var(--dur-fast)
 }
 
 .sess-item:hover .sess-dots {
@@ -1396,7 +1451,7 @@ code {
     position: absolute;
     right: 8px;
     top: 34px;
-    z-index: 20;
+    z-index: calc(var(--z-menu) + 1);
     background: var(--surface);
     border: 1px solid var(--bd);
     border-radius: 12px;
@@ -1572,15 +1627,232 @@ code {
 }
 
 .doc-queue-item.done i {
-    color: var(--ok, #22c55e)
+    color: var(--succtx)
 }
 
 .doc-queue-item.failed {
-    color: var(--danger, #ef4444)
+    color: var(--dangtx)
 }
 
 .doc-queue-name {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis
+}
+
+/* ============================================================
+   SP-UI v4 规范层 —— 公共组件类与工具类
+   规则：新增功能一律复用以下类，禁止用内联 style 复刻同类视觉。
+   详见 docs/UI_UX_SPEC.md。
+   ============================================================ */
+
+/* ---- 按钮尺寸与变体（唯一标准，替代内联 font-size 按钮） ---- */
+.btn-sm {
+    padding: 5px 12px;
+    font-size: var(--fs-sm)
+}
+
+.btn-xs {
+    padding: 4px 10px;
+    font-size: var(--fs-xs)
+}
+
+/* 次级/幽灵按钮：无边框、透明底，用于卡片内轻量操作 */
+.btn-ghost {
+    background: transparent;
+    border-color: transparent
+}
+
+.btn-ghost:hover {
+    background: var(--surface-2)
+}
+
+/* 危险按钮：与 .dang 文本色一致，用于删除等破坏性操作 */
+button.btn-danger {
+    color: var(--dangtx);
+    border-color: var(--bd-strong)
+}
+
+button.btn-danger:hover {
+    background: var(--dangbg);
+    border-color: var(--dangbg)
+}
+
+/* ---- 分组标题（唯一标准：卡片/区块级标题统一用它，替代散落的内联 font-weight 标题） ---- */
+.section-title {
+    font-size: var(--fs-md);
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: var(--sp-3)
+}
+
+.section-title.mt {
+    margin-top: var(--sp-5)
+}
+
+/* 带强调色的子区标题（如用户画像 区一/区二/区三） */
+.section-sub {
+    font-size: var(--fs-base);
+    font-weight: 600;
+    color: var(--acctx);
+    margin-bottom: var(--sp-3)
+}
+
+/* 弹窗内二级标题（记忆/文档详情的 h3） */
+.modal-subtitle {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    margin-bottom: var(--sp-2)
+}
+
+/* ---- 表单组（唯一标准：弹窗/表单字段统一结构，替代内联 margin-bottom+width:100%） ---- */
+.form-group {
+    margin-bottom: var(--sp-3)
+}
+
+.form-group>input,
+.form-group>select,
+.form-group>textarea,
+.form-group .form-control {
+    width: 100%
+}
+
+.form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--sp-3)
+}
+
+.form-grid input,
+.form-grid select,
+.form-grid textarea {
+    width: 100%
+}
+
+/* 带右侧眼睛图标的密钥输入容器 */
+.input-affix {
+    position: relative
+}
+
+.input-affix>input {
+    width: 100%;
+    padding-right: 40px
+}
+
+.input-affix>.input-affix-icon {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    cursor: pointer;
+    color: var(--muted)
+}
+
+/* ---- 键值对展示（唯一标准：替代记忆详情的 badge 墙，用于元数据罗列） ---- */
+.kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: var(--sp-1) var(--sp-3);
+    font-size: var(--fs-sm);
+    margin-bottom: var(--sp-3)
+}
+
+.kv dt {
+    color: var(--muted)
+}
+
+.kv dd {
+    color: var(--sec);
+    margin: 0
+}
+
+/* ---- 筛选胶囊（与页面级导航 .tab 语义区分：.chip 仅用于筛选/切换，不表示所在页面） ---- */
+.chip {
+    padding: 5px 14px;
+    font-size: var(--fs-sm);
+    font-weight: 500;
+    color: var(--sec);
+    background: var(--surface-2);
+    border: 1px solid transparent;
+    border-radius: var(--radius-pill);
+    cursor: pointer;
+    transition: var(--dur-fast)
+}
+
+.chip:hover {
+    color: var(--fg)
+}
+
+.chip.active {
+    color: var(--acctx);
+    background: var(--brand-soft);
+    border-color: var(--brand-soft)
+}
+
+/* ---- 通用间距工具类（一次性替代高频内联 margin/gap；仅补充常用档位） ---- */
+.mt-1 {
+    margin-top: var(--sp-1)
+}
+
+.mt-2 {
+    margin-top: var(--sp-2)
+}
+
+.mt-3 {
+    margin-top: var(--sp-3)
+}
+
+.mt-4 {
+    margin-top: var(--sp-4)
+}
+
+.mb-2 {
+    margin-bottom: var(--sp-2)
+}
+
+.mb-3 {
+    margin-bottom: var(--sp-3)
+}
+
+.mb-4 {
+    margin-bottom: var(--sp-4)
+}
+
+/* ---- 焦点可见性（可访问性：自研可点击元素补键盘焦点环） ---- */
+.tab:focus-visible,
+.chip:focus-visible,
+.sess-item:focus-visible,
+.cw:focus-visible,
+.card:focus-visible,
+.side-nav-item:focus-visible,
+.msg-actions i:focus-visible,
+.file-card:focus-visible {
+    outline: 2px solid var(--brand-solid);
+    outline-offset: 2px
+}
+
+/* ---- 异步进行中：按钮内 spinner 与禁用态统一表现 ---- */
+button .ti-loader-2 {
+    animation: spin 1s linear infinite
+}
+
+/* ---- 响应式：窄屏栅格自适应 + 侧栏收窄，避免挤压/溢出 ---- */
+@media (max-width: 900px) {
+
+    .g2,
+    .g3 {
+        grid-template-columns: 1fr
+    }
+
+    .form-grid {
+        grid-template-columns: 1fr
+    }
+
+    .side-panel {
+        width: 208px
+    }
+
+    .main {
+        padding: 20px 18px
+    }
 }

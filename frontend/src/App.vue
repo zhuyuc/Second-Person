@@ -53,17 +53,23 @@ function copyTraceId(tid) { navigator.clipboard.writeText(tid).catch(() => { }) 
   <div class="toast-wrap">
     <div v-for="t in toast.items" :key="t.id" class="toast" :class="'toast-' + t.type">
       <span style="flex:1;min-width:0;word-break:break-word">{{ t.message }}</span>
-      <span v-if="t.traceId && t.type === 'error'" style="cursor:pointer;font-size:11px;opacity:.7;margin-right:6px"
-        title="复制 trace_id" @click="copyTraceId(t.traceId); toast.remove(t.id)">复制ID</span>
+      <span v-if="t.traceId && t.type === 'error'"
+        style="cursor:pointer;font-size:var(--fs-xs);opacity:.7;margin-right:6px" title="复制 trace_id"
+        @click="copyTraceId(t.traceId); toast.remove(t.id)">复制ID</span>
       <span style="cursor:pointer" @click="toast.remove(t.id)">×</span>
     </div>
   </div>
 
   <!-- 系统内置确认弹窗（替代原生 window.confirm） -->
-  <div v-if="confirm.item" class="overlay" style="z-index:2000" @click.self="confirm.cancel()">
-    <div class="modal" style="max-width:420px">
+  <div v-if="confirm.item" class="overlay" style="z-index:var(--z-confirm)" @click.self="confirm.cancel()">
+    <div class="modal modal-sm">
       <div class="mt">{{ confirm.item.title }}</div>
       <p style="color:var(--sec);margin:6px 0 20px;line-height:1.6;white-space:pre-wrap">{{ confirm.item.message }}</p>
+      <label v-if="confirm.item.checkbox" class="fg"
+        style="gap:8px;align-items:flex-start;cursor:pointer;margin:-10px 0 18px;font-size:var(--fs-base);color:var(--sec)">
+        <input v-model="confirm.checked" type="checkbox" style="width:auto;margin-top:3px;flex-shrink:0" />
+        <span>{{ confirm.item.checkbox }}</span>
+      </label>
       <div class="fg" style="justify-content:flex-end;gap:8px">
         <button @click="confirm.cancel()">{{ confirm.item.cancelText }}</button>
         <button :class="confirm.item.danger ? 'dang' : 'btn-primary'" @click="confirm.confirm()">{{

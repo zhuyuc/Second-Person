@@ -82,6 +82,13 @@ async function switchModel(pid) {
   toast.push('success', '已切换，下一轮对话生效')
 }
 
+// 仅提示类系统通知：Web 端已在导入时用 toast 实时反馈，无需在对话流中留存横幅（含历史）
+const TOAST_ONLY_NOTIF = ['doc_imported']
+function stripToastNotifs(msgs) {
+  return msgs.filter(m => !(m.message_type === 'system_notification'
+    && TOAST_ONLY_NOTIF.includes(m.notification_type)))
+}
+
 async function openSession(sid) {
   sessStore.currentSid = sid
   const msgs = await api.get('/chat/messages?session_id=' + sid)
@@ -93,7 +100,7 @@ async function openSession(sid) {
       m.content = m.content.split('\n---\n').pop()
     }
   }
-  messages.value = msgs
+  messages.value = stripToastNotifs(msgs)
   scrollBottom()
   tryReattach(sid)
 }
@@ -417,7 +424,7 @@ async function reloadMessages(sid) {
         m.content = m.content.split('\n---\n').pop()
       }
     }
-    if (sessStore.currentSid === sid) messages.value = msgs
+    if (sessStore.currentSid === sid) messages.value = stripToastNotifs(msgs)
   } catch { /* 重拉失败：保留内存部分回复不降级 */ }
 }
 
@@ -760,7 +767,7 @@ onUnmounted(() => {
           <div v-if="!messages.length && !streamText" class="chat-hero">
             <div class="logo-lg"><i class="ti ti-brain"></i></div>
             <h2>Hi，今天从哪里开始？</h2>
-            <p class="muted" style="font-size:14px">我是 Second Person，你的私人顾问与知识管理伙伴，记忆驱动、越用越懂你</p>
+            <p class="muted" style="font-size:var(--fs-md)">我是 Second Person，你的私人顾问与知识管理伙伴，记忆驱动、越用越懂你</p>
           </div>
           <div v-for="(m, i) in messages" :key="i">
             <!-- 用户气泡 -->
@@ -896,10 +903,10 @@ onUnmounted(() => {
             @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop"></textarea>
           <div class="row" style="margin-top:10px">
             <div class="fg" style="gap:8px">
-              <i class="ti ti-paperclip" style="cursor:pointer;color:var(--muted);font-size:18px" title="上传文件"
+              <i class="ti ti-paperclip" style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="上传文件"
                 @click="triggerFile"></i>
               <select v-if="providers.length" v-model="chatModelId" @change="switchModel(chatModelId)"
-                style="padding:4px 8px;font-size:12px;max-width:140px">
+                style="padding:4px 8px;font-size:var(--fs-sm);max-width:140px">
                 <option v-for="p in providers" :key="p.id" :value="p.id"
                   :style="{ color: p.status === 'healthy' ? 'var(--succtx)' : p.status === 'half_open' ? 'var(--warntx)' : 'var(--muted)' }">
                   <span class="dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:"
@@ -919,10 +926,10 @@ onUnmounted(() => {
   </div>
 
   <!-- 引用记忆详情弹窗（点击对话中的引用打开，z-index 依记忆详情弹窗层级规范） -->
-  <div v-if="memDetail" class="overlay" style="z-index:130" @click.self="memDetail = null">
-    <div class="modal" style="max-width:560px">
+  <div v-if="memDetail" class="overlay" style="z-index:var(--z-modal-2)" @click.self="memDetail = null">
+    <div class="modal modal-md">
       <div class="mt">记忆详情</div>
-      <h3 style="font-size:16px;margin-bottom:8px">{{ memDetail.frontmatter?.title || memDetail.id }}</h3>
+      <h3 class="modal-subtitle">{{ memDetail.frontmatter?.title || memDetail.id }}</h3>
       <div class="fg" style="gap:6px;margin-bottom:10px">
         <span v-if="memDetail.frontmatter?.confidence" class="badge badge-a">{{
           CONF_MAP[memDetail.frontmatter?.confidence] || memDetail.frontmatter?.confidence }}</span>
@@ -943,16 +950,15 @@ onUnmounted(() => {
   </div>
 
   <!-- 附件查看弹窗：粘贴文本/图片应用内预览，其他格式信息+下载（自研弹窗，z-index 同记忆详情层级） -->
-  <div v-if="attachView" class="overlay" style="z-index:130" @click.self="attachView = null">
-    <div class="modal"
-      :style="{ maxWidth: attachView.type === 'text' ? '680px' : attachView.type === 'image' ? '760px' : '440px' }">
+  <div v-if="attachView" class="overlay" style="z-index:var(--z-modal-2)" @click.self="attachView = null">
+    <div class="modal" :class="attachView.type === 'file' ? 'modal-sm' : 'modal-lg'">
       <div class="mt">{{ attachView.type === 'text' ? '粘贴的内容' : attachView.type === 'image' ? '图片预览' : '附件详情' }}
       </div>
       <!-- 粘贴文本：全文预览 -->
       <div v-if="attachView.type === 'text'">
         <div class="muted" style="margin-bottom:10px">{{ attachView.chars }} 字 · {{ attachView.lines }} 行</div>
         <div
-          style="white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Consolas,monospace;font-size:13px;line-height:1.6;color:var(--sec);background:var(--surface-2);border:1px solid var(--bd);border-radius:12px;padding:14px;max-height:60vh;overflow-y:auto">
+          style="white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Consolas,monospace;font-size:var(--fs-base);line-height:1.6;color:var(--sec);background:var(--surface-2);border:1px solid var(--bd);border-radius:12px;padding:14px;max-height:60vh;overflow-y:auto">
           {{ attachView.text }}</div>
       </div>
       <!-- 图片：应用内大图预览 -->
@@ -962,7 +968,7 @@ onUnmounted(() => {
       <!-- 其他格式：不做内容预览，只展示文件信息 + 下载 -->
       <div v-else>
         <div class="fg" style="gap:10px;margin-bottom:14px">
-          <i class="ti ti-paperclip" style="font-size:22px;color:var(--muted)"></i>
+          <i class="ti ti-paperclip" style="font-size:var(--icon-md);color:var(--muted)"></i>
           <b style="word-break:break-all">{{ attachView.name }}</b>
         </div>
         <div class="muted" style="margin-bottom:6px">格式：{{ attachExt(attachView.name) }}</div>
@@ -982,8 +988,8 @@ onUnmounted(() => {
   </div>
 
   <!-- 反馈原因弹窗（自研对话框，替代原生 prompt） -->
-  <div v-if="fbDialog" class="overlay" style="z-index:2000" @click.self="fbDialog = null">
-    <div class="modal" style="max-width:400px">
+  <div v-if="fbDialog" class="overlay" style="z-index:var(--z-confirm)" @click.self="fbDialog = null">
+    <div class="modal modal-sm">
       <div class="mt">{{ fbDialog.fb === 1 ? '哪些地方做得好？' : '哪里出了问题？' }}</div>
       <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0 18px">
         <button v-for="opt in (fbDialog.fb === 1 ? goodReasons : badReasons)" :key="opt.value" class="fb-reason"

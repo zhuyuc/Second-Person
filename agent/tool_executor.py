@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
@@ -56,9 +57,13 @@ class ToolExecutor:
 
     async def _run_with_empty_retry(self, tool, params) -> tuple[Any, str | None]:
         result = None
+        # 单工具独立超时：某工具卡死不再吞掉整个请求 600s 预算
+        timeout = self.config.get("tool_timeout_seconds", 60)
         for attempt in range(2):
             try:
-                result = await tool.run(**params)
+                result = await asyncio.wait_for(tool.run(**params), timeout=timeout)
+            except asyncio.TimeoutError:
+                return None, f"工具执行超时（>{timeout}s）"
             except Exception as e:  # noqa: BLE001
                 return None, str(e)
             if not hooks.is_empty_result(result) or attempt == 1:

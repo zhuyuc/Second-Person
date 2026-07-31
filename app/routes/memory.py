@@ -420,6 +420,47 @@ async def dismiss_suggestion(request: Request):
     return {"code": 200, "data": {}}
 
 
+@router.post("/memory/lint/duplicates/resolve")
+async def resolve_duplicate(request: Request):
+    """重复检测四选一裁决（交互与矛盾处理对齐）：keep_a/keep_b 删另一条并给
+    幸存者记 merged 时间线；keep_both 视为非重复关闭建议；delete_both 两条都删。
+    删除复用单条记忆物理删除链（图谱边/md/向量/矛盾自愈同事务清理）。"""
+    body = await request.json()
+    c = _c()
+    sid, res = body["suggestion_id"], body.get("resolution")
+    if res not in ("keep_a", "keep_b", "keep_both", "delete_both"):
+        return {"code": 400, "message": "无效的 resolution", "trace_id": None,
+                "details": None}
+    row = c.db.query_one(
+        "SELECT * FROM lint_suggestions WHERE suggestion_id=? "
+        "AND suggestion_type='duplicate' AND status='open'", (sid,))
+    if not row:
+        return {"code": 404, "message": "建议不存在或已处理", "trace_id": None,
+                "details": None}
+    a, b = row["primary_memory_id"], row["related_memory_id"]
+    if res == "keep_both":
+        c.db.execute(
+            "UPDATE lint_suggestions SET status='dismissed', "
+            "dismiss_reason='not_duplicate', resolved_at=? WHERE suggestion_id=?",
+            (now_iso(), sid))
+        return {"code": 200, "data": {"deleted": []}}
+    to_delete = {"keep_a": [b], "keep_b": [a], "delete_both": [a, b]}[res]
+    survivor = {"keep_a": a, "keep_b": b, "delete_both": None}[res]
+    for mid in to_delete:
+        # 已被其它路径删除的幂等跳过，不阻断裁决落地
+        if c.palace.get(mid) is None:
+            continue
+        await c.fw.submit("memory", {"op": "delete", "memory_id": mid}, wait=True)
+        c.oplog.log("memory_delete", mid)
+    if survivor:
+        with c.db.transaction() as conn:
+            c.palace.add_timeline(conn, survivor, "merged",
+                                  f"重复裁决保留本条，删除 {to_delete[0]}")
+    c.db.execute("UPDATE lint_suggestions SET status='adopted', resolved_at=? "
+                 "WHERE suggestion_id=?", (now_iso(), sid))
+    return {"code": 200, "data": {"deleted": to_delete}}
+
+
 @router.post("/memory/orphans/relink")
 async def relink_orphans():
     """存量孤立记忆批量补链：逐条按语义相似度建 related 引用，

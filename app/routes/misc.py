@@ -196,9 +196,38 @@ async def document_detail(doc_id: str):
 
 
 @router.delete("/import/documents/{doc_id}")
-async def delete_document(doc_id: str):
-    _c().ingest.delete_document(doc_id)
-    return {"code": 200, "data": {"warning": "删除会影响 --recompile 重建完整性"}}
+async def delete_document(doc_id: str, cascade: bool = False):
+    """删除知识库文档。cascade=true 时连带删除该文档提炼的记忆（重要记忆保留），
+    逐条复用单条记忆物理删除链（图谱边/md/向量/矛盾自愈同事务清理）。"""
+    import json
+
+    c = _c()
+    deleted = kept = failed = 0
+    if cascade:
+        # 必须在删 raw_docs 行之前读取归属映射，否则溯源永久丢失
+        row = c.db.query_one(
+            "SELECT extracted_memory_ids FROM raw_docs WHERE id=?", (doc_id,))
+        mem_ids = json.loads(row["extracted_memory_ids"]
+                             or "[]") if row else []
+        for mid in mem_ids:
+            m = c.palace.get(mid)
+            if m is None:
+                continue  # 已手动删除/被合并演化，幂等跳过
+            if m["is_important"]:
+                kept += 1  # 用户显式标记的重要记忆不随文档级联删除
+                continue
+            # 逐条独立删除：单条失败不中断其余，汇总结果交前端提示
+            try:
+                await c.fw.submit(
+                    "memory", {"op": "delete", "memory_id": mid}, wait=True)
+                c.oplog.log("memory_delete", mid)
+                deleted += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+    c.ingest.delete_document(doc_id)
+    return {"code": 200, "data": {
+        "deleted_memories": deleted, "kept_important": kept, "failed": failed,
+        "warning": "删除会影响 --recompile 重建完整性"}}
 
 
 # ---- 文档导出（Markdown / Word 下载） --------------------------------------

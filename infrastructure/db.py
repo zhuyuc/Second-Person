@@ -96,6 +96,11 @@ class Database:
         self._queue: queue.Queue = queue.Queue()
         self._writer_conn: sqlite3.Connection | None = None
         self._depth_warned = False
+        # 火忘式写入失败告警：累计失败达阈值时通过 alert_hook 上浮一次
+        # （token 统计/日志等高频小写失败本不回传调用方，可能静默丢数据）
+        self._nowait_fail_count = 0
+        self._nowait_fail_alerted = False
+        self.alert_hook = None   # Callable[[str, str], None]
         self._writer = threading.Thread(
             target=self._writer_loop, name="db-writer", daemon=True)
         self._writer.start()
@@ -181,6 +186,18 @@ class Database:
                         t.error = e
                         if t.event is None:
                             logger.exception("火忘式写入失败：%s", t.sql[:120])
+                            self._nowait_fail_count += 1
+                            if (self._nowait_fail_count >= 20
+                                    and not self._nowait_fail_alerted
+                                    and self.alert_hook):
+                                self._nowait_fail_alerted = True
+                                try:
+                                    self.alert_hook(
+                                        "db_write_degraded",
+                                        f"检测到 {self._nowait_fail_count} 次后台写入失败"
+                                        "（统计/日志可能丢失），请检查磁盘空间与数据库完整性。")
+                                except Exception:  # noqa: BLE001
+                                    pass
                     finally:
                         if t.event:
                             t.event.set()
@@ -309,7 +326,11 @@ class Database:
             conn.close()
 
     def wal_checkpoint(self, mode: str = "TRUNCATE") -> None:
-        """WAL checkpoint：写线程存活时经队列串行执行，否则直连兜底。"""
+        """WAL checkpoint：写线程存活时经队列串行执行，否则直连执行。"""
+        # 白名单校验：mode 拼接进 PRAGMA，仅允许四种合法值，防任意 PRAGMA 注入
+        mode = (mode or "TRUNCATE").upper()
+        if mode not in ("PASSIVE", "FULL", "RESTART", "TRUNCATE"):
+            raise ValueError(f"非法 wal_checkpoint 模式：{mode}")
         if self._writer.is_alive():
             task = _FnTask(
                 lambda c: c.execute(f"PRAGMA wal_checkpoint({mode})"))

@@ -121,12 +121,14 @@ onMounted(() => sess.load())
             <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px">
               <div style="min-width:0;flex:1">
                 <div style="display:flex;align-items:center;gap:5px">
-                  <i v-if="s.pinned" class="ti ti-pin" style="font-size:12px;color:var(--acctx);flex-shrink:0"></i>
+                  <i v-if="s.pinned" class="ti ti-pin"
+                    style="font-size:var(--fs-sm);color:var(--acctx);flex-shrink:0"></i>
                   <input v-if="editingId === s.session_id" :id="'rename-' + s.session_id" v-model="editTitle"
                     class="sess-rename-input" @click.stop @blur="saveRename(s)"
                     @keydown.enter.prevent="saveRename(s)" />
                   <div v-else class="sess-title"
-                    style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{
+                    style="font-size:var(--fs-base);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                    {{
                       s.title }}</div>
                   <span v-if="s.channel && editingId !== s.session_id" class="sess-channel-badge">{{
                     channelName(s.channel) }}</span>
@@ -142,7 +144,7 @@ onMounted(() => sess.load())
           </div>
         </div>
       </div>
-      <div v-if="menuId" @click="menuId = null" style="position:fixed;inset:0;z-index:15"></div>
+      <div v-if="menuId" @click="menuId = null" style="position:fixed;inset:0;z-index:var(--z-menu)"></div>
     </div>
   </div>
 </template>

@@ -385,34 +385,37 @@ async def usage_distribution(source: str = "", model: str = ""):
 
 @router.get("/settings/usage/trend")
 async def usage_trend(period: str = "30d", source: str = "", model: str = ""):
-    """用量趋势：30d=近30天按天 / month=本月按天 / year=当年按月。"""
+    """用量趋势：30d=近30天按天 / month=本月按天 / year=当年按月。
+    每个时间桶按模型分组返回 models 明细（供前端堆叠柱状 + 多模型 tooltip），
+    同时保留 tokens 总量字段兼容旧调用方。"""
     c = _c()
-    out = []
     now = now_cst()
     extra, eargs = _usage_where(source, model)
+
+    def bucket(prefix: str, label: str) -> dict:
+        rows = c.db.query_all(
+            "SELECT model_name, SUM(input_tokens+output_tokens) t FROM token_usage "
+            "WHERE create_time LIKE ?" + extra + " GROUP BY model_name",
+            (f"{prefix}%", *eargs))
+        models = [{"name": r["model_name"] or "未知", "tokens": r["t"] or 0}
+                  for r in rows if (r["t"] or 0) > 0]
+        models.sort(key=lambda m: m["tokens"], reverse=True)
+        return {"label": label, "tokens": sum(m["tokens"] for m in models),
+                "models": models}
+
+    out = []
     if period == "year":
         for m in range(1, 13):
-            prefix = f"{now.year}-{m:02d}"
-            row = c.db.query_one(
-                "SELECT COALESCE(SUM(input_tokens+output_tokens),0) t FROM token_usage "
-                "WHERE create_time LIKE ?" + extra, (f"{prefix}%", *eargs))
-            out.append({"label": f"{m}月", "tokens": row["t"]})
+            out.append(bucket(f"{now.year}-{m:02d}", f"{m}月"))
     elif period == "month":
         import calendar
         days_in_month = calendar.monthrange(now.year, now.month)[1]
         for d in range(1, days_in_month + 1):
-            day = f"{now.year}-{now.month:02d}-{d:02d}"
-            row = c.db.query_one(
-                "SELECT COALESCE(SUM(input_tokens+output_tokens),0) t FROM token_usage "
-                "WHERE create_time LIKE ?" + extra, (f"{day}%", *eargs))
-            out.append({"label": f"{d}日", "tokens": row["t"]})
+            out.append(bucket(f"{now.year}-{now.month:02d}-{d:02d}", f"{d}日"))
     else:  # 30d：当前往前 30 天
         for i in range(30):
             day = (now - timedelta(days=29 - i)).strftime("%Y-%m-%d")
-            row = c.db.query_one(
-                "SELECT COALESCE(SUM(input_tokens+output_tokens),0) t FROM token_usage "
-                "WHERE create_time LIKE ?" + extra, (f"{day}%", *eargs))
-            out.append({"label": day[5:], "tokens": row["t"]})
+            out.append(bucket(day, day[5:]))
     return {"code": 200, "data": out}
 
 
@@ -689,6 +692,29 @@ async def edit_platform(pid: str, request: Request):
     if row["enabled"] and hasattr(c, "adapters"):
         await c.adapters.reload()
     return {"code": 200, "data": {}}
+
+
+@router.post("/settings/platforms/test-push")
+async def test_push():
+    """发送一条测试系统通知到当前 IM 渠道，验证主动推送通道是否畅通。
+    同步发送并返回解析出的推送目标与结果，不走 24h 去重。"""
+    c = _c()
+    ad = getattr(c, "adapters", None)
+    active = ad.active if ad else None
+    if not active:
+        return {"code": 400, "message": "当前未启用任何 IM 渠道", "trace_id": None,
+                "details": None}
+    target = ad.resolve_push_target()
+    if not target:
+        return {"code": 400, "message": "无可用推送目标：请先在渠道配置填写白名单用户"
+                "，或先用该账号给机器人发一条消息", "trace_id": None, "details": None}
+    try:
+        await active.send_message(
+            target, "【测试通知】Second Person 主动推送通道验证，收到即代表配置正常。")
+    except Exception as e:  # noqa: BLE001
+        return {"code": 400, "message": f"推送失败：{e}", "trace_id": None,
+                "details": None}
+    return {"code": 200, "data": {"target": target}}
 
 
 @router.delete("/settings/platforms/{pid}")

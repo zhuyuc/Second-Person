@@ -123,30 +123,36 @@ class VectorStore:
     # ---- 检索 -------------------------------------------------------------
     def search(self, query_vec: list[float] | np.ndarray, top_k: int,
                threshold: float) -> list[tuple[str, float]]:
-        """余弦相似度 ≥ threshold 过滤后取 top_k。返回 [(memory_id, score)]。"""
+        """余弦相似度 ≥ threshold 过滤后取 top_k。返回 [(memory_id, score)]。
+        锁内只做快照（矩阵引用 + id 映射拷贝），矩阵运算在锁外执行，
+        避免大规模向量下持锁期间阻塞 add/remove/load。"""
         with self._lock:
             if self._matrix is None or self._matrix.shape[0] == 0:
                 return []
-            q = np.asarray(query_vec, dtype=np.float32)
-            if q.shape[0] != self._dim:
-                return []
-            qn = q / (np.linalg.norm(q) + 1e-8)
             mat = self._matrix
-            norms = np.linalg.norm(mat, axis=1) + 1e-8
-            sims = (mat @ qn) / norms
-            order = np.argsort(-sims)
-            out: list[tuple[str, float]] = []
-            for i in order:
-                mid = self._index_to_id[i]
-                if mid is None:      # tombstone
-                    continue
-                score = float(sims[i])
-                if score < threshold:
-                    break
-                out.append((mid, score))
-                if len(out) >= top_k:
-                    break
-            return out
+            index_to_id = list(self._index_to_id)   # 快照，与 mat 同一时刻一致
+            dim = self._dim
+        q = np.asarray(query_vec, dtype=np.float32)
+        if dim is None or q.shape[0] != dim:
+            return []
+        qn = q / (np.linalg.norm(q) + 1e-8)
+        norms = np.linalg.norm(mat, axis=1) + 1e-8
+        sims = (mat @ qn) / norms
+        order = np.argsort(-sims)
+        out: list[tuple[str, float]] = []
+        for i in order:
+            if i >= len(index_to_id):
+                continue
+            mid = index_to_id[i]
+            if mid is None:      # tombstone
+                continue
+            score = float(sims[i])
+            if score < threshold:
+                break
+            out.append((mid, score))
+            if len(out) >= top_k:
+                break
+        return out
 
     def top_similar(self, query_vec, n: int = 20) -> list[tuple[str, float]]:
         """取相似度最高的前 n 条（不设阈值），供 Distiller 去重候选集。"""

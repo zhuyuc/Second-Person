@@ -23,6 +23,12 @@ async function request(method, path, body, isForm) {
         handleError(data, resp.status)
         throw new Error(data.message || '请求失败')
     }
+    // 非标准响应兑底：HTTP 失败但响应体无 code（如 405/502/网关错误页），
+    // 不能静默当成功返回，否则调用方会误报“操作成功”但后端实际未执行
+    if (!resp.ok) {
+        useToast().push('error', `请求失败（HTTP ${resp.status}），后端可能未重启或接口不存在`)
+        throw new Error(`HTTP ${resp.status}`)
+    }
     return data.data
 }
 

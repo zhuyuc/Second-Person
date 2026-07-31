@@ -65,8 +65,15 @@ class AdapterManager:
         try:
             await adapter.connect()
             self._active = adapter
-            self.notifications.set_im_sender(
-                lambda text: adapter.send_message(row["whitelist_user_id"] or "", text))
+
+            def _im_send(text, _ad=adapter):
+                target = self.resolve_push_target()
+                if not target:
+                    logger.warning("IM 主动推送跳过：%s 无可用推送目标（whitelist 为空且"
+                                   "无入站消息记录）", _ad.platform_type)
+                    return
+                return _ad.send_message(target, text)
+            self.notifications.set_im_sender(_im_send)
             logger.info("已加载 IM 适配器：%s", row["platform_type"])
         except Exception as e:  # noqa: BLE001
             logger.warning("IM 适配器 %s 连接失败", row["platform_type"])
@@ -76,6 +83,22 @@ class AdapterManager:
                 "last_failure_reason=? WHERE id=?",
                 (now_cst().isoformat(timespec="seconds"),
                  f"连接失败：{e}", row["id"]))
+
+    def resolve_push_target(self) -> str:
+        """解析当前 IM 主动推送目标（每次调用时实时求值，配置变更即生效）：
+        优先用户在设置页录入的 whitelist_user_id；为空时回退到最近一次入站
+        消息的发送者 open_id（platform_sessions 已持久化），避免空目标静默失败。"""
+        row = self.db.query_one(
+            "SELECT platform_type, whitelist_user_id FROM platforms "
+            "WHERE enabled=1 AND platform_type!='web' LIMIT 1")
+        if not row:
+            return ""
+        if row["whitelist_user_id"]:
+            return row["whitelist_user_id"]
+        r = self.db.query_one(
+            "SELECT platform_user_id FROM platform_sessions WHERE platform=? "
+            "ORDER BY created_at DESC LIMIT 1", (row["platform_type"],))
+        return (r["platform_user_id"] if r else "") or ""
 
     async def reload(self) -> None:
         if self._active:

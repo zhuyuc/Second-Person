@@ -10,13 +10,20 @@
 -- T 分隔 ISO 格式。转换后不再匹配该格式，天然幂等，不会重复加 8 小时。
 -- ============================================================
 UPDATE schema_migrations
-SET applied_at = strftime('%Y-%m-%dT%H:%M:%S', datetime(applied_at, '+8 hours'))
+SET applied_at = strftime(
+        '%Y-%m-%dT%H:%M:%S',
+        datetime(applied_at, '+8 hours')
+    )
 WHERE applied_at LIKE '____-__-__ __:__:__';
-
 UPDATE platforms
-SET created_at = strftime('%Y-%m-%dT%H:%M:%S', datetime(created_at, '+8 hours'))
+SET created_at = strftime(
+        '%Y-%m-%dT%H:%M:%S',
+        datetime(created_at, '+8 hours')
+    )
 WHERE created_at LIKE '____-__-__ __:__:__';
-
 UPDATE lint_suggestions
-SET resolved_at = strftime('%Y-%m-%dT%H:%M:%S', datetime(resolved_at, '+8 hours'))
+SET resolved_at = strftime(
+        '%Y-%m-%dT%H:%M:%S',
+        datetime(resolved_at, '+8 hours')
+    )
 WHERE resolved_at LIKE '____-__-__ __:__:__';

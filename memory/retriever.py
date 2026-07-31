@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -148,9 +149,10 @@ class Retriever:
         qtype = classify_query(query)
         pk_factor = cfg.get("personal_query_knowledge_factor", 0.7)
         km_factor = cfg.get("knowledge_query_memory_factor", 0.85)
+        rows_map = self.palace.get_many(list(scores.keys()))
         out: list[Candidate] = []
         for mid, c in scores.items():
-            row = self.palace.get(mid)
+            row = rows_map.get(mid)
             if not row or row["lifecycle"] in ("archived", "missing"):
                 continue
             c.title, c.summary, c.lifecycle = row["title"], row["summary"], row["lifecycle"]
@@ -252,15 +254,16 @@ class Retriever:
                 if not chosen_ids:
                     diag_gate = "refine_empty"
             except Exception:  # noqa: BLE001
-                chosen_ids = [c.memory_id for c in candidates[:3]]
-                result.degraded = "第 2 层精筛不可用，注入 top-3 未精筛候选"
+                chosen_ids = self._degrade_pick(candidates)
+                result.degraded = "第 2 层精筛不可用，按得分降级注入（已过滤弱尾）"
                 diag_refined_count = len(chosen_ids)
         else:
-            chosen_ids = [c.memory_id for c in candidates[:3]]
+            chosen_ids = self._degrade_pick(candidates)
 
         # 第 3 层：加载详情 + 1 跳交叉引用（chosen_ids 为空时自然跳过）
+        # _load_detail 含同步读 md 文件，丢工作线程避免磁盘忙时阻塞事件循环
         for mid in chosen_ids:
-            detail = self._load_detail(mid)
+            detail = await asyncio.to_thread(self._load_detail, mid)
             if detail:
                 result.hits.append(detail)
                 result.loaded_ids.append(mid)
@@ -268,7 +271,7 @@ class Retriever:
         related = self._expand_one_hop(
             chosen_ids, limit=2, query_vec=query_vec)
         for rmid in related:
-            detail = self._load_detail(rmid)
+            detail = await asyncio.to_thread(self._load_detail, rmid)
             if detail:
                 detail["relation"] = "关联记忆"
                 result.related.append(detail)
@@ -292,28 +295,44 @@ class Retriever:
         }
         return result
 
+    def _degrade_pick(self, candidates: list) -> list[str]:
+        """精筛不可用时的降级挑选：候选已经预筛阀值准入，此处再按相对得分
+        过滤明显弱于首条的尾部，最多取 3 条，至少保留最相关的 1 条。"""
+        if not candidates:
+            return []
+        top = candidates[0].final_score or 0.0
+        ratio = self.config.get("refine_degrade_score_ratio", 0.5)
+        picked = [c.memory_id for c in candidates[:3]
+                  if top <= 0 or (c.final_score or 0.0) >= top * ratio]
+        return picked or [candidates[0].memory_id]
+
     def _expand_one_hop(self, seed_ids: list[str], limit: int,
                         query_vec=None) -> list[str]:
         vthr = self.config.get("vector_threshold", 0.55)
         seen = set(seed_ids)
-        out: list[str] = []
+        # 先收集候选目标再批量取元数据，避免逐条 palace.get 的 N+1
+        targets: list[str] = []
         for mid in seed_ids:
             for link in self.palace.outlinks(mid):
                 t = link["target_id"]
                 if t not in seen:
                     seen.add(t)
-                    row = self.palace.get(t)
-                    if not row or row["lifecycle"] not in ("active", "stable", "stale"):
-                        continue
-                    # 扩散衰减：关联记忆须与本轮线索余弦过准入线才注入；
-                    # query_vec 不可用（embedding 降级）时维持原行为不额外收紧
-                    if query_vec is not None:
-                        sim = self.vs.cosine_to(t, query_vec)
-                        if sim is not None and sim < vthr:
-                            continue
-                    out.append(t)
-                    if len(out) >= limit:
-                        return out
+                    targets.append(t)
+        rows_map = self.palace.get_many(targets)
+        out: list[str] = []
+        for t in targets:
+            row = rows_map.get(t)
+            if not row or row["lifecycle"] not in ("active", "stable", "stale"):
+                continue
+            # 扩散衰减：关联记忆须与本轮线索余弦过准入线才注入；
+            # query_vec 不可用（embedding 降级）时维持原行为不额外收紧
+            if query_vec is not None:
+                sim = self.vs.cosine_to(t, query_vec)
+                if sim is not None and sim < vthr:
+                    continue
+            out.append(t)
+            if len(out) >= limit:
+                return out
         return out
 
     def _load_detail(self, mid: str) -> dict | None:

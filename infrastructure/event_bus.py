@@ -46,6 +46,16 @@ KNOWN_EVENTS = {
 class EventBus:
     def __init__(self) -> None:
         self._subscribers: dict[str, list[Callable]] = defaultdict(list)
+        # 主事件循环引用：供非循环线程（如 FileWriter 工作线程）将
+        # 协程订阅者安全投递回主循环，避免在临时循环上运行造成跨循环对象串扰
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        """绑定主事件循环（启动时在循环线程调用）。"""
+        try:
+            self._loop = loop or asyncio.get_running_loop()
+        except RuntimeError:
+            self._loop = None
 
     def subscribe(self, event: str, handler: Callable) -> Callable:
         """订阅事件。返回取消订阅的闭包。"""
@@ -89,6 +99,12 @@ class EventBus:
                         loop = asyncio.get_running_loop()
                         loop.create_task(result)  # type: ignore[arg-type]
                     except RuntimeError:
-                        asyncio.run(result)  # type: ignore[arg-type]
+                        # 非事件循环线程（如 FileWriter 工作线程）：投递回主循环执行，
+                        # 避免 asyncio.run 在临时循环运行造成与主循环对象串扰
+                        if self._loop is not None and not self._loop.is_closed():
+                            self._loop.call_soon_threadsafe(
+                                lambda r=result: self._loop.create_task(r))
+                        else:
+                            asyncio.run(result)  # type: ignore[arg-type]
             except Exception:  # noqa: BLE001
                 logger.exception("事件订阅者执行失败：event=%s", event)
