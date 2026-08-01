@@ -758,15 +758,19 @@ onUnmounted(() => {
   <div style="display:flex;height:100vh;margin:-28px -40px;max-width:none;width:auto">
     <!-- 对话区（会话列表已合并到全局侧栏 SessionSidebar） -->
     <div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">
+      <!-- 空状态：顶部 spacer 将 hero+composer 推向中间 -->
+      <div v-if="!messages.length && !streamText" style="flex:1"></div>
       <div v-if="degraded" class="banner" style="background:var(--warnbg);color:var(--warntx);margin:16px 32px 0">
         ℹ SSE 不可用，已降级为轮询模式
       </div>
       <!-- overflow-anchor:none：禁用浏览器滚动锚定，避免内容高度变化时自动补偿 scrollTop 引发抖动 -->
-      <div ref="scroller" style="flex:1;overflow-y:auto;overflow-anchor:none" @scroll.passive="onScroll">
+      <div ref="scroller"
+        :style="{ flex: !messages.length && !streamText ? '0 0 auto' : '1', overflowY: 'auto', overflowAnchor: 'none' }"
+        @scroll.passive="onScroll">
         <div style="max-width:820px;margin:0 auto;width:100%;padding:28px 32px">
           <div v-if="!messages.length && !streamText" class="chat-hero">
             <div class="logo-lg"><i class="ti ti-brain"></i></div>
-            <h2>Hi，今天从哪里开始？</h2>
+            <h2>Second Person 比你更懂你！</h2>
             <p class="muted" style="font-size:var(--fs-md)">我是 Second Person，你的私人顾问与知识管理伙伴，记忆驱动、越用越懂你</p>
           </div>
           <div v-for="(m, i) in messages" :key="i">
@@ -795,7 +799,8 @@ onUnmounted(() => {
             <!-- 系统通知 -->
             <div v-else-if="m.message_type === 'system_notification'" class="banner"
               style="background:var(--brand-soft);color:var(--acctx)">
-              <i class="ti ti-bell"></i> {{ m.content }}
+              <i class="ti ti-bell"></i> <span style="opacity:0.7">{{ formatTime(m.create_time) }}</span> {{ m.content
+              }}
             </div>
             <!-- AI 回复 -->
             <div v-else class="msg-ai">
@@ -875,7 +880,7 @@ onUnmounted(() => {
       </div>
 
       <!-- 输入区 -->
-      <div style="padding:16px 32px 12px">
+      <div style="padding:16px 32px 0">
         <div class="composer" :class="{ dragover: dragOver }" style="max-width:820px;margin:0 auto;position:relative"
           @dragenter.prevent="dragOver = true" @dragover.prevent="dragOver = true" @dragleave.prevent="onDragLeave"
           @drop.prevent.stop="onDrop">
@@ -920,8 +925,10 @@ onUnmounted(() => {
             <button v-else class="send-btn" @click="abort"><i class="ti ti-player-stop-filled"></i></button>
           </div>
         </div>
-        <div class="ai-disclaim" style="max-width:820px;margin:0 auto">内容由 AI 生成，仅供参考</div>
       </div>
+      <!-- 空状态：底部 spacer 将 hero+composer 推离 disclaimer -->
+      <div v-if="!messages.length && !streamText" style="flex:1"></div>
+      <div class="ai-disclaim" style="max-width:820px;margin:0 auto;padding:8px 0 4px">内容由 AI 生成，仅供参考</div>
     </div>
   </div>
 

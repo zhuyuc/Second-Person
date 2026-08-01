@@ -235,7 +235,10 @@ class AgentCore:
 
         # 第 2 步 上下文加载（冻结快照）
         _sp = tracer.span_start("context_load", input={
-                                "session_id": sid, "onboarding": onboarding})
+            "session_id": sid, "onboarding": onboarding,
+            "buffer_rounds": self.config.get("conversation_buffer_rounds", 20),
+            "head_protected": self.config.get("head_protected_messages", 3),
+        })
         try:
             system_prompt = self._build_system_prompt(onboarding, location)
             history = self.sessions.load_recovery_context(
@@ -262,8 +265,18 @@ class AgentCore:
             # 消息 id 仅供压缩水位推进，送 LLM 前剔除
             history = [{"role": m["role"], "content": m["content"]}
                        for m in history]
-            _sp.end(output={"history_rounds": len(history), "est_tokens": est,
-                            "compressed": _compressed})
+            _sp.end(output={
+                "history_rounds": len(history),
+                "est_tokens": est,
+                "compressed": _compressed,
+                "system_prompt_chars": len(system_prompt),
+                "system_prompt_preview": system_prompt[:500],
+                "history_sample": [
+                    {"role": m["role"],
+                     "content_preview": (m["content"] or "")[:150]}
+                    for m in history[:20]
+                ],
+            })
         except Exception:
             _sp.end(level="ERROR")
             raise
@@ -292,7 +305,8 @@ class AgentCore:
         async def _run_retrieval():
             """第 3 步 记忆检索（query 用真实提问，不含附件正文）。"""
             nonlocal memories, loaded_ids
-            _sp = tracer.span_start("memory_retrieval", input=core_query)
+            _sp = tracer.span_start("memory_retrieval", input={
+                "query": core_query, "llm_available": llm_available})
             try:
                 retrieval = await self.retriever.retrieve(
                     core_query, llm_available, session_id=sid,
@@ -306,8 +320,17 @@ class AgentCore:
                     # 检索结果并入思考过程：区分个人记忆与知识库来源
                     await emit("thinking_delta",
                                {"text": self._format_retrieval_thinking(memories)})
-                _span_out = {"count": len(memories),
-                             "titles": [m["title"] for m in memories][:20]}
+                _span_out = {
+                    "count": len(memories),
+                    "titles": [m["title"] for m in memories][:20],
+                    "memory_details": [
+                        {"id": m["id"], "title": m["title"],
+                         "summary": str(m.get("detail") or m.get("summary", ""))[:300],
+                         "source_type": m.get("source_type", ""),
+                         "confidence": m.get("confidence", "")}
+                        for m in memories[:30]
+                    ],
+                }
                 # 从 diagnostics 字典读取检索质量指标
                 _diag = getattr(retrieval, "diagnostics", None) or {}
                 for _dk in ("degraded", "vector_hits", "fts_hits", "retrieval_time_ms",
@@ -325,7 +348,8 @@ class AgentCore:
         async def _run_intent():
             """第 4 步 意图识别（读完整消息：附件/长文本可能本身就是意图载体，
             云端模型处理长输入无本地算力瓶颈）。"""
-            _sp = tracer.span_start("intent_parse", input=message)
+            _sp = tracer.span_start("intent_parse", input={
+                "message": message, "available_tools": tool_names})
             try:
                 if onboarding:
                     _intents = [type("I", (), {"id": "i1", "intent_summary": message[:50],
@@ -414,10 +438,27 @@ class AgentCore:
                 skill_text += f"\n（注意：{dag.reason}，本轮已降级为直接回答）"
             # 第 6 步 工具执行
             _sp = tracer.span_start("tool_execution", input={
-                                    "intents": len(intents), "tool_names": tool_names})
+                "intent_count": len(intents),
+                "intents": [
+                    {"type": getattr(i, "intent_type", ""),
+                     "summary": (getattr(i, "intent_summary", "") or "")[:150],
+                     "tools": getattr(i, "tools_needed", [])}
+                    for i in intents
+                ],
+                "dag_order": [list(layer) for layer in dag.order] if hasattr(dag, "order") else [],
+                "all_tool_names": tool_names,
+            })
             try:
                 tool_results = await self._execute_tools(intents, dag, shared, message, emit, sid)
-                _sp.end(output=tool_results)
+                _sp.end(output={
+                    "count": len(tool_results),
+                    "tool_results": [
+                        {"tool": r.get("tool"), "ok": r.get("ok"),
+                         "error": r.get("error"),
+                         "result_preview": str(r.get("result", ""))[:500]}
+                        for r in tool_results
+                    ],
+                })
             except BaseException:
                 # BaseException：手动停止（CancelledError）时 span 同样收尾，避免悬空 trace
                 _sp.end(level="ERROR")
@@ -430,8 +471,25 @@ class AgentCore:
         # 纯导出模式：已登记延迟导出文档 → 正文只写入文档，
         # 对话中不再重复展示，只回一句确认 + 下载卡片
         doc_only = bool(shared.deferred_docs)
-        _sp = tracer.span_start("response_synthesis", input={"history_rounds": len(
-            history), "est_tokens": est, "memories": len(memories), "tool_results": len(tool_results)})
+        _sp = tracer.span_start("response_synthesis", input={
+            "history_rounds": len(history),
+            "est_tokens": est,
+            "memories_count": len(memories),
+            "tool_results_count": len(tool_results),
+            "memory_titles": [m["title"] for m in memories[:20]],
+            "history_sample": [
+                {"role": m["role"],
+                 "content_preview": (m["content"] or "")[:120]}
+                for m in history[-6:]
+            ],
+            "skill_text_chars": len(skill_text) if skill_text else 0,
+            "preload_text_chars": len(preload_text) if preload_text else 0,
+            "tool_result_summaries": [
+                {"tool": r.get("tool"), "ok": r.get("ok"),
+                 "result_preview": str(r.get("result", ""))[:200]}
+                for r in (tool_results or [])[:10]
+            ],
+        })
         try:
             if not chat_configured and not onboarding:
                 assistant_text = "当前对话模型不可用，请在设置页检查模型配置。"

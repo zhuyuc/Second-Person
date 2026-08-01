@@ -33,7 +33,7 @@ class ProfileManager:
         dims = []
         cur = None
         for ln in body.splitlines():
-            hm = re.match(r"^## (.+)$", ln.strip())
+            hm = re.match(r"^#{2,3} (.+)$", ln.strip())
             if hm:
                 title = hm.group(1).strip()
                 status = "已确认"

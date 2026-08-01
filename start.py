@@ -177,13 +177,23 @@ class ServiceSupervisor:
         log_dir.mkdir(parents=True, exist_ok=True)
         popen_kw: dict = {}
         if sys.platform.startswith("win"):
+            # CREATE_NEW_PROCESS_GROUP：隔离 Ctrl+C，不波及子服务
+            # CREATE_NO_WINDOW：禁止弹出控制台窗口
+            # 注意：不能加 DETACHED_PROCESS，否则 Windows 会为子进程分配新的可见控制台窗口
             popen_kw["creationflags"] = (
                 subprocess.CREATE_NEW_PROCESS_GROUP
-                | getattr(subprocess, "DETACHED_PROCESS", 0x00000008))
+                | subprocess.CREATE_NO_WINDOW)
+            # STARTUPINFO + SW_HIDE 作为双重保障，尤其确保 shell=True 时 cmd.exe
+            # 的子进程也不会弹出窗口
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
+            popen_kw["startupinfo"] = si
         else:
             popen_kw["start_new_session"] = True
         try:
-            print(f"[services] 启动 {spec.name} ...（日志 → data/logs/{spec.name}.log）")
+            print(
+                f"[services] 启动 {spec.name} ...（日志 → data/logs/{spec.name}.log）")
             log_f = open(log_dir / f"{spec.name}.log", "ab")
             if isinstance(spec.command, str):
                 return subprocess.Popen(spec.command, cwd=cwd, env=env, shell=True,

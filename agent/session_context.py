@@ -33,8 +33,10 @@ class SessionStore:
     # ---- 会话 CRUD --------------------------------------------------------
     def create_session(self, channel: str = None) -> str:
         """channel：IM 渠道会话记录来源平台（feishu/telegram 等），Web 端为 None。"""
-        rows = self.db.query_all("SELECT session_id FROM sessions")
-        seq = len(rows) + 1
+        row = self.db.query_one(
+            "SELECT MAX(CAST(SUBSTR(session_id,6) AS INTEGER)) m"
+            " FROM sessions WHERE session_id LIKE 'sess_%'")
+        seq = (row["m"] or 0) + 1
         while True:
             sid = make_session_id(seq)
             if not self.db.query_one("SELECT 1 FROM sessions WHERE session_id=?", (sid,)):

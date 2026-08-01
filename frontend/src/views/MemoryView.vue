@@ -241,6 +241,21 @@ async function runLint() {
   }
 }
 async function buildOutputStyle() { await api.post('/output-style/build-now', {}); toast.push('success', '已触发提炼'); await loadProfile() }
+
+// 输出样式画像手动编辑（走 PUT /output-style，带版本历史可回滚）
+const showOutputStyleEdit = ref(false)
+const outputStyleDraft = ref('')
+function openOutputStyleEdit() {
+  outputStyleDraft.value = outputStyle.value.profile_text || ''
+  showOutputStyleEdit.value = true
+}
+async function saveOutputStyle() {
+  if (!await confirm.ask({ title: '修改输出样式画像',
+    message: '将覆盖当前画像内容（自动演化开启时后续仍可能自动更新）。确认保存？' })) return
+  await api.put('/output-style', { content: outputStyleDraft.value })
+  showOutputStyleEdit.value = false
+  await loadProfile(); toast.push('success', '已保存，下次会话生效')
+}
 async function buildProfile() {
   const r = await api.post('/profile/build-now', {})
   if (r && r.ok) { toast.push('success', '已触发提炼，稍后刷新查看') }
@@ -657,6 +672,7 @@ onActivated(() => selectTab(tab.value))
           </label>
           <button class="btn-sm" :disabled="busy('buildOut')" @click="run('buildOut', buildOutputStyle)"><i
               v-if="busy('buildOut')" class="ti ti-loader-2"></i> 手动提炼</button>
+          <button class="btn-sm" @click="openOutputStyleEdit"><i class="ti ti-edit"></i> 编辑</button>
         </div>
       </div>
       <div style="margin-top:8px;color:var(--sec)">{{ outputStyle.profile_text || '（积累中，信号数 ' +
@@ -988,6 +1004,20 @@ onActivated(() => selectTab(tab.value))
         <button @click="showSoulCoreEdit = false">取消</button>
         <button class="btn-primary" :disabled="busy('saveSoul')" @click="run('saveSoul', saveSoulCore)"><i
             v-if="busy('saveSoul')" class="ti ti-loader-2"></i> 保存</button>
+      </div>
+    </div>
+  </div>
+  <!-- 输出样式画像编辑弹窗 -->
+  <div v-if="showOutputStyleEdit" class="overlay" @click.self="showOutputStyleEdit = false">
+    <div class="modal">
+      <div class="mt">编辑输出样式画像</div>
+      <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 将覆盖当前画像内容，保存前会二次确认，下次会话生效。</div>
+      <textarea v-model="outputStyleDraft"
+        style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
+      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+        <button @click="showOutputStyleEdit = false">取消</button>
+        <button class="btn-primary" :disabled="busy('saveOut')" @click="run('saveOut', saveOutputStyle)"><i
+            v-if="busy('saveOut')" class="ti ti-loader-2"></i> 保存</button>
       </div>
     </div>
   </div>

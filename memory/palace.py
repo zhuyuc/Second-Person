@@ -35,13 +35,9 @@ class Palace:
     # ---- 自增 id 分配 -----------------------------------------------------
     def next_memory_seq(self) -> int:
         row = self.db.query_one(
-            "SELECT id FROM memories ORDER BY id DESC LIMIT 1")
-        if not row:
-            return 1
-        try:
-            return int(row["id"].split("_")[1]) + 1
-        except (IndexError, ValueError):
-            return self.db.query_one("SELECT count(*) c FROM memories")["c"] + 1
+            "SELECT MAX(CAST(SUBSTR(id,5) AS INTEGER)) m"
+            " FROM memories WHERE id LIKE 'mem_%'")
+        return (row["m"] or 0) + 1
 
     # ---- memories 索引表 --------------------------------------------------
     def upsert_index(self, conn: sqlite3.Connection, fm: dict[str, Any],

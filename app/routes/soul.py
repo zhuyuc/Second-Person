@@ -162,6 +162,24 @@ async def toggle_auto(request: Request):
     return {"code": 200, "data": {}}
 
 
+@router.put("/output-style")
+async def put_output_style(request: Request):
+    """用户手动编辑输出样式画像。走 FileWriter soul_style(auto) 落盘，
+    带版本历史（可回滚）；wait=True 等待真正生效。"""
+    body = await request.json()
+    content = str(body.get("content") or "").strip()
+    c = _c()
+    try:
+        await c.fw.submit("soul_style", {
+            "section": "auto", "content": content,
+            "create_version": True, "diff_summary": "用户手动编辑"}, wait=True)
+    except Exception as e:  # noqa: BLE001 - 含 WriteFailedError/QueueFullError
+        return {"code": 500, "message": f"画像写入失败：{e}"}
+    if c.oplog:
+        c.oplog.log("output_style_edit", "用户手动编辑输出样式画像")
+    return {"code": 200, "data": {}}
+
+
 @router.post("/output-style/build-now")
 async def build_now():
     await _c().output_style_builder.build(force=True)

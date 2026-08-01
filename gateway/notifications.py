@@ -4,14 +4,12 @@
 - 系统通知作为 role=assistant、message_type=system_notification 的消息写入 conversations
 - 目标会话：sessions 按 last_active 降序取第一条
 - 无会话时暂存 pending_notifications 内存队列，创建首个会话时补发
-- 同 notification_type 24 小时内去重，重复只更新时间戳
 - 多端：Web + 当前接入的 IM 平台双端推送
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.notify")
@@ -39,16 +37,6 @@ class NotificationManager:
         sid = self.sessions.latest_active_session()
         if not sid:
             self._pending.append((notification_type, message))
-            return
-        # 24h 去重
-        cutoff = (now_cst() - timedelta(hours=24)
-                  ).isoformat(timespec="seconds")
-        dup = self.db.query_one(
-            "SELECT id FROM conversations WHERE notification_type=? AND create_time>=? "
-            "ORDER BY id DESC LIMIT 1", (notification_type, cutoff))
-        if dup:
-            self.db.execute("UPDATE conversations SET create_time=? WHERE id=?",
-                            (now_cst().isoformat(timespec="seconds"), dup["id"]))
             return
         self.sessions.append_message(
             sid, "assistant", message, message_type="system_notification",

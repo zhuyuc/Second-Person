@@ -65,14 +65,10 @@ class ProviderRegistry:
         self.db.execute("DELETE FROM providers WHERE id=?", (pid,))
 
     def next_provider_seq(self) -> int:
-        rows = self.db.query_all("SELECT id FROM providers")
-        mx = 0
-        for r in rows:
-            try:
-                mx = max(mx, int(r["id"].split("_")[1]))
-            except (IndexError, ValueError):
-                continue
-        return mx + 1
+        row = self.db.query_one(
+            "SELECT MAX(CAST(SUBSTR(id,6) AS INTEGER)) m"
+            " FROM providers WHERE id LIKE 'prov_%'")
+        return (row["m"] or 0) + 1
 
     # ---- 快照解析 ---------------------------------------------------------
     def snapshot(self, provider_id: str) -> ProviderSnapshot | None:
