@@ -30,19 +30,33 @@ class ToolExecutor:
                            emit: Callable[[str, dict],
                                           Awaitable[None]] | None = None
                            ) -> dict[str, Any]:
-        """执行单个工具，含 pre/post hook。返回 {ok, result, skipped, error}。"""
+        """执行单个工具，含 pre/post hook。返回 {ok, result, skipped, error}。
+        每个工具调用记录独立 Langfuse span（挂当前 trace/span 下），
+        参数/结果统一走 mark_preview 标记（content_type + 原始长度 + 截断标志）。"""
+        from observability_langfuse import get_tracer, mark_preview
+        import json as _json
+        _sp = get_tracer().span_start("tool_execute", input={
+            "tool": tool_name,
+            "intent_summary": intent_summary or "",
+            "params": mark_preview(
+                _json.dumps(params, ensure_ascii=False, default=str),
+                content_type="tool_params")})
         tool = self.registry.get(tool_name)
         if not tool:
+            _sp.end(level="ERROR",
+                    output={"ok": False, "error": f"工具不存在：{tool_name}"})
             return {"ok": False, "error": f"工具不存在：{tool_name}"}
 
         # 参数校验
         err = hooks.validate_params(tool.spec.parameters, params)
         if err:
+            _sp.end(level="ERROR", output={"ok": False, "error": err})
             return {"ok": False, "error": err}
 
         # 执行（空结果重试一次）
         result, error = await self._run_with_empty_retry(tool, params)
         if error:
+            _sp.end(level="ERROR", output={"ok": False, "error": error})
             return {"ok": False, "error": error}
 
         # post_tool：凭证脱敏 + 外部内容注入防护
@@ -53,6 +67,9 @@ class ToolExecutor:
             logger.warning("工具输出疑似含注入指令，已隔离标注：%s", tool_name)
             self.notify("injection_guard",
                         f"工具 {tool_name} 返回的外部内容疑似包含注入指令，已隔离标注")
+        _sp.end(output={
+            "ok": True, "redacted": hit, "injection": inj,
+            "result": mark_preview(redacted, content_type="tool_result")})
         return {"ok": True, "result": redacted}
 
     async def _run_with_empty_retry(self, tool, params) -> tuple[Any, str | None]:

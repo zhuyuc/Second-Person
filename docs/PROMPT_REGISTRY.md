@@ -51,6 +51,8 @@
 | 22 | soul/prompts/default_soul_style_dialog.md | SOUL_STYLE 对话风格+行为原则基线 | soul/constants.py | 导入时 | - | B |
 | 23 | soul/prompts/default_soul_style_output.md | SOUL_STYLE 输出样式空段 | soul/constants.py | 导入时 | - | B |
 | 24 | soul/prompts/output_style_meta_rule.md | 输出样式防僵化元规则 | soul/constants.py | 导入时 | - | B |
+| 25 | agent/prompts/mood.md | 情绪注入模板（双源） | soul/mood_manager.py | 惰性 | user_mood,user_intensity,user_time_hint,ai_mood,ai_intensity,ai_time_hint | A |
+| 26 | agent/prompts/mood_judge.md | 情绪判定（双源输出 JSON） | agent/core.py | 惰性 | user_message,assistant_reply | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -80,6 +82,7 @@
 | 15 | app/routes/chat.py::_call_llm | chat | title_gen | app/prompts/title_gen.md | 会话标题生成 |
 | 16 | app/routes/misc.py::test_connection | chat | main_chat | 无（连通性 ping） | 引导页模型连通测试 |
 | 17 | app/routes/settings.py::_probe_snapshot | chat | main_chat | 无（连通性 ping） | 设置页模型探活 |
+| 18 | agent/core.py::_update_mood | chat | mood | agent/prompts/mood_judge.md | 情绪判定（双源：用户+AI） |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

@@ -212,6 +212,36 @@ function readAsDataURL(f) {
 }
 function removeAttachment(i) { attachments.value.splice(i, 1) }
 
+// ---- 表情选择器：点击表情插入输入框光标处（支持连续插入，点击外部关闭） ----
+const emojiOpen = ref(false)
+const EMOJI_GROUPS = [
+  { name: '表情', items: ['😀', '😄', '😁', '😂', '🤣', '😊', '😇', '🙂', '😉', '😍', '😘', '😜', '🤪', '🤔', '🤨', '😐', '😏', '😒', '🙄', '😬', '😮', '😲', '🥱', '😴', '🤤', '😵', '🤯', '🥳', '😎', '🤓', '🧐', '😢', '😭', '😤', '😠', '😡', '🤬', '😱', '😨', '😰', '😥', '😓', '🤗', '🤭', '🤫', '🥺', '🫡'] },
+  { name: '手势', items: ['👍', '👎', '👌', '✌️', '🤞', '🤟', '🤘', '🤙', '👈', '👉', '👆', '👇', '☝️', '✋', '🤚', '🖖', '👋', '🤏', '💪', '🙏', '👏', '🤝', '✊', '👊', '🤛', '🤜', '👐', '🤲'] },
+  { name: '爱心', items: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔', '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💟', '💯'] },
+  { name: '动物', items: ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐵', '🙈', '🙉', '🙊', '🐔', '🐧', '🐦', '🦆', '🦉', '🐺', '🐴', '🦄', '🐝', '🦋', '🐞', '🐢', '🐍', '🐙', '🐠', '🐟', '🐬', '🐳', '🦈'] },
+  { name: '食物', items: ['🍎', '🍊', '🍋', '🍌', '🍉', '🍇', '🍓', '🍒', '🍑', '🥭', '🍍', '🥥', '🍅', '🥑', '🥦', '🌽', '🥕', '🍞', '🥐', '🧀', '🥚', '🍳', '🥓', '🍔', '🍟', '🍕', '🌭', '🌮', '🥗', '🍿', '🍜', '🍣', '🍤', '🍦', '🍩', '🍪', '🎂', '🍰', '🧁', '🍫', '🍬', '🍭', '☕', '🍵', '🍺', '🥂', '🍷'] },
+  { name: '活动', items: ['⚽', '🏀', '🏈', '⚾', '🎾', '🏐', '🎱', '🏓', '🏸', '⛳', '🏹', '🎣', '🥊', '🎿', '🏂', '🏋️', '🤸', '🏄', '🏊', '🚴', '🚵', '🎯', '🎳', '🎲', '🎮', '♟️', '🎭', '🎨', '🎬', '🎤', '🎧', '🎹', '🥁', '🎷', '🎺', '🎸', '🎻'] },
+  { name: '物品', items: ['⌚', '📱', '💻', '⌨️', '🖥️', '🖱️', '🕹️', '💿', '📷', '📸', '📹', '📺', '📻', '⏰', '⌛', '⏳', '📡', '🔋', '💡', '🔦', '🕯️', '💸', '💰', '💳', '💎', '🧰', '🔧', '🔨', '🛠️', '⚙️', '🔪', '🛡️', '🔮', '🔭', '🔬', '💊', '💉', '🧬', '🦠', '🧪', '🧹', '🧻', '🛁', '🧼', '🔑', '🗝️', '🚪', '🪑', '🛋️', '🛏️', '🧸', '🖼️', '🛒', '🎁', '🎈', '🎀', '🎊', '🎉', '📦', '📝', '📁', '📂', '📚', '📖', '✏️', '🖊️', '✂️', '🔍', '📌', '📍', '🗑️', '♻️'] },
+  { name: '符号', items: ['✅', '❌', '❓', '💢', '💥', '💫', '💦', '💨', '💬', '💭', '♨️', '🔔', '🔕', '🎵', '🎶', '📢', '📣', '🔊', '🔇', '⭕', '🔴', '🟠', '🟡', '🟢', '🔵', '🟣', '⚫', '⚪', '🔺', '🔻', '🔸', '🔹', '🏁', '🚩', '🎌'] },
+]
+function insertEmoji(em) {
+  const el = ta.value
+  const pos = el && el.selectionStart != null ? el.selectionStart : input.value.length
+  const end = el && el.selectionEnd != null ? el.selectionEnd : pos
+  input.value = input.value.slice(0, pos) + em + input.value.slice(end)
+  nextTick(() => {
+    const p = pos + em.length
+    if (el) { el.focus(); el.setSelectionRange(p, p) }
+  })
+  autoGrow()
+}
+// 点击面板外部关闭表情选择器（面板与切换按钮自身的事件已 stop）
+function onDocClickEmoji(e) {
+  if (!emojiOpen.value) return
+  if (e.target.closest('.emoji-panel') || e.target.closest('.emoji-toggle')) return
+  emojiOpen.value = false
+}
+
 // ---- 附件统一点击交互：粘贴文本/图片弹窗预览，其他格式弹窗信息+下载 ----
 const attachView = ref(null)   // { type: 'text'|'image'|'file', ... }
 // composer 附件胶囊点击
@@ -598,6 +628,15 @@ function formatTime(iso) {
   if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '/' + d.getDate()
   return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate()
 }
+// 悬浮时间：精确到秒（默认隐藏，hover 消息时显示）
+function formatTimeFull(iso) {
+  if (!iso) return ''
+  const d = new Date(String(iso).replace(' ', 'T'))
+  if (isNaN(d.getTime())) return iso
+  const pad = (n) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+}
 function scrollBottom() { nextTick(() => { if (scroller.value) { scroller.value.scrollTop = scroller.value.scrollHeight; atBottom.value = true } }) }
 // 智能跟随：仅当用户已在底部附近时自动吸底；上翻后不强制拉回
 const atBottom = ref(true)
@@ -669,6 +708,7 @@ onMounted(() => {
   // → openSession 内部会调 tryReattach 续播进行中的生成，实现刷新不中断
   if (sessStore.currentSid && !messages.value.length) openSession(sessStore.currentSid)
   initGeolocation()
+  document.addEventListener('click', onDocClickEmoji)
 })
 // currentSid 任何变更（openSession/send/resetToHome）同步持久化，保证刷新后可恢复
 watch(() => sessStore.currentSid, (v) => {
@@ -751,6 +791,7 @@ onUnmounted(() => {
   window.removeEventListener('sp-new-chat', resetToHome)
   window.removeEventListener('sp-open-session', onOpenSession)
   document.removeEventListener('click', handleMermaidActions)
+  document.removeEventListener('click', onDocClickEmoji)
 })
 </script>
 
@@ -771,7 +812,6 @@ onUnmounted(() => {
           <div v-if="!messages.length && !streamText" class="chat-hero">
             <div class="logo-lg"><i class="ti ti-brain"></i></div>
             <h2>Second Person 比你更懂你！</h2>
-            <p class="muted" style="font-size:var(--fs-md)">我是 Second Person，你的私人顾问与知识管理伙伴，记忆驱动、越用越懂你</p>
           </div>
           <div v-for="(m, i) in messages" :key="i">
             <!-- 用户气泡 -->
@@ -792,6 +832,7 @@ onUnmounted(() => {
                 <div v-if="m.content" class="bubble" style="max-width:100%" v-html="renderUser(m.content)"></div>
                 <div class="msg-actions user-actions"
                   style="display:flex;justify-content:flex-end;gap:2px;margin-top:4px">
+                  <span class="msg-time">{{ formatTimeFull(m.create_time) }}</span>
                   <i class="ti ti-copy" title="复制" @click="copyText(m)"></i>
                 </div>
               </div>
@@ -836,6 +877,7 @@ onUnmounted(() => {
                   <i class="ti ti-copy" title="复制" @click="copyText(m)"></i>
                   <!-- 仅最后一条回复可重新生成：中途轮次重生成会导致会话上下文顺序错乱 -->
                   <i v-if="i === messages.length - 1" class="ti ti-refresh" title="重新生成" @click="regenerate(m)"></i>
+                  <span class="msg-time">{{ formatTimeFull(m.create_time) }}</span>
                 </div>
               </div>
             </div>
@@ -906,10 +948,23 @@ onUnmounted(() => {
           <textarea ref="ta" v-model="input" placeholder="发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件）" rows="1"
             @input="autoGrow" @keydown.enter.exact.prevent="send" @paste="onPaste" @dragenter.prevent="dragOver = true"
             @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop"></textarea>
+          <!-- 表情选择面板（absolute 定位在 composer 上方，选择后保持打开可连续插入） -->
+          <div v-if="emojiOpen" class="emoji-panel" @click.stop>
+            <div v-for="g in EMOJI_GROUPS" :key="g.name" class="emoji-group">
+              <div class="emoji-group-name">{{ g.name }}</div>
+              <div class="emoji-grid">
+                <button v-for="em in g.items" :key="em" type="button" class="emoji-btn"
+                  @click="insertEmoji(em)">{{ em }}</button>
+              </div>
+            </div>
+          </div>
           <div class="row" style="margin-top:10px">
             <div class="fg" style="gap:8px">
               <i class="ti ti-paperclip" style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="上传文件"
                 @click="triggerFile"></i>
+              <!-- mousedown.prevent：防止按钮抢焦点导致 textarea 光标位置丢失 -->
+              <i class="ti ti-mood-smile emoji-toggle" style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)"
+                title="表情" @mousedown.prevent @click.stop="emojiOpen = !emojiOpen"></i>
               <select v-if="providers.length" v-model="chatModelId" @change="switchModel(chatModelId)"
                 style="padding:4px 8px;font-size:var(--fs-sm);max-width:140px">
                 <option v-for="p in providers" :key="p.id" :value="p.id"

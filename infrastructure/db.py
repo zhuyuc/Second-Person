@@ -170,6 +170,7 @@ class Database:
                 for t in batch:
                     t.run(conn)
                 conn.commit()
+                self._reset_nowait_fail()
                 for t in batch:
                     if t.event:
                         t.event.set()
@@ -181,6 +182,7 @@ class Database:
                     try:
                         t.run(conn)
                         conn.commit()
+                        self._reset_nowait_fail()
                     except Exception as e:  # noqa: BLE001
                         conn.rollback()
                         t.error = e
@@ -201,6 +203,14 @@ class Database:
                     finally:
                         if t.event:
                             t.event.set()
+
+    def _reset_nowait_fail(self) -> None:
+        """写入成功 = 链路恢复：清零失败计数并复位告警标志。
+        避免持续故障只在进程生命周期内告知一次后永久静默——
+        恢复后再次出问题会重新告警，让用户持续感知问题未解决。"""
+        if self._nowait_fail_count or self._nowait_fail_alerted:
+            self._nowait_fail_count = 0
+            self._nowait_fail_alerted = False
 
     def _submit(self, task) -> None:
         self._queue.put(task)

@@ -10,9 +10,27 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.notify")
+
+# ---- 推送去重（统一兑底，防同一条消息重复落库/重复推送） ----
+# 设计原则：去重只合并“同一次事件的多重触发”（事件簇/连发），
+# 绝不吞掉跨时间的持续失败信号——重复出错说明问题严重且未解决，
+# 必须让用户感知（否则会误以为已处理）。
+# 仅“阈值告警型”（提醒一次即可的状态告知）做长窗口去重：
+# 预算超限/容量超限/渠道熔断告知，24h 内同内容不重复推送
+STATE_NOTIFY_TYPES = {
+    "platform_paused", "raw_docs_capacity",
+    "budget_alert_daily", "budget_exceeded_daily",
+    "budget_alert_monthly", "budget_exceeded_monthly",
+    "db_write_degraded",
+}
+STATE_DEDUP_SECONDS = 24 * 3600
+# 事件/错误型通知：仅合并短窗内的事件簇/连发（60s），
+# 跨时间的再次失败（如 soul_reset 每轮对话检测失败）仍会推送
+EVENT_DEDUP_SECONDS = 60
 
 
 class NotificationManager:
@@ -33,15 +51,35 @@ class NotificationManager:
             pass
 
     def push(self, notification_type: str, message: str) -> None:
-        """推送系统通知（同步入口，供各模块的 notifier 回调）。"""
+        """推送系统通知（同步入口，供各模块的 notifier 回调）。
+        去重只防同一次事件的多重触发（60s 事件簇）；阈值告警型额外 24h。
+        持续失败（如注入回退每轮对话再检测）不做跨时间去重，
+        每次失败都推送，让用户感知问题仍未解决。"""
+        if self._is_duplicated(notification_type, message):
+            return
         sid = self.sessions.latest_active_session()
         if not sid:
+            # 无会话暂存同样去重，避免 pending 内堆积同内容
+            if any(t == notification_type and m == message
+                   for t, m in self._pending):
+                return
             self._pending.append((notification_type, message))
             return
         self.sessions.append_message(
             sid, "assistant", message, message_type="system_notification",
             notification_type=notification_type)
         self._send_im(message)
+
+    def _is_duplicated(self, notification_type: str, message: str) -> bool:
+        """窗口内是否已推送过同类型+同内容（查 conversations 落库记录）。"""
+        window = (STATE_DEDUP_SECONDS if notification_type in STATE_NOTIFY_TYPES
+                  else EVENT_DEDUP_SECONDS)
+        cutoff = (now_cst() - timedelta(seconds=window)
+                  ).isoformat(timespec="seconds")
+        return bool(self.db.query_one(
+            "SELECT 1 FROM conversations WHERE notification_type=? AND content=? "
+            "AND create_time>=? LIMIT 1",
+            (notification_type, message, cutoff)))
 
     def _send_im(self, message: str) -> None:
         """IM 双端推送：优先当前循环，无运行循环（后台线程）时桥接到主循环。"""

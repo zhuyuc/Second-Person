@@ -45,6 +45,7 @@ from agent.session_context import SessionStore
 from agent.response_synthesizer import SignalCollector
 from soul.skill_manager import SkillManager
 from soul.soul_manager import SoulManager
+from soul.mood_manager import MoodManager
 from tools.base import ToolRegistry
 from tools.builtin import register_builtins
 from tools.sandbox import Sandbox
@@ -337,6 +338,7 @@ class AppContainer:
 
         # ---- Soul / Profile ----
         self.soul = SoulManager(d, self.fw, self.oplog, notifier)
+        self.mood = MoodManager(self.db, self.config)
         self.profile = ProfileManager(d)
 
         # ---- 工具系统 ----
@@ -359,7 +361,7 @@ class AppContainer:
             lifecycle=self.lifecycle, signal_collector=self.signals,
             llm_client=self.llm, provider_registry=self.providers,
             file_writer=self.fw, skill_manager=self.skills, event_bus=self.bus,
-            notifier=notifier)
+            notifier=notifier, mood_manager=self.mood)
 
         # ---- 系统 Agent ----
         self.reviewer = ReviewAgent(self.db, self.distiller, self.config, d)

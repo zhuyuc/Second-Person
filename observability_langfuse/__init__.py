@@ -10,10 +10,13 @@ Langfuse 官方 Ingestion REST API（POST /api/public/ingestion，Basic Auth）�
 - init_tracer(config)  在应用启动装配时初始化全局 tracer
 - get_tracer()         任意位置获取全局 tracer（未初始化则返回禁用态的空实现）
 - PipelineTracer       追踪器：trace_start / span_start / generation_start
+- mark_preview(value, *, content_type, limit)
+                       预览字段统一标记（content_type + 原始长度 + 截断标志）
 """
 from __future__ import annotations
 
 from .config import LangfuseConfig
-from .tracer import PipelineTracer, get_tracer, init_tracer
+from .tracer import PipelineTracer, get_tracer, init_tracer, mark_preview
 
-__all__ = ["LangfuseConfig", "PipelineTracer", "get_tracer", "init_tracer"]
+__all__ = ["LangfuseConfig", "PipelineTracer", "get_tracer", "init_tracer",
+           "mark_preview"]

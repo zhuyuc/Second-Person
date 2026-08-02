@@ -95,6 +95,11 @@ class FileWriter:
             except Exception:  # noqa: BLE001
                 pass
 
+    def mark_internal(self, path) -> None:
+        """公开标记入口：程序内部写盘前调用，watcher 抑制窗口内忽略该路径
+        （供 SoulManager 等不经 FileWriter 队列直接写盘的模块使用）。"""
+        self._mark_internal(path)
+
     def _resolve_failed_notice(self) -> None:
         """无 failed 残留时撤回历史失败通知（幂等，重复调用无副作用）。"""
         if not self.resolve_failed_fn:
@@ -539,6 +544,9 @@ class FileWriter:
     def _h_soul_style(self, p: dict[str, Any]) -> None:
         # 由 soul 管理器注入具体落盘逻辑；此处提供基础落盘
         from soul.soul_manager import apply_soul_style_write  # 延迟导入
+        # 程序内部写入（确认人格/回滚/手动编辑）：标记 internal，避免 watcher
+        # 将自身写入误判为外部修改而推送 “soul_reloaded” 通知
+        self.mark_internal(Path(self.data_dir) / "soul" / "SOUL_STYLE.md")
         apply_soul_style_write(self.data_dir, p)
         if self.bus:
             self.bus.publish_nowait(EVT_SOUL_STYLE_UPDATED, {

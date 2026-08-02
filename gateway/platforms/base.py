@@ -220,7 +220,9 @@ class BasePlatformAdapter:
             "UPDATE platforms SET failure_count=?, last_failure_time=?, last_failure_reason=? "
             "WHERE id=?", (self._failures, now_cst().isoformat(timespec="seconds"),
                            reason, self.platform_id))
-        if self._failures >= CIRCUIT_THRESHOLD:
+        if self._failures == CIRCUIT_THRESHOLD:
+            # 首次达到阈值才通知（== 而非 >=）：熔断后连续失败不再重复推送，
+            # 只有新一轮熔断（reset 后再次失败累计到阈值）才再次提醒
             self.paused = True
             self.db.execute("UPDATE platforms SET status='paused' WHERE id=?",
                             (self.platform_id,))

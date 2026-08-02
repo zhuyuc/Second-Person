@@ -20,8 +20,10 @@ IMPLICIT_KEYWORDS = [
 ]
 
 
-# 单轮工具输出截断上限（字符）：工具结果不入 L2 历史，超大输出在合成层截断兑底
-TOOL_RESULT_MAX_CHARS = 8000
+# 单轮工具输出截断上限（字符）：工具结果不入 L2 历史，超大输出在合成层截断兑底。
+# 30000 对齐 Langfuse _trim 兜底：绝大多数工具结果完整进入主 prompt，
+# 仅极端超大输出（>30K 字符）截断并标注原始长度，保证 Langfuse 记录与业务输入一致
+TOOL_RESULT_MAX_CHARS = 30000
 
 
 def build_response_prompt(user_message: str, tool_results: list[dict],

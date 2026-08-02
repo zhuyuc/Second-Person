@@ -18,7 +18,7 @@ from typing import Any, AsyncIterator
 from infrastructure.llm_provider import CircuitOpenError, estimate_tokens
 from infrastructure.observability import get_trace_id
 from infrastructure.prompt_loader import PROMPTS
-from observability_langfuse import get_tracer
+from observability_langfuse import get_tracer, mark_preview
 from soul.constants import ONBOARDING_PERSONA
 
 from . import response_synthesizer as rs
@@ -68,6 +68,19 @@ def _strip_attachment_context(text: str) -> str:
     return text
 
 
+def _strip_mood_section(system_prompt: str) -> str:
+    """剥离 system prompt 中的情绪注入段（纯导出等结构化输出场景用）。
+    以 mood.md 的段首标记定位，删到下一段或结尾，保留其余内容。"""
+    marker = "## 当前情绪状态"
+    idx = system_prompt.find(marker)
+    if idx < 0:
+        return system_prompt
+    end = system_prompt.find("\n## ", idx + len(marker))
+    if end < 0:
+        return system_prompt[:idx].rstrip()
+    return system_prompt[:idx].rstrip() + system_prompt[end:]
+
+
 def _format_intent_thinking(intents) -> str:
     """把意图识别结果格式化为可读的思考过程文本（意图理解 + 任务拆解）。"""
     lines = ["【意图理解】"]
@@ -92,7 +105,8 @@ class AgentCore:
     def __init__(self, *, db, config, session_store, context_entry, soul_manager,
                  profile_manager, retriever, tool_registry, tool_executor,
                  lifecycle, signal_collector, llm_client, provider_registry,
-                 file_writer, skill_manager, event_bus=None, notifier=None):
+                 file_writer, skill_manager, event_bus=None, notifier=None,
+                 mood_manager=None):
         self.db = db
         self.config = config
         self.sessions = session_store
@@ -110,6 +124,8 @@ class AgentCore:
         self.skills = skill_manager
         self.bus = event_bus
         self.notify = notifier or (lambda t, m: None)
+        # 情绪模块（双源：用户情绪 + AI 自身情绪）；None 表示未启用
+        self.mood = mood_manager
         # 图片入库回调（container 在 ingest 就绪后接入）：async fn(images: list[dataURL])
         self.image_kb_fn = None
         self.intent_parser = IntentParser(
@@ -128,7 +144,8 @@ class AgentCore:
                   client_request_id: str | None = None,
                   images: list[str] | None = None,
                   regenerate: bool = False,
-                  location: str | None = None) -> AsyncIterator[dict]:
+                  location: str | None = None,
+                  regenerate_message_id: str | None = None) -> AsyncIterator[dict]:
         limit = self.config.get("session_queue_limit", 3)
         if self._session_queue[session_id] >= limit:
             yield {"event": "error", "data": {"code": 429, "message": "会话繁忙，请稍后再试"}}
@@ -150,7 +167,8 @@ class AgentCore:
                     # 请求组：单请求超时 600 秒（进程内任务隔离）
                     await asyncio.wait_for(
                         self._pipeline(session_id, message, emit, images,
-                                       regenerate, location),
+                                       regenerate, location,
+                                       regenerate_message_id),
                         timeout=600)
                 except asyncio.TimeoutError:
                     logger.warning("请求超时（600s）：session=%s", session_id)
@@ -176,14 +194,17 @@ class AgentCore:
         await task
 
     async def _pipeline(self, sid: str, message: str, emit, images=None,
-                        regenerate=False, location=None) -> None:
+                        regenerate=False, location=None,
+                        regenerate_message_id: str | None = None) -> None:
         """包一层 Langfuse trace，内部实现不变（步骤 span 在 _pipeline_impl 中）。"""
         tracer = get_tracer()
         trace = tracer.trace_start(
             name="chat.turn", session_id=sid, input=message,
             metadata={"internal_trace_id": get_trace_id(),
                       "images": len(images) if images else 0,
-                      "regenerate": regenerate})
+                      "regenerate": regenerate,
+                      "regenerate_message_id": regenerate_message_id,
+                      "location": location})
         try:
             await self._pipeline_impl(sid, message, emit, trace, images,
                                       regenerate, location)
@@ -269,12 +290,14 @@ class AgentCore:
                 "history_rounds": len(history),
                 "est_tokens": est,
                 "compressed": _compressed,
-                "system_prompt_chars": len(system_prompt),
-                "system_prompt_preview": system_prompt[:500],
-                "history_sample": [
-                    {"role": m["role"],
-                     "content_preview": (m["content"] or "")[:150]}
-                    for m in history[:20]
+                "system_prompt": mark_preview(
+                    system_prompt, content_type="system_prompt"),
+                # 完整历史消息全文（与业务加载的 history 完全一致，不截断）
+                "history": [
+                    {"role": m["role"], "round_index": idx,
+                     **mark_preview(m["content"],
+                                    content_type="history_message")}
+                    for idx, m in enumerate(history)
                 ],
             })
         except Exception:
@@ -294,19 +317,22 @@ class AgentCore:
         loaded_ids: list[str] = []
         cited_ids: list[str] = []
 
-        # 检索线索上下文：最近 2 轮对话尾部（每条截 200 字，history 已裁为
-        # role/content），供向量路与第 2 层精筛做指代消解，零额外 IO
+        # 检索线索上下文：最近 2 轮对话尾部全文（history 已裁为 role/content）。
+        # 不截断：embedding 预算由 retriever 内部兜底（取尾部填 2000 字符），
+        # 精筛 LLM 看全量；此处保持与业务输入一致，Langfuse 记录同源同量。
         retrieval_context = ""
         if not onboarding:
             retrieval_context = "\n".join(
-                f"{'用户' if m['role'] == 'user' else 'AI'}：{(m['content'] or '')[:200]}"
+                f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
                 for m in history[-4:])
 
         async def _run_retrieval():
             """第 3 步 记忆检索（query 用真实提问，不含附件正文）。"""
             nonlocal memories, loaded_ids
             _sp = tracer.span_start("memory_retrieval", input={
-                "query": core_query, "llm_available": llm_available})
+                "query": core_query, "llm_available": llm_available,
+                "retrieval_context": mark_preview(
+                    retrieval_context, content_type="recent_dialogue")})
             try:
                 retrieval = await self.retriever.retrieve(
                     core_query, llm_available, session_id=sid,
@@ -325,9 +351,10 @@ class AgentCore:
                     "titles": [m["title"] for m in memories][:20],
                     "memory_details": [
                         {"id": m["id"], "title": m["title"],
-                         "summary": str(m.get("detail") or m.get("summary", ""))[:300],
                          "source_type": m.get("source_type", ""),
-                         "confidence": m.get("confidence", "")}
+                         "confidence": m.get("confidence", ""),
+                         **mark_preview(m.get("detail") or m.get("summary", ""),
+                                        content_type="memory_content")}
                         for m in memories[:30]
                     ],
                 }
@@ -420,16 +447,28 @@ class AgentCore:
         skill_text = ""
         if not onboarding:
             # 请求级技能按需追加（第 4 步意图识别后）：命中的活跃技能加载 Level1 SKILL.md
+            _skill_sp = None
             try:
+                _skill_sp = tracer.span_start("skill_injection", input={
+                    "query": mark_preview(message,
+                                          content_type="user_message")})
                 matched = self.skills.match_skills(
                     message + " " + " ".join(getattr(i, "intent_summary", "") for i in intents))
+                matched_names = list(matched)
                 for sk in matched:
                     body = self.skills.load_skill(sk)
                     if body:
-                        skill_text += f"\n\n[技能：{sk}]\n{body[:2000]}"
+                        # 技能正文完整注入（不截断）：Langfuse 记录与业务输入一致
+                        skill_text += f"\n\n[技能：{sk}]\n{body}"
                         self.skills.record_use(sk)
-            except Exception:  # noqa: BLE001
+                _skill_sp.end(output={
+                    "matched_skills": matched_names,
+                    "skill_text": mark_preview(
+                        skill_text, content_type="skill_injection")})
+            except Exception as e:  # noqa: BLE001
                 logger.warning("技能按需追加失败", exc_info=True)
+                if _skill_sp is not None:
+                    _skill_sp.end(level="ERROR", status_message=str(e)[:500])
             dag = build_dag(list(intents), set(tool_names))
             # DAG 环检测降级：向用户说明（thinking_delta 外露 + prompt 注入）
             if dag.degraded:
@@ -441,7 +480,7 @@ class AgentCore:
                 "intent_count": len(intents),
                 "intents": [
                     {"type": getattr(i, "intent_type", ""),
-                     "summary": (getattr(i, "intent_summary", "") or "")[:150],
+                     "summary": getattr(i, "intent_summary", ""),
                      "tools": getattr(i, "tools_needed", [])}
                     for i in intents
                 ],
@@ -455,9 +494,13 @@ class AgentCore:
                     "tool_results": [
                         {"tool": r.get("tool"), "ok": r.get("ok"),
                          "error": r.get("error"),
-                         "result_preview": str(r.get("result", ""))[:500]}
+                         **mark_preview(r.get("result"),
+                                        content_type="tool_result")}
                         for r in tool_results
                     ],
+                    "shared_keys": sorted(shared._data.keys()),
+                    "deferred_writes": len(shared.deferred_writes),
+                    "deferred_docs": len(shared.deferred_docs),
                 })
             except BaseException:
                 # BaseException：手动停止（CancelledError）时 span 同样收尾，避免悬空 trace
@@ -479,14 +522,19 @@ class AgentCore:
             "memory_titles": [m["title"] for m in memories[:20]],
             "history_sample": [
                 {"role": m["role"],
-                 "content_preview": (m["content"] or "")[:120]}
-                for m in history[-6:]
+                 "round_index": max(0, len(history) - 6) + idx,
+                 **mark_preview(m["content"],
+                                content_type="history_message")}
+                for idx, m in enumerate(history[-6:])
             ],
-            "skill_text_chars": len(skill_text) if skill_text else 0,
-            "preload_text_chars": len(preload_text) if preload_text else 0,
+            "skill_text": mark_preview(
+                skill_text, content_type="skill_injection"),
+            "preload_text": mark_preview(
+                preload_text, content_type="url_preload"),
             "tool_result_summaries": [
                 {"tool": r.get("tool"), "ok": r.get("ok"),
-                 "result_preview": str(r.get("result", ""))[:200]}
+                 **mark_preview(r.get("result"),
+                                content_type="tool_result")}
                 for r in (tool_results or [])[:10]
             ],
         })
@@ -671,7 +719,8 @@ class AgentCore:
 
         # 第 8 步 后置处理
         _sp = tracer.span_start("post_process", input={
-                                "session_id": sid, "cited_ids": cited_ids[:10]})
+                                "session_id": sid, "cited_ids": cited_ids,
+                                "loaded_ids": loaded_ids or []})
         try:
             msg_id = self.sessions.append_message(sid, "assistant", assistant_text,
                                                   citations=[{"id": c}
@@ -687,6 +736,7 @@ class AgentCore:
         trace.update(output=assistant_text,
                      metadata={"internal_trace_id": get_trace_id(),
                                "images": len(images) if images else 0,
+                               "image_files": persisted_imgs,
                                "regenerate": regenerate,
                                "cited": cited_ids, "message_id": msg_id,
                                "total_latency_ms": round((time.monotonic() - _start_time) * 1000),
@@ -697,10 +747,15 @@ class AgentCore:
 
     async def _image_kb_task(self, images) -> None:
         """后台静默将当轮图片存入知识库（fire-and-forget，失败不影响对话）。"""
+        from observability_langfuse import get_tracer
+        tr = get_tracer().trace_start("image_kb_store", input={
+            "image_count": len(images) if images else 0})
         try:
             await self.image_kb_fn(images)
-        except Exception:  # noqa: BLE001
+            tr.end(output={"ok": True})
+        except Exception as e:  # noqa: BLE001
             logger.warning("图片存入知识库失败", exc_info=True)
+            tr.end(level="ERROR", status_message=str(e)[:500])
 
     def _save_partial_reply(self, sid: str, buf: list[str],
                             think_parts: list[str]) -> None:
@@ -922,6 +977,8 @@ class AgentCore:
         except Exception:  # noqa: BLE001
             logger.warning("compression_failed 标记写入失败", exc_info=True)
         if fails >= 3:
+            # 每次失败都提醒（>= 而非 ==）：持续失败说明问题未解决，
+            # 必须让用户持续感知（60s 推送去重只防同一事件的连发）
             self.notify("compression_failed",
                         "上下文压缩连续 3 次失败，建议新建会话继续对话")
         degraded = list(head)
@@ -937,26 +994,41 @@ class AgentCore:
         """第 1 步：检测消息中的 URL 并用 web_fetch 预加载；失败不中断，失败信息作为上下文。"""
         import re
         from tools import hooks as tool_hooks
+        from observability_langfuse import get_tracer, mark_preview
         urls = re.findall(r"https?://[^\s]+", message)
         if not urls:
             return ""
         tool = self.registry.get("web_fetch")
         if not tool:
             return ""
+        tracer = get_tracer()
+        _sp = tracer.span_start("url_preload", input={
+            "urls": urls[:2], "target_count": len(urls)})
         blocks = []
+        failed = 0
+        injection_flagged = 0
         for url in urls[:2]:
             try:
                 text = await tool.run(url=url)
-                # 直调 tool.run 绕过了 post_tool 漏斗，补一次注入防护（先截断再包裹，保标注完整）
-                guarded, inj = tool_hooks.guard_external(str(text)[:3000])
+                # 直调 tool.run 绕过了 post_tool 漏斗，补一次注入防护（先截断再包裹，保标注完整）；
+                # 上限 30000 对齐 _trim 兜底：网页正文基本完整注入，Langfuse 记录与业务输入一致
+                guarded, inj = tool_hooks.guard_external(str(text)[:30000])
                 if inj:
+                    injection_flagged += 1
                     logger.warning("URL 预加载内容疑似含注入指令，已隔离标注：%s", url)
                     self.notify("injection_guard",
                                 f"预加载网页 {url} 疑似包含注入指令，已隔离标注")
                 blocks.append(f"【预加载 {url}】\n{guarded}")
             except Exception as e:  # noqa: BLE001
+                failed += 1
                 blocks.append(f"（注：URL {url} 抓取失败，原因 {e}）")
-        return "\n\n".join(blocks)
+        joined = "\n\n".join(blocks)
+        _sp.end(output={
+            "fetched": len(blocks) - failed, "failed": failed,
+            "injection_flagged": injection_flagged,
+            "content": mark_preview(
+                joined, content_type="url_preload_content")})
+        return joined
 
     def _backfill_prev_signal(self, sid: str, new_message: str) -> None:
         """信号采集阶段二：回填上一条 assistant 回复的隐式反应与隐式关键词。"""
@@ -1136,8 +1208,10 @@ class AgentCore:
         }
         ctx = f"用户消息：{message}"
         if deps:
+            # 前序任务结果完整注入（SharedState 已有 1MB 兜底，不在此截断）：
+            # Langfuse 记录与业务输入一致
             ctx += "\n\n前序任务结果：\n" + "\n".join(
-                f"  {k}: {str(v)[:500]}" for k, v in deps.items())
+                f"  {k}: {v}" for k, v in deps.items())
         ctx += f"\n\n请为工具 {tool_name} 生成合适的参数。"
         if tool_name == "file_write":
             ctx += ("\n注意：用户要求把 AI 输出/整理的内容保存到文件时，"
@@ -1215,6 +1289,15 @@ class AgentCore:
         if onboarding:
             return (ONBOARDING_PERSONA + "\n\n" + time_hint) if time_hint else ONBOARDING_PERSONA
         parts = [self.soul.read_core(), self.soul.full_style_text()]
+        # 语言约束（强，前置）：模型原生推理（reasoning_content）默认偏英文，
+        # 必须明确约束思考过程与回复全文使用中文，仅代码/专有名词等例外
+        parts.append(
+            "## 语言要求（必须严格遵守）\n"
+            "全程使用中文：包括回复正文、思考过程、推理、内心独白、任务拆解、"
+            "总结与记忆描述，一律使用中文。\n"
+            "允许保留原文的例外仅限：代码、变量名、API 名称、专有名词、"
+            "国际通用术语（如 AI、OK、GitHub）。\n"
+            "禁止出现英文长句或英文段落式的思考内容。")
         if time_hint:
             parts.append(time_hint)
         # 用户位置（浏览器定位，随请求携带）：天气/附近/本地类查询直接可用
@@ -1227,11 +1310,11 @@ class AgentCore:
         ident = self.profile.identity_snippet()
         if ident:
             parts.append(ident)
-        # 技能预加载（Level 0 目录）
+        # 技能预加载（Level 0 目录，完整注入：Langfuse 记录与业务输入一致）
         try:
             skill_index = self.skills.load_index()
             if skill_index.strip():
-                parts.append(f"可用技能目录（需要时可展开）：\n{skill_index[:500]}")
+                parts.append(f"可用技能目录（需要时可展开）：\n{skill_index}")
         except Exception:  # noqa: BLE001
             pass
         # pending_soul_update：本轮需主动询问用户确认（路径 1）
@@ -1260,6 +1343,17 @@ class AgentCore:
                     f"本轮请在合适时机询问用户是否启用，告知用户可在记忆中心·健康度管理。）")
         except Exception:  # noqa: BLE001
             pass
+        # 情绪注入（双源：用户情绪 + AI 自身情绪；neutral/衰减后/关闭时不注入）
+        if self.mood and self.config.get("mood_enabled", True):
+            try:
+                mood_hint = self.mood.build_hint()
+                if mood_hint:
+                    parts.append(mood_hint)
+            except Exception:  # noqa: BLE001
+                logger.warning("情绪注入失败（静默跳过）", exc_info=True)
+        # 思考过程中文化：模型原生推理默认偏英文，末尾再次强调（首尾呼应，双保险）
+        parts.append("再次强调：思考过程（包括模型原生推理）与回复正文必须使用中文，"
+                     "仅代码、变量名、API 名称、专有名词与通用术语可保留英文原文。")
         return "\n\n".join(parts)
 
     def _build_final_prompt(self, system_prompt, history, message, tool_results,
@@ -1267,6 +1361,11 @@ class AgentCore:
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
+        # 纯导出场景：工程级剥离情绪注入段——情绪表达只发生在对话层，
+        # 不进入文档正文（避免模型受情绪注入影响写出对话式正文/思考过程）
+        if any(r.get("tool") == "generate_document" and r.get("deferred")
+               for r in (tool_results or [])):
+            system_prompt = _strip_mood_section(system_prompt)
         synth = rs.build_response_prompt(message, tool_results, memories)
         # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能
         merged_system = system_prompt + "\n\n" + synth[0]["content"]
@@ -1308,10 +1407,50 @@ class AgentCore:
             self._check_budget_alert()
         except Exception:  # noqa: BLE001
             logger.warning("预算告警检查失败", exc_info=True)
+        # 情绪更新：turn 后异步判定（双源：用户情绪 + AI 自身情绪），
+        # 零阻塞——回复已发出，判定失败静默降级，绝不影响主流程
+        if self.mood and self.config.get("mood_enabled", True) \
+                and self.config.get("mood_influence_strength", 0.5) > 0:
+            try:
+                self._mood_task = asyncio.create_task(
+                    self._update_mood(sid, message, content))
+            except Exception:  # noqa: BLE001
+                logger.warning("情绪更新任务创建失败（静默跳过）", exc_info=True)
         if self.bus:
             from infrastructure.event_bus import EVT_TURN_COMPLETED
             await self.bus.publish(EVT_TURN_COMPLETED, {"session_id": sid})
         return shape
+
+    async def _update_mood(self, sid: str, user_msg: str, ai_reply: str) -> None:
+        """turn 后异步情绪判定：LLM 一次调用双输出 → 融合落库 → 发事件。
+        全异常捕获静默降级（模型不可用/解析失败仅跳过本轮，不阻断任何流程）。"""
+        try:
+            snap = self.providers.snapshot_for("chat")
+            if snap is None:
+                return
+            from infrastructure.json_repair import repair_json
+            prompt = [{"role": "system", "content": PROMPTS.render(
+                "agent/prompts/mood_judge",
+                user_message=str(user_msg or "")[:800],
+                assistant_reply=str(ai_reply or "")[:800])}]
+            resp = await self.llm.chat(snap, prompt, source="mood",
+                                       session_id=sid)
+            data = repair_json(resp["content"]) or {}
+            result = self.mood.apply(
+                {"mood": str(data.get("user_mood") or "neutral"),
+                 "intensity": float(data.get("user_intensity") or 0.0),
+                 "confidence": float(data.get("confidence") or 0.0),
+                 "note": data.get("note")},
+                {"mood": str(data.get("ai_mood") or "neutral"),
+                 "intensity": float(data.get("ai_intensity") or 0.0),
+                 "confidence": float(data.get("confidence") or 0.0),
+                 "note": data.get("note")})
+            if self.bus and (result.get("user_changed")
+                             or result.get("ai_changed")):
+                from infrastructure.event_bus import EVT_MOOD_UPDATED
+                self.bus.publish_nowait(EVT_MOOD_UPDATED, result)
+        except Exception:  # noqa: BLE001
+            logger.warning("情绪更新失败（静默降级）", exc_info=True)
 
     @staticmethod
     def _context_label(intents, message: str) -> str:

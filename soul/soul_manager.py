@@ -164,7 +164,14 @@ class SoulManager:
 
     def write_core(self, content: str) -> None:
         _soul_dir(self.data_dir).mkdir(parents=True, exist_ok=True)
-        (_soul_dir(self.data_dir) / "SOUL_CORE.md").write_text(content, encoding="utf-8")
+        p = _soul_dir(self.data_dir) / "SOUL_CORE.md"
+        # 程序内部写入：标记 internal，避免 watcher 误判为外部修改而推通知
+        if self.fw:
+            try:
+                self.fw.mark_internal(p)
+            except Exception:  # noqa: BLE001
+                pass
+        p.write_text(content, encoding="utf-8")
         if self.oplog:
             self.oplog.log("soul_core_edit", "用户编辑核心人格")
 

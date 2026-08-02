@@ -123,6 +123,7 @@ async def chat_send(request: Request):
         try:
             async for evt in c.core.run(sid, message, crid, images=images,
                                         regenerate=bool(regen_id),
+                                        regenerate_message_id=regen_id,
                                         location=location):
                 buf["events"].append(evt)
                 buf["size"] += len(json.dumps(evt.get("data", {})))
@@ -165,7 +166,7 @@ async def _gen_title(c, sid: str, message: str):
     from observability_langfuse import get_tracer
     tracer = get_tracer()
     span = tracer.span_start("title_generation", input={
-                             "session_id": sid, "message_preview": message[:100]})
+                             "session_id": sid, "message": message})
     try:
         snap = c.providers.snapshot_for("agent")
         q = message.split(
@@ -227,15 +228,27 @@ async def feedback(request: Request):
     mid = body["message_id"]
     fb = body["feedback"]
     reason = body.get("reason")
-    c.sessions.set_feedback(mid, fb)
-    if fb == 2:
-        # 无 reason 的点踩同样记录显式负反馈信号（画像/风格学习依赖完整采集）
-        c.signals.set_explicit_reaction(mid, 2)
-        if reason:
-            await _handle_downvote(c, mid, reason)
-    elif fb == 1:
-        c.signals.set_explicit_reaction(mid, 1)
-        await _handle_upvote(c, mid)
+    from observability_langfuse import get_tracer
+    tr = get_tracer().trace_start("user_feedback", input={
+        "message_id": mid, "feedback": fb, "reason": reason,
+        "session_id": c.db.query_one(
+            "SELECT session_id FROM conversations WHERE id=?", (mid,))["session_id"]
+        if c.db.query_one("SELECT 1 FROM conversations WHERE id=?", (mid,))
+        else None})
+    try:
+        c.sessions.set_feedback(mid, fb)
+        if fb == 2:
+            # 无 reason 的点踩同样记录显式负反馈信号（画像/风格学习依赖完整采集）
+            c.signals.set_explicit_reaction(mid, 2)
+            if reason:
+                await _handle_downvote(c, mid, reason)
+        elif fb == 1:
+            c.signals.set_explicit_reaction(mid, 1)
+            await _handle_upvote(c, mid)
+        tr.end()
+    except Exception:
+        tr.end(level="ERROR")
+        raise
     return {"code": 200, "data": {}}
 
 
@@ -291,8 +304,13 @@ async def upload_attachment(file: UploadFile = File(...)):
     import os
     from pathlib import Path
     from scheduler.ingest import extract_text
+    from observability_langfuse import get_tracer
+    tr = get_tracer().trace_start("attachment_upload", input={
+        "filename": file.filename,
+        "size_bytes": file.size if file.size is not None else 0})
     content = await file.read()
     if len(content) > ATTACH_MAX_MB * 1024 * 1024:
+        tr.end(level="ERROR", output={"ok": False, "error": "超过 20MB 上限"})
         return {"code": 400, "message": f"文件超过 {ATTACH_MAX_MB} MB 上限",
                 "trace_id": None, "details": None}
     suffix = Path(file.filename or "file").suffix
@@ -312,7 +330,13 @@ async def upload_attachment(file: UploadFile = File(...)):
             except OSError:
                 pass
 
-    text = await asyncio.to_thread(_parse)
+    try:
+        text = await asyncio.to_thread(_parse)
+    except Exception as e:  # noqa: BLE001
+        tr.end(level="ERROR", output={"ok": False, "error": str(e)[:500]})
+        raise
+    tr.end(output={"ok": bool(text.strip()), "chars": len(text),
+                   "parsed": bool(text.strip()), "truncated": False})
     return {"code": 200, "data": {
         "filename": file.filename, "chars": len(text),
         "text": text, "truncated": False,

@@ -155,13 +155,21 @@ class LLMClient:
         gen = get_tracer().generation_start(
             name=f"llm.{source}", model=snap.model_id, input=messages,
             metadata={"source": source, "session_id": session_id,
-                      "images": len(images) if images else 0})
+                      "images": len(images) if images else 0},
+            model_parameters={k: kw[k] for k in ("temperature", "max_tokens")
+                              if k in kw} or None)
         try:
             res = await self._call_with_retry(
                 snap, source, session_id,
                 lambda: self._do_chat(snap, messages, tools, images=images, **kw))
             u = res.get("usage", {}) or {}
-            gen.end(output=res.get("content"), usage={
+            # 输出记录：纯文本调用保持字符串；function_call（工具参数推断）
+            # 模型返回在 tool_calls 里（content 为空），结构化记录供 Langfuse 溯源
+            out: Any = res.get("content") or ""
+            tc = res.get("tool_calls") or []
+            if tc:
+                out = {"content": out, "tool_calls": tc}
+            gen.end(output=out, usage={
                 "input": u.get("input_tokens", 0), "output": u.get("output_tokens", 0),
                 "total": u.get("input_tokens", 0) + u.get("output_tokens", 0),
                 "unit": "TOKENS"})
@@ -198,7 +206,9 @@ class LLMClient:
             name=f"llm.{source}", model=snap.model_id, input=messages,
             metadata={"source": source, "session_id": session_id,
                       "images": len(images) if images else 0,
-                      "builtin_tools": len(extra_tools) if extra_tools else 0})
+                      "builtin_tools": len(extra_tools) if extra_tools else 0},
+            model_parameters={k: kw[k] for k in ("temperature", "max_tokens")
+                              if k in kw} or None)
         breaker = self.breaker(snap.model_id)
         if not breaker.allow():
             gen.end(level="ERROR", status_message="熔断中")

@@ -322,6 +322,8 @@ class IngestManager:
         self.image_extract_fn = image_extract_fn
         self.raw_dir = self.data_dir / "raw_docs"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
+        # 容量告警标志：超阈值首次告警，恢复后重置，避免每次导入重复推送
+        self._capacity_alerted = False
 
     def _next_doc_id(self) -> str:
         # 以现存 id 的最大数字后缀 +1 生成，而非 count(*)+1：
@@ -565,9 +567,14 @@ class IngestManager:
     def _check_capacity(self) -> None:
         total = sum(f.stat().st_size for f in self.raw_dir.rglob(
             "*") if f.is_file())
-        if total > RAW_TOTAL_WARN_GB * 1024 ** 3:
+        over = total > RAW_TOTAL_WARN_GB * 1024 ** 3
+        if over and not self._capacity_alerted:
+            # 首次超阈值才告警：容量告警是持续状态，每次导入重复推送会刷屏
+            self._capacity_alerted = True
             self.notify("raw_docs_capacity",
                         f"raw_docs 总大小超过 {RAW_TOTAL_WARN_GB} GB，建议清理")
+        elif not over:
+            self._capacity_alerted = False  # 恢复后重置，下次超阈值重新告警
 
     def cleanup_temp_attachments(self, days: int = 7) -> int:
         """清理 data/temp/attachments/ 下超 N 天的临时文件（夜间维护链）。"""

@@ -75,6 +75,22 @@ def _trim(v: Any, depth: int = 0, max_str: int = _MAX_STR) -> Any:
     return _trim(str(v), depth + 1, max_str)
 
 
+def mark_preview(value: Any, *, content_type: str, limit: int | None = None) -> dict:
+    """预览字段统一标记：说明"这块是什么内容" + 原始长度 + 截断标志 + 内容。
+
+    默认全量记录（limit=None，preview 为完整内容，truncated 恒 False）；
+    仅对确需体积兑底的超大动态内容显式传 limit 截断并标注。
+    """
+    text = "" if value is None else str(value)
+    truncated = limit is not None and len(text) > limit
+    return {
+        "content_type": content_type,
+        "chars": len(text),
+        "truncated": truncated,
+        "preview": text[:limit] if truncated else text,
+    }
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     """递归合并两个 dict，override 覆盖 base，嵌套 dict 做深度合并。"""
     result = {**(base or {})}
