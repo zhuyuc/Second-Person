@@ -39,6 +39,7 @@ from memory.vector_compensator import VectorCompensator
 from memory.vector_store import VectorStore
 from user_profile.profile_manager import ProfileManager
 from scheduler.backup import BackupManager
+from scheduler.folder_scan import FolderScanner
 from scheduler.ingest import IngestManager
 from scheduler.scheduler import TaskScheduler
 from agent.session_context import SessionStore
@@ -382,6 +383,9 @@ class AppContainer:
         self.ingest = IngestManager(
             self.db, d, self.distiller, self.config, notifier,
             image_extract_fn=self.image_extract_fn)
+        # 本地目录全域接入：扫描用户目录增量导入（依赖 ingest 管线）
+        self.folder_scanner = FolderScanner(
+            self.db, d, self.ingest, self.config, notifier)
 
         # 图片入库回调：把当轮多模态图片 dataURL 解码后走 ingest 入库（静默）。
         # 由 AgentCore 在“显式记忆指令 + 存在图片”时 fire-and-forget 调用。
@@ -493,6 +497,10 @@ class AppContainer:
         # 独立任务
         s.register_task("output_style_build", "输出样式画像提炼",
                         lambda: self.output_style_builder.build(), "每 7 天")
+        s.register_task("local_dir_scan", "本地目录扫描",
+                        lambda: self.folder_scanner.scan_all(
+                            trigger="schedule"),
+                        "每 N 小时（自门控）")
 
     # ---- 生命周期 ----
     def _ensure_local_embedding_provider(self) -> None:

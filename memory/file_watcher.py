@@ -10,6 +10,7 @@ FileWriter 内部写入标记 source=internal，watcher 收到后跳过避免死
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -27,13 +28,21 @@ class FileWatcher:
     def __init__(self, data_dir, *, on_memory_change=None, on_soul_change=None,
                  on_profile_change=None):
         self.data_dir = Path(data_dir)
-        # (changed_paths: list[Path]) -> None
+        # 监控子目录精确路径（resolve 后判定，防止目录名片段误匹配）
+        self._soul_dir = (self.data_dir / "soul").resolve()
+        self._profile_dir = (self.data_dir / "profile").resolve()
+        self._memories_dir = (self.data_dir / "memories").resolve()
+        # 回调
         self.on_memory_change = on_memory_change
         self.on_soul_change = on_soul_change          # (path: Path) -> None
         self.on_profile_change = on_profile_change    # (path: Path) -> None
         self._observer = None
         # path -> 抑制截止时间（monotonic）：窗口内事件簇全部忽略
         self._internal_writes: dict[str, float] = {}
+        # path -> 文件内容 SHA256：watchdog 在 Windows 会把“读取（atime
+        # 更新）”也报告为 modified 事件，内容未变的事件一律过滤，
+        # 只有内容真正变化的写入才触发回调（对话读取 SOUL 不再误报）
+        self._snapshots: dict[str, str] = {}
         self._lock = threading.Lock()
         self._pending: set[str] = set()
         self._debounce_timer: threading.Timer | None = None
@@ -68,6 +77,16 @@ class FileWatcher:
             d = self.data_dir / sub
             if d.exists():
                 self._observer.schedule(handler, str(d), recursive=True)
+        # 预建 soul 文件内容快照：避免启动后首次“读取（atime 事件）”
+        # 因无快照被误判为外部修改而推送通知
+        for name in ("SOUL_CORE.md", "SOUL_STYLE.md"):
+            p = self._soul_dir / name
+            if p.is_file():
+                try:
+                    self._snapshots[str(p.resolve())] = hashlib.sha256(
+                        p.read_bytes()).hexdigest()
+                except OSError:
+                    pass
         self._observer.start()
         logger.info("FileWatcher 已启动")
 
@@ -89,19 +108,22 @@ class FileWatcher:
                 if exp > time.monotonic():
                     return
                 self._internal_writes.pop(rp, None)
-        parts = path.parts
-        if "soul" in parts:
+        resolved = path.resolve()
+        # 按监控子目录精确判定归属：不能用目录名片段（parts 含 "soul"）
+        # 匹配，否则 data/memories/soul 领域目录的事件会被误判为人格事件
+        if resolved.parents and self._soul_dir in resolved.parents:
             # 防抖合并：一次保存常触发多个 watchdog 事件（created/modified…），
             # 同路径短窗内只回调一次，避免重复通知/重复推送
             if path.name in ("SOUL_CORE.md", "SOUL_STYLE.md") and self.on_soul_change:
                 self._enqueue_soul(rp)
             return
-        if "profile" in parts:
+        if resolved.parents and self._profile_dir in resolved.parents:
             if self.on_profile_change:
                 self.on_profile_change(path)
             return
-        if "memories" in parts:
-            if path.name == "_index.md" or "_conflicts" in parts or "_archived" in parts:
+        if resolved.parents and self._memories_dir in resolved.parents:
+            if path.name == "_index.md" or "_conflicts" in resolved.parts \
+                    or "_archived" in resolved.parts:
                 return  # 忽略（_index.md 避免死循环；_archived 移动由 FileWriter 负责）
             self._enqueue_memory(rp)
 
@@ -119,6 +141,19 @@ class FileWatcher:
             paths = [Path(p) for p in self._soul_pending]
             self._soul_pending.clear()
         for p in paths:
+            rp = str(p.resolve())
+            try:
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                # 文件被删除：清快照不通知（读取 API 有默认值兑底）
+                self._snapshots.pop(rp, None)
+                continue
+            with self._lock:
+                prev = self._snapshots.get(rp)
+                self._snapshots[rp] = digest
+            if prev == digest:
+                # 内容未变（读取/atime 类事件）：不触发“外部修改”
+                continue
             try:
                 self.on_soul_change(p)
             except Exception:  # noqa: BLE001
@@ -137,8 +172,24 @@ class FileWatcher:
         with self._lock:
             paths = [Path(p) for p in self._pending]
             self._pending.clear()
-        if paths and self.on_memory_change:
+        changed: list[Path] = []
+        for p in paths:
+            rp = str(p.resolve())
             try:
-                self.on_memory_change(paths)
+                digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            except OSError:
+                # 文件被删除/不可读：必须触发（置 missing），并清快照
+                self._snapshots.pop(rp, None)
+                changed.append(p)
+                continue
+            with self._lock:
+                prev = self._snapshots.get(rp)
+                self._snapshots[rp] = digest
+            if prev != digest:
+                # 内容真正变化（新建/修改）才触发；读取类事件直接过滤
+                changed.append(p)
+        if changed and self.on_memory_change:
+            try:
+                self.on_memory_change(changed)
             except Exception:  # noqa: BLE001
                 logger.exception("记忆变更处理失败")

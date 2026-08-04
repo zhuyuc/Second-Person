@@ -281,7 +281,7 @@ Agent 视角只有一种工具；底层分内置（进程内直调）与 MCP（�
 | web_search | 免 Key 联网搜索（Bing 优先 → DuckDuckGo 兜底） | |
 | calculator | AST 白名单安全算术 | |
 | datetime_now | 当前时间（默认 Asia/Shanghai） | |
-| generate_document | 生成 Word/Markdown 文档落地 temp/exports 返回下载链接（7 天清理） | |
+| generate_document | 生成 Word/Markdown/PPT/Excel 文档落地 temp/exports 返回下载链接（7 天清理，支持 docx/md/pptx/xlsx 四格式） | |
 
 #### 3.5.3 安全边界
 
@@ -295,7 +295,7 @@ Agent 视角只有一种工具；底层分内置（进程内直调）与 MCP（�
 - 凭据：stdio env / http auth 敏感值 Fernet 加密入 credentials 表，config 中圆点占位；编辑时占位符保留原值；
 - 工具管理：include 白名单 / exclude 黑名单过滤；按名称关键词猜测破坏性标记；软断开（工具下线）与彻底删除（含凭证）分离；启动自动重连；
 - OAuth 2.1：state 暂存 5 分钟，回调换 token 加密存储；
-- 文档导出：Markdown → DOCX 自研映射管线（markdown→HTML→python-docx，覆盖标题/列表/代码块/表格/引用/链接等全量语法，中文微软雅黑），CPU 密集强制工作线程执行。
+- 文档导出：Markdown → DOCX 自研映射管线（markdown→HTML→python-docx，覆盖标题/列表/代码块/表格/引用/链接等全量语法，中文微软雅黑），CPU 密集强制工作线程执行；PPTX（python-pptx，h1 封面 + 每 h2 一页 + 页数/字符/表格行截断防护）与 XLSX（openpyxl，每个表格一个 sheet + 公式注入前置单引号转义）同管线扩展，缺失依赖时仅对应格式报错不影响其余格式。
 
 ### 3.6 知识库（文档导入 Ingest）
 

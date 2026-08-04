@@ -43,7 +43,7 @@ const sessionGroups = computed(() => [
 ])
 
 // 渠道来源中文名（未知渠道直接显示原值）
-const CHANNEL_NAMES = { feishu: '飞书', dingtalk: '钉钉', telegram: 'Telegram', wecom: '企业微信' }
+const CHANNEL_NAMES = { feishu: '飞书', dingtalk: '钉钉', telegram: 'Telegram', wecom: '企业微信', weixin: '微信' }
 function channelName(ch) { return CHANNEL_NAMES[ch] || ch }
 
 // 会话项：更多菜单 / 重命名 / 置顶 / 删除

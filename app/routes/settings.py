@@ -593,13 +593,19 @@ async def status():
 
 
 # ---- 3.9 接入渠道 ---------------------------------------------------------
+# 微信扫码二维码内存暂存（单账号设计，扫码为即时操作，重启丢失无影响）
+_weixin_qrcode: dict = {}
+
+
 @router.get("/settings/platforms")
 async def list_platforms():
     rows = _c().db.query_all("SELECT * FROM platforms")
     return {"code": 200, "data": [
         {"id": r["id"], "platform_type": r["platform_type"], "status": r["status"],
-         "enabled": bool(r["enabled"]), "detail": "监听 localhost:8000"
-         if r["id"] == "web_default" else "",
+         "enabled": bool(r["enabled"]), "bound": bool(r["credential_id"]),
+         "detail": "监听 localhost:8000"
+         if r["id"] == "web_default" else ("ClawBot 扫码绑定接入"
+         if r["platform_type"] == "weixin" else ""),
          "last_failure": r["last_failure_time"],
          "failure_reason": r["last_failure_reason"]} for r in rows]}
 
@@ -611,6 +617,9 @@ async def add_platform(request: Request):
     ptype = (body.get("platform_type") or "").strip()
     if not ptype or ptype == "web":
         return {"code": 400, "message": "无效的平台类型", "trace_id": None, "details": None}
+    if ptype == "weixin":
+        return {"code": 400, "message": "微信渠道请使用扫码绑定（设置页 → 添加渠道 → 微信）",
+                "trace_id": None, "details": None}
     # 必填校验：IM Bot 必须有 Token；飞书/钉钉/企微还需 App Secret
     bot_token = (body.get("bot_token") or "").strip()
     app_secret = (body.get("app_secret") or "").strip()
@@ -638,6 +647,13 @@ async def platform_detail(pid: str):
     row = c.db.query_one("SELECT * FROM platforms WHERE id=?", (pid,))
     if not row:
         return {"code": 404, "message": "渠道不存在", "trace_id": None, "details": None}
+    if row["platform_type"] == "weixin":
+        # 微信凭证（bot_token 等）由扫码绑定流程管理，不回显避免前端误改覆盖
+        return {"code": 200, "data": {
+            "id": row["id"], "platform_type": "weixin",
+            "bot_token": "", "app_secret": "",
+            "whitelist_user_id": row["whitelist_user_id"] or "",
+            "callback_url": row["callback_url"] or ""}}
     import json as _json
     bot_token, app_secret = "", ""
     if row["credential_id"]:
@@ -665,7 +681,13 @@ async def edit_platform(pid: str, request: Request):
         return {"code": 404, "message": "渠道不存在", "trace_id": None, "details": None}
     ptype = row["platform_type"]
     # 平台类型不可改（改类型等同新建，pid 命名规则也会冲突）；仅更新凭证与配置
-    if ptype != "web":
+    if ptype == "weixin":
+        # 微信凭证由扫码绑定流程管理（含运行态游标/会话 token），
+        # 编辑仅更新白名单与回调，避免覆盖导致重启重扫
+        c.db.execute(
+            "UPDATE platforms SET whitelist_user_id=?, callback_url=? WHERE id=?",
+            (body.get("whitelist_user_id"), body.get("callback_url"), pid))
+    elif ptype != "web":
         bot_token = (body.get("bot_token") or "").strip()
         app_secret = (body.get("app_secret") or "").strip()
         if not bot_token:
@@ -704,6 +726,12 @@ async def test_push():
     if not active:
         return {"code": 400, "message": "当前未启用任何 IM 渠道", "trace_id": None,
                 "details": None}
+    # 微信渠道不支持独立主动推送（iLink 官方限制：sendmessage 仅在即时回复场景送达），
+    # 避免测试接口返回假成功误导用户
+    if active.platform_type == "weixin":
+        return {"code": 400, "message": "微信渠道不支持主动推送（iLink 官方限制），"
+                "系统通知仅推送到 Web 端和已启用的其他 IM 渠道", "trace_id": None,
+                "details": None}
     target = ad.resolve_push_target()
     if not target:
         return {"code": 400, "message": "无可用推送目标：请先在渠道配置填写白名单用户"
@@ -715,6 +743,104 @@ async def test_push():
         return {"code": 400, "message": f"推送失败：{e}", "trace_id": None,
                 "details": None}
     return {"code": 200, "data": {"target": target}}
+
+
+@router.post("/settings/platforms/weixin/qrcode")
+async def weixin_qrcode():
+    """获取微信 ClawBot 登录二维码（iLink 直连）。
+    创建/复用 weixin_1 渠道记录（草稿态），扫码确认后由 status 接口写入凭证。"""
+    c = _c()
+    pid = "weixin_1"
+    row = c.db.query_one("SELECT * FROM platforms WHERE id=?", (pid,))
+    if not row:
+        c.db.execute(
+            "INSERT OR REPLACE INTO platforms(id,platform_type,enabled,status,"
+            "whitelist_user_id,callback_url,credential_id,created_at) "
+            "VALUES(?,?,0,'healthy','',NULL,NULL,?)", (pid, "weixin", now_iso()))
+    from gateway.platforms.ilink_client import ILinkClient
+    client = ILinkClient()
+    try:
+        data = await client.request_qrcode()
+    except Exception as e:  # noqa: BLE001
+        return {"code": 400, "message": f"获取二维码失败：{e}", "trace_id": None,
+                "details": None}
+    finally:
+        await client.aclose()
+    qrcode = data.get("qrcode", "")
+    img_url = data.get("qrcode_img_content", "")
+    # liteapp 返回的是 JS 渲染 H5 页面（非图片），img 标签无法显示；
+    # 后端将扫码链接生成为二维码 PNG（data URL）返回前端直接展示。
+    qrcode_img = _weixin_qrcode_png(img_url or qrcode)
+    _weixin_qrcode["qrcode"] = qrcode
+    return {"code": 200, "data": {
+        "qrcode": qrcode,
+        "qrcode_img": qrcode_img,
+        "qrcode_url": img_url}}
+
+
+def _weixin_qrcode_png(content: str) -> str:
+    """把扫码链接生成为二维码 PNG 的 data URL；库缺失时返回空串（前端兜底显示链接）。"""
+    try:
+        import base64 as _b64
+        import io
+        import qrcode
+        qr = qrcode.QRCode(border=2, box_size=10, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr.add_data(content)
+        qr.make(fit=True)
+        buf = io.BytesIO()
+        qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+        return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+    except Exception as e:  # noqa: BLE001 - 二维码生成失败不阻断绑定流程
+        print(f"[weixin] 二维码生成失败（前端将显示链接兜底）：{e}")
+        return ""
+
+
+@router.get("/settings/platforms/weixin/qrcode/status")
+async def weixin_qrcode_status(qrcode: str = ""):
+    """轮询扫码状态；confirmed 后把 bot_token/baseurl 写入凭证（加密存储）。
+    前端轮询到 confirmed 后调用 enable 启用，与现有渠道交互一致。"""
+    c = _c()
+    qrcode = qrcode or _weixin_qrcode.get("qrcode", "")
+    if not qrcode:
+        return {"code": 400, "message": "缺少二维码参数，请重新发起绑定",
+                "trace_id": None, "details": None}
+    from gateway.platforms.ilink_client import ILinkClient
+    client = ILinkClient()
+    try:
+        data = await client.poll_qrcode(qrcode)
+    except Exception as e:  # noqa: BLE001
+        return {"code": 400, "message": f"查询扫码状态失败：{e}", "trace_id": None,
+                "details": None}
+    finally:
+        await client.aclose()
+    status = data.get("status", "pending")
+    if status == "expired":
+        _weixin_qrcode.pop("qrcode", None)
+        return {"code": 200, "data": {"status": "expired"}}
+    if status != "confirmed":
+        return {"code": 200, "data": {"status": status or "pending"}}
+    bot_token = data.get("bot_token", "")
+    if not bot_token:
+        return {"code": 400, "message": "扫码确认但未返回 bot_token", "trace_id": None,
+                "details": None}
+    import json as _json
+    payload = _json.dumps({"bot_token": bot_token,
+                           "baseurl": data.get("baseurl", ""),
+                           "context_token": "", "update_buf": ""},
+                          ensure_ascii=False)
+    pid = "weixin_1"
+    row = c.db.query_one("SELECT * FROM platforms WHERE id=?", (pid,))
+    if not row:
+        return {"code": 404, "message": "微信渠道记录不存在，请重新发起绑定",
+                "trace_id": None, "details": None}
+    if row["credential_id"]:
+        c.creds.update(row["credential_id"], payload)
+    else:
+        cred_id = c.creds.store("platform:weixin", "platform_bot", payload)
+        c.db.execute("UPDATE platforms SET credential_id=? WHERE id=?",
+                     (cred_id, pid))
+    c.oplog.log("platform_update", pid)
+    return {"code": 200, "data": {"status": "confirmed"}}
 
 
 @router.delete("/settings/platforms/{pid}")

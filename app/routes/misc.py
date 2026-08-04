@@ -230,6 +230,62 @@ async def delete_document(doc_id: str, cascade: bool = False):
         "warning": "删除会影响 --recompile 重建完整性"}}
 
 
+# ---- 本地目录全域接入（个人知识接入） -------------------------------------
+@router.get("/import/local-dirs")
+async def list_local_dirs():
+    return {"code": 200, "data": _c().folder_scanner.list_dirs()}
+
+
+@router.post("/import/local-dirs")
+async def add_local_dir(request: Request):
+    body = await request.json()
+    c = _c()
+    try:
+        item = c.folder_scanner.add_dir(
+            body.get("path", ""), bool(body.get("recursive", True)))
+    except ValueError as e:
+        return {"code": 400, "message": str(e), "trace_id": None,
+                "details": None}
+    c.oplog.log("local_dir_add", item["path"])
+    return {"code": 200, "data": item}
+
+
+@router.put("/import/local-dirs/{dir_id}")
+async def update_local_dir(dir_id: int, request: Request):
+    body = await request.json()
+    c = _c()
+    if "enabled" in body:
+        c.folder_scanner.set_enabled(dir_id, bool(body["enabled"]))
+    return {"code": 200, "data": {}}
+
+
+@router.delete("/import/local-dirs/{dir_id}")
+async def remove_local_dir(dir_id: int):
+    """解除跟踪：仅停止后续扫描，已提炼记忆与 raw_docs 副本保留。"""
+    c = _c()
+    c.folder_scanner.remove_dir(dir_id)
+    return {"code": 200, "data": {}}
+
+
+@router.post("/import/local-dirs/scan")
+async def scan_local_dirs():
+    """手动触发立即扫描全部已启用目录（与调度扫描共用并发锁）。"""
+    c = _c()
+    result = await c.folder_scanner.scan_all(trigger="manual")
+    return {"code": 200, "data": result}
+
+
+@router.get("/import/local-dirs/{dir_id}/files")
+async def list_local_dir_files(dir_id: int, status: str = ""):
+    c = _c()
+    sql = ("SELECT path,status,fail_reason,imported_at,doc_id "
+           "FROM local_dir_files WHERE dir_id=? "
+           + ("AND status=? " if status else "")
+           + "ORDER BY last_seen_at DESC LIMIT 500")
+    rows = c.db.query_all(sql, (dir_id, status) if status else (dir_id,))
+    return {"code": 200, "data": [dict(r) for r in rows]}
+
+
 # ---- 文档导出（Markdown / Word 下载） --------------------------------------
 @router.get("/files/{stored_name}")
 async def download_generated_file(stored_name: str):

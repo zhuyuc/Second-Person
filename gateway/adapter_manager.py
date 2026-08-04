@@ -17,13 +17,14 @@ from .platforms.dingtalk import DingtalkAdapter
 from .platforms.feishu import FeishuAdapter
 from .platforms.telegram import TelegramAdapter
 from .platforms.wecom import WecomAdapter
+from .platforms.weixin import WeixinAdapter
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.gateway")
 
 ADAPTER_TYPES = {
     "telegram": TelegramAdapter, "feishu": FeishuAdapter, "dingtalk": DingtalkAdapter,
-    "wecom": WecomAdapter,
+    "wecom": WecomAdapter, "weixin": WeixinAdapter,
 }
 
 
@@ -57,6 +58,10 @@ class AdapterManager:
                     cfg.update(json.loads(sec))
                 except json.JSONDecodeError:
                     pass
+        # 微信渠道注入凭证持久化句柄：游标/会话 token 由适配器写回凭证（重启免扫码）
+        if row["platform_type"] == "weixin":
+            cfg["_credential_id"] = row["credential_id"]
+            cfg["_creds"] = self.creds
         adapter = cls(
             row["id"], cfg, core=self.core, sessions=self.sessions, db=self.db,
             notifier=self.notifications.push,
@@ -73,7 +78,13 @@ class AdapterManager:
                                    "无入站消息记录）", _ad.platform_type)
                     return
                 return _ad.send_message(target, text)
-            self.notifications.set_im_sender(_im_send)
+            # 微信渠道不支持独立主动推送（iLink 官方限制：sendmessage 仅在即时回复场景送达），
+            # 跳过 _im_sender 注入，系统通知只推 Web 端+其他 IM 渠道
+            if row["platform_type"] != "weixin":
+                self.notifications.set_im_sender(_im_send)
+            else:
+                self.notifications.set_im_sender(None)
+                logger.info("微信渠道已启用（不支持主动推送，系统通知仅推 Web 端）")
             logger.info("已加载 IM 适配器：%s", row["platform_type"])
         except Exception as e:  # noqa: BLE001
             logger.warning("IM 适配器 %s 连接失败", row["platform_type"])

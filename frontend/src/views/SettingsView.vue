@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onActivated, computed } from 'vue'
+import { ref, onMounted, onActivated, onUnmounted, computed } from 'vue'
 import { api } from '@/api/client'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
@@ -275,7 +275,7 @@ async function saveConnector() {
 }
 
 // 接入渠道配置
-const PLATFORM_MAP = { web: 'Web', feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉', wecom: '企业微信' }
+const PLATFORM_MAP = { web: 'Web', feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉', wecom: '企业微信', weixin: '微信' }
 const showChannelCfg = ref(false)
 const newChannel = ref({ platform_type: 'feishu', bot_token: '', app_secret: '', whitelist_user_id: '', callback_url: '' })
 async function addChannel() {
@@ -290,6 +290,73 @@ async function addChannel() {
   showChannelCfg.value = false
   await api.post(`/settings/platforms/${r.id}/enable`, {})
   await loadPlatforms(); toast.push('success', '已配置并启用（已自动禁用其他 IM）')
+}
+
+// 微信渠道扫码绑定（iLink 直连：二维码 → 轮询确认 → 自动启用）
+const showWeixinScan = ref(false)
+const wxScan = ref({ qrcode: '', img: '', url: '', status: 'pending', busy: false })
+let wxPollTimer = null
+function wxImgSrc() {
+  const img = wxScan.value.img
+  if (!img) return ''
+  // 兼容三种形态：data URL / http(s) URL（微信小程序码页）/ 纯 base64 图片
+  if (img.startsWith('data:') || img.startsWith('http')) return img
+  return 'data:image/png;base64,' + img
+}
+function stopWxPoll() {
+  if (wxPollTimer) { clearInterval(wxPollTimer); wxPollTimer = null }
+}
+async function refreshWeixinQrcode() {
+  wxScan.value.busy = true
+  try {
+    const r = await api.post('/settings/platforms/weixin/qrcode', {})
+    wxScan.value.qrcode = r.qrcode || ''
+    wxScan.value.img = r.qrcode_img || ''
+    wxScan.value.url = r.qrcode_url || ''
+    startWxPoll()
+  } finally { wxScan.value.busy = false }
+}
+async function copyWxUrl() {
+  try {
+    await navigator.clipboard.writeText(wxScan.value.url)
+    toast.push('success', '扫码链接已复制，请在微信中打开')
+  } catch { toast.push('error', '复制失败，请手动复制链接') }
+}
+function startWxPoll() {
+  stopWxPoll()
+  // 防重入：扫码状态接口为长轮询（服务端 hold 至状态变化），
+  // 上一请求未完成时不发起新请求，避免连接堆积
+  let polling = false
+  wxPollTimer = setInterval(async () => {
+    if (polling) return
+    polling = true
+    try {
+      const r = await api.get(`/settings/platforms/weixin/qrcode/status?qrcode=${encodeURIComponent(wxScan.value.qrcode)}`)
+      wxScan.value.status = r.status || 'pending'
+      if (r.status === 'confirmed') {
+        stopWxPoll()
+        await api.post('/settings/platforms/weixin_1/enable', {})
+        showWeixinScan.value = false
+        await loadPlatforms()
+        toast.push('success', '微信渠道已绑定并启用（已自动禁用其他 IM）')
+      } else if (r.status === 'expired') {
+        stopWxPoll()
+        toast.push('warning', '二维码已过期，请重新获取')
+      }
+    } catch (e) { /* client.js 已统一 toast */ } finally { polling = false }
+  }, 2000)
+}
+async function openWeixinScan() {
+  showWeixinScan.value = true
+  wxScan.value = { qrcode: '', img: '', url: '', status: 'pending', busy: false }
+  await refreshWeixinQrcode()
+}
+onUnmounted(stopWxPoll)
+
+// 添加渠道卡片点击：微信走扫码绑定，其余走配置表单
+function clickAddChannel(pt) {
+  if (pt === 'weixin') { openWeixinScan() }
+  else { newChannel.value.platform_type = pt; showChannelCfg.value = true }
 }
 
 async function testChannel() {
@@ -314,8 +381,8 @@ async function openChannelEdit(p) {
   showChannelEdit.value = true
 }
 async function saveChannelEdit() {
-  if (!editChannel.value.bot_token.trim()) { toast.push('error', '请先填写 Bot Token'); return }
-  if (['feishu', 'dingtalk', 'wecom'].includes(editChannel.value.platform_type) && !editChannel.value.app_secret.trim()) {
+  if (editChannel.value.platform_type !== 'weixin' && !editChannel.value.bot_token.trim()) { toast.push('error', '请先填写 Bot Token'); return }
+  if (editChannel.value.platform_type !== 'weixin' && ['feishu', 'dingtalk', 'wecom'].includes(editChannel.value.platform_type) && !editChannel.value.app_secret.trim()) {
     toast.push('error', '请先填写 App Secret'); return
   }
   await api.put(`/settings/platforms/${editChannel.value.id}`, editChannel.value)
@@ -482,31 +549,35 @@ onActivated(() => selectTab(tab.value))
         <div class="fg" style="gap:8px">
           <span class="dot" :style="{ background: p.status === 'healthy' ? 'var(--succtx)' : 'var(--dangtx)' }"></span>
           <div><b>{{ PLATFORM_MAP[p.platform_type] || p.platform_type }}</b>
-            <div class="muted">{{ p.detail }}</div>
+            <div class="muted">{{ p.platform_type === 'weixin' && !p.bound ? '未绑定：请点击「扫码绑定」完成接入' : p.detail }}</div>
             <div v-if="p.failure_reason" class="muted" style="color:var(--dangtx)">{{ p.failure_reason }}</div>
           </div>
         </div>
         <div class="fg" style="gap:8px">
           <span v-if="p.enabled" class="badge badge-g">已启用</span>
-          <button v-if="p.id !== 'web_default'" class="btn-sm" :disabled="busy('editCh' + p.id)"
-            @click="run('editCh' + p.id, () => openChannelEdit(p))">编辑</button>
-          <button v-if="p.id !== 'web_default' && !p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
-            @click="run('plat' + p.id, () => enablePlatform(p.id))">启用</button>
-          <button v-if="p.id !== 'web_default' && p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
-            @click="run('plat' + p.id, () => disablePlatform(p.id))">禁用</button>
-          <button v-if="p.status === 'paused'" class="btn-sm" :disabled="busy('plat' + p.id)"
-            @click="run('plat' + p.id, () => resumePlatform(p.id))">恢复</button>
+          <button v-if="p.platform_type === 'weixin' && !p.bound" class="btn-sm"
+            :disabled="busy('wxBind')" @click="run('wxBind', openWeixinScan)">扫码绑定</button>
+          <template v-else>
+            <button v-if="p.id !== 'web_default'" class="btn-sm" :disabled="busy('editCh' + p.id)"
+              @click="run('editCh' + p.id, () => openChannelEdit(p))">编辑</button>
+            <button v-if="p.id !== 'web_default' && !p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
+              @click="run('plat' + p.id, () => enablePlatform(p.id))">启用</button>
+            <button v-if="p.id !== 'web_default' && p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
+              @click="run('plat' + p.id, () => disablePlatform(p.id))">禁用</button>
+            <button v-if="p.status === 'paused'" class="btn-sm" :disabled="busy('plat' + p.id)"
+              @click="run('plat' + p.id, () => resumePlatform(p.id))">恢复</button>
+          </template>
         </div>
       </div>
     </div>
     <div class="section-title mt">添加渠道</div>
     <div class="g3">
-      <div v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom']" :key="pt" class="cw"
+      <div v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom', 'weixin']" :key="pt" class="cw"
         style="text-align:center;cursor:pointer;padding:20px"
-        @click="newChannel.platform_type = pt; showChannelCfg = true">
+        @click="clickAddChannel(pt)">
         <i class="ti ti-plug" style="font-size:var(--icon-lg);color:var(--acctx)"></i>
         <div style="font-weight:500;margin-top:8px">{{ PLATFORM_MAP[pt] || pt }}</div>
-        <div class="muted">Bot 私聊接入</div>
+        <div class="muted">{{ pt === 'weixin' ? 'ClawBot 扫码绑定' : 'Bot 私聊接入' }}</div>
       </div>
     </div>
   </div>
@@ -883,6 +954,27 @@ onActivated(() => selectTab(tab.value))
     </div>
   </div>
 
+  <!-- 微信扫码绑定弹窗 -->
+  <div v-if="showWeixinScan" class="overlay" @click.self="stopWxPoll(); showWeixinScan = false">
+    <div class="modal" style="text-align:center">
+      <div class="mt">微信渠道扫码绑定</div>
+      <div class="muted" style="margin:8px 0">使用微信「我 → 设置 → 插件 → ClawBot」扫描下方二维码（需微信 8.0.70+ 且账号已开放 ClawBot 灰度）</div>
+      <div v-if="wxImgSrc()" style="margin:16px auto;width:220px;height:220px;background:#fff;padding:8px;border-radius:8px">
+        <img :src="wxImgSrc()" style="width:100%;height:100%;object-fit:contain" alt="微信扫码" />
+      </div>
+      <div v-else-if="wxScan.busy" class="muted">正在获取二维码…</div>
+      <div v-else-if="wxScan.url" class="muted" style="margin:12px 0;word-break:break-all">请复制下方链接，在微信中打开后扫码确认：<br />{{ wxScan.url }}</div>
+      <div class="fg" style="justify-content:center;gap:8px;margin-top:8px">
+        <button v-if="!wxImgSrc() && wxScan.url" @click="copyWxUrl">复制链接</button>
+      </div>
+      <div class="muted" style="margin-top:8px">{{ wxScan.status === 'confirmed' ? '绑定成功' : '等待扫码确认…' }}</div>
+      <div class="fg" style="justify-content:center;gap:8px;margin-top:16px">
+        <button @click="refreshWeixinQrcode">重新获取</button>
+        <button @click="stopWxPoll(); showWeixinScan = false">关闭</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 编辑接入渠道弹窗 -->
   <div v-if="showChannelEdit" class="overlay" @click.self="showChannelEdit = false">
     <div class="modal">
@@ -890,15 +982,20 @@ onActivated(() => selectTab(tab.value))
       <div class="form-group"><label class="label">平台</label>
         <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled />
       </div>
-      <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
-      </div>
-      <div class="form-group"><label class="label">App Secret（部分平台）</label>
-        <div class="input-affix">
-          <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'" />
-          <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-            @click="showEditSecret = !showEditSecret"></i>
+      <template v-if="editChannel.platform_type === 'weixin'">
+        <div class="muted" style="margin-bottom:12px">微信渠道凭证由扫码绑定流程管理（含会话 Token），此处仅可修改绑定账户与回调。</div>
+      </template>
+      <template v-else>
+        <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
         </div>
-      </div>
+        <div class="form-group"><label class="label">App Secret（部分平台）</label>
+          <div class="input-affix">
+            <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'" />
+            <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+              @click="showEditSecret = !showEditSecret"></i>
+          </div>
+        </div>
+      </template>
       <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
           v-model="editChannel.whitelist_user_id" /></div>
       <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="editChannel.callback_url" /></div>

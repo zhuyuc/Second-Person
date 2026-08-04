@@ -122,6 +122,28 @@ class TaskScheduler:
                     if not self._ran_today("output_style_marker"):
                         await self.run_task("output_style_build")
                         self._mark_ran("output_style_marker")
+                # 本地目录扫描（按间隔小时自门控：复用任务 last_run 记录，
+                # 失败也推进 last_run，避免窗口内每分钟重复触发整轮重扫）
+                if now.minute < 5:
+                    interval = self.config.get(
+                        "local_dir_scan_interval_hours", 24)
+                    due = True
+                    row = self.db.query_one(
+                        "SELECT last_run FROM scheduled_tasks "
+                        "WHERE task_id='local_dir_scan'")
+                    if row and row["last_run"]:
+                        try:
+                            due = (now - datetime.fromisoformat(
+                                row["last_run"])) >= timedelta(hours=interval)
+                        except ValueError:
+                            due = True
+                    if due:
+                        ok = await self.run_task("local_dir_scan")
+                        if not ok:
+                            self.db.execute(
+                                "UPDATE scheduled_tasks SET last_run=? "
+                                "WHERE task_id='local_dir_scan'",
+                                (now.isoformat(timespec="seconds"),))
                 # 04:00 兜底检查：若记忆链应跑但未跑成（链首未启动/失败），写日志不补跑
                 if now.hour == 4 and now.minute < 5:
                     if not self._ran_today("fallback_check_marker"):

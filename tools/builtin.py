@@ -155,14 +155,19 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
 
     async def generate_document(title: str, format: str = "docx",
                                 content: str = "") -> dict:
-        """生成 Word/Markdown 文档文件，落地 temp/exports，返回下载链接。"""
+        """生成 Word/Markdown/PPT/Excel 文档文件，落地 temp/exports，返回下载链接。"""
         from urllib.parse import quote
-        from .doc_export import md_to_docx_bytes, sanitize_filename
+        from .doc_export import (md_to_docx_bytes, md_to_pptx_bytes,
+                                 md_to_xlsx_bytes, sanitize_filename)
         fmt = (format or "docx").lower().lstrip(".")
         if fmt == "markdown":
             fmt = "md"
-        if fmt not in ("docx", "md"):
-            raise ValueError(f"不支持的格式：{format}（仅 docx/md）")
+        elif fmt in ("ppt", "powerpoint"):
+            fmt = "pptx"
+        elif fmt in ("excel", "xls"):
+            fmt = "xlsx"
+        if fmt not in ("docx", "md", "pptx", "xlsx"):
+            raise ValueError(f"不支持的格式：{format}（仅 docx/md/pptx/xlsx）")
         if not (content or "").strip():
             raise ValueError("文档内容为空")
         exports = data_dir / "temp" / "exports"
@@ -170,11 +175,15 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         stored = f"{uuid.uuid4().hex[:12]}_{safe}.{fmt}"
 
         def _build() -> int:
-            # docx 构建为 CPU 密集，连同写盘一起丢工作线程（零阻塞铁律）
+            # 文档构建为 CPU 密集，连同写盘一起丢工作线程（零阻塞铁律）
             exports.mkdir(parents=True, exist_ok=True)
             p = exports / stored
             if fmt == "docx":
                 p.write_bytes(md_to_docx_bytes(content, safe))
+            elif fmt == "pptx":
+                p.write_bytes(md_to_pptx_bytes(content, safe))
+            elif fmt == "xlsx":
+                p.write_bytes(md_to_xlsx_bytes(content, safe))
             else:
                 p.write_text(content, encoding="utf-8")
             return p.stat().st_size
@@ -251,14 +260,15 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
 
     registry.register_function(ToolSpec(
         "generate_document",
-        "生成文档文件（Word 或 Markdown）供用户下载。当用户要求把内容生成/导出为"
-        " word、docx、md、markdown 文档或报告文件时调用；只需提供 title（文档标题）"
-        " 与 format（docx/md，默认 docx），content 留空即可，将由本轮回复正文自动填充；"
+        "生成文档文件（Word / Markdown / PPT / Excel）供用户下载。当用户要求把内容"
+        " 生成/导出为 word、docx、md、markdown、ppt、pptx、xlsx、excel 文档、报告、"
+        " 演示文稿或表格文件时调用；只需提供 title（文档标题）与 format"
+        " （docx/md/pptx/xlsx，默认 docx），content 留空即可，将由本轮回复正文自动填充；"
         " 返回的下载链接必须原样出现在回复中",
         {"type": "object", "properties": {
             "title": {"type": "string", "description": "文档标题，用作文件名"},
-            "format": {"type": "string", "enum": ["docx", "md"],
-                       "description": "文件格式，省略时默认 docx"},
+            "format": {"type": "string", "enum": ["docx", "md", "pptx", "xlsx"],
+                       "description": "文件格式：docx=Word 文档（默认）；md=Markdown；pptx=PPT 演示文稿；xlsx=Excel 表格"},
             "content": {"type": "string", "description": "文档正文（可选，留空则由回复正文自动填充）"}},
          # content 不强制必填：长文档正文由主回复延迟填充（与 file_write 一致），
          # 避免 tool_infer 阶段因填不出长正文而被 validate_params 硬拒

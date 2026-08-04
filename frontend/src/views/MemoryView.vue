@@ -477,13 +477,70 @@ function fmtSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + ' MB'
 }
 
+// 本地目录接入：添加 / 列表 / 手动扫描 / 启用暂停 / 移除 / 文件详情
+const localDirs = ref([])
+const localDirPath = ref('')
+const localDirRecursive = ref(true)
+const localDirScanning = ref(false)
+const localDirFiles = ref(null)   // { dir, files } 文件列表弹窗
+// 文件跟踪状态中文化（提交仍用英文值）
+const LOCAL_FILE_STATUS = {
+  pending: '待导入', imported: '已导入', failed: '导入失败', deleted: '源文件已移除',
+}
+async function loadLocalDirs() { localDirs.value = await api.get('/import/local-dirs') }
+async function addLocalDir() {
+  const p = localDirPath.value.trim()
+  if (!p) { toast.push('warning', '请输入目录路径'); return }
+  try {
+    const d = await api.post('/import/local-dirs', { path: p, recursive: localDirRecursive.value })
+    toast.push('success', `已接入「${d.path}」，将按扫描间隔自动提炼记忆`)
+    localDirPath.value = ''
+    await loadLocalDirs()
+  } catch { /* api 已 toast */ }
+}
+async function removeLocalDir(dir) {
+  const r = await confirm.ask({
+    message: `移除本地目录「${dir.path}」？仅停止后续扫描，已提炼的记忆与文件副本都会保留。`,
+  })
+  if (!r) return
+  await api.del('/import/local-dirs/' + dir.id)
+  toast.push('success', '已移除，已导入内容不受影响')
+  await loadLocalDirs()
+}
+async function toggleLocalDir(dir) {
+  await api.put('/import/local-dirs/' + dir.id, { enabled: !dir.enabled })
+  dir.enabled = !dir.enabled
+  toast.push('info', dir.enabled ? '已恢复扫描' : '已暂停扫描')
+}
+async function scanLocalDirs() {
+  if (localDirScanning.value) return
+  localDirScanning.value = true
+  try {
+    const r = await api.post('/import/local-dirs/scan')
+    const n = r.dirs.filter(x => !x.skipped).length
+    toast.push('success', `扫描完成：处理 ${n} 个目录，新增记忆将在文档列表中展示`)
+    await Promise.all([loadLocalDirs(), loadDocs()])
+  } finally { localDirScanning.value = false }
+}
+async function openLocalDirFiles(dir) {
+  localDirFiles.value = { dir, files: await api.get('/import/local-dirs/' + dir.id + '/files') }
+}
+function localDirSummary(dir) {
+  const s = dir.summary || {}
+  if (!dir.last_scan_at) return '尚未扫描，可点“立即扫描”手动触发'
+  let t = `上次扫描 ${formatTime(dir.last_scan_at)}`
+  if (s.processed) t += ` · 最近一轮：导入 ${s.imported || 0} 个 / 提炼 ${s.memories || 0} 条`
+  if (s.failed) t += ` / 失败 ${s.failed} 个`
+  return t
+}
+
 function selectTab(i) {
   tab.value = i
   if (i === 1) loadList()
   else if (i === 2) loadTimeline()
   else if (i === 3) loadProfile()
   else if (i === 4) { loadHealth(); loadConflicts() }
-  else if (i === 5) loadDocs()
+  else if (i === 5) { loadDocs(); loadLocalDirs() }
 }
 
 onMounted(() => selectTab(1))
@@ -785,6 +842,50 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 知识库 -->
   <div v-else-if="tab === 5">
+    <!-- 本地目录接入：把常用资料目录自动纳入知识库 -->
+    <div class="cw" style="margin-bottom:16px">
+      <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
+        <span class="mt" style="margin:0;font-size:var(--fs-md)">
+          <i class="ti ti-folder" style="margin-right:6px;color:var(--acctx)"></i>本地目录
+        </span>
+        <button class="btn-sm" :disabled="localDirScanning" @click="scanLocalDirs">
+          <i class="ti" :class="localDirScanning ? 'ti-loader-2' : 'ti-refresh'"></i>
+          {{ localDirScanning ? '扫描中…' : '立即扫描' }}
+        </button>
+      </div>
+      <div class="muted" style="font-size:var(--fs-sm);margin-bottom:10px">
+        接入常用资料目录（笔记 / PDF / 文档等），系统按扫描间隔自动提炼为知识库记忆；
+        源文件只读不修改，图片默认不扫描。
+      </div>
+      <div class="fg" style="gap:8px">
+        <input v-model="localDirPath" placeholder="输入本地目录绝对路径，如 D:\Documents"
+          style="flex:1" @keyup.enter="addLocalDir" />
+        <label class="fg" style="gap:4px;font-size:var(--fs-base);flex-shrink:0;cursor:pointer">
+          <input type="checkbox" v-model="localDirRecursive" /> 包含子目录
+        </label>
+        <button class="btn-primary" @click="addLocalDir"><i class="ti ti-plus"></i> 添加</button>
+      </div>
+      <div v-for="dir in localDirs" :key="dir.id"
+        style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd)">
+        <div style="min-width:0;flex:1">
+          <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            {{ dir.path }}
+            <span class="badge" :class="dir.enabled ? 'badge-g' : ''">{{ dir.enabled ? '启用' : '已暂停' }}</span>
+            <span v-if="dir.recursive" class="badge">含子目录</span>
+          </div>
+          <div class="muted" style="margin-top:3px;font-size:var(--fs-sm)">
+            {{ localDirSummary(dir) }} · 已导入 {{ dir.imported_count }}/{{ dir.file_count }} 个文件
+          </div>
+        </div>
+        <div class="fg" style="gap:6px;flex-shrink:0">
+          <button class="btn-xs" @click="openLocalDirFiles(dir)"><i class="ti ti-list"></i> 文件</button>
+          <button class="btn-xs" @click="toggleLocalDir(dir)">{{ dir.enabled ? '暂停' : '启用' }}</button>
+          <button class="btn-xs btn-danger" @click="removeLocalDir(dir)"><i class="ti ti-trash"></i></button>
+        </div>
+      </div>
+      <div v-if="!localDirs.length" class="muted"
+        style="font-size:var(--fs-base);padding:12px 0 2px;text-align:center">尚未接入本地目录</div>
+    </div>
     <div class="doc-drop" :class="{ uploading: docUploading }" @click="triggerDocPick" @dragover.prevent
       @drop.prevent="uploadDocs($event.dataTransfer.files)">
       <i class="ti" :class="docUploading ? 'ti-loader-2' : 'ti-cloud-upload'"></i>
@@ -1058,6 +1159,32 @@ onActivated(() => selectTab(tab.value))
       </div>
       <div class="fg" style="justify-content:flex-end;margin-top:16px">
         <button @click="docDetail = null">关闭</button>
+      </div>
+    </div>
+  </div>
+  <!-- 本地目录文件详情弹窗 -->
+  <div v-if="localDirFiles" class="overlay" style="z-index:var(--z-modal)" @click.self="localDirFiles = null">
+    <div class="modal">
+      <div class="mt">目录文件</div>
+      <h3 class="modal-subtitle">{{ localDirFiles.dir.path }}</h3>
+      <div class="muted" style="margin-bottom:12px">
+        已导入 {{ localDirFiles.files.filter(f => f.status === 'imported').length }}/{{ localDirFiles.files.length }} 个文件
+      </div>
+      <div style="max-height:360px;overflow-y:auto;margin-bottom:12px">
+        <div v-for="(f, i) in localDirFiles.files" :key="i"
+          style="padding:8px 0;border-bottom:1px solid var(--bd);font-size:var(--fs-base)">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+            <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+              :title="f.path">{{ f.path }}</span>
+            <span class="badge" :class="f.status === 'imported' ? 'badge-g' : (f.status === 'failed' ? 'badge-a' : '')">{{
+              LOCAL_FILE_STATUS[f.status] || f.status }}</span>
+          </div>
+          <div v-if="f.fail_reason" class="muted" style="margin-top:2px;font-size:var(--fs-xs)">{{ f.fail_reason }}</div>
+        </div>
+        <div v-if="!localDirFiles.files.length" class="empty" style="padding:20px">暂无文件记录，接入后扫描即生成</div>
+      </div>
+      <div class="fg" style="justify-content:flex-end">
+        <button @click="localDirFiles = null">关闭</button>
       </div>
     </div>
   </div>
