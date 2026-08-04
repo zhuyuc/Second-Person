@@ -383,7 +383,9 @@ class AgentCore:
                                                "intent_type": "chat", "tools_needed": [],
                                                "depends_on": []})()]
                 else:
-                    _intents = await self.intent_parser.parse(message, tool_names, sid)
+                    _intents = await self.intent_parser.parse(
+                        message, tool_names, sid,
+                        recent_history=history[-6:])
                     # 兜底：外部类意图若未选工具，自动补上 web_search（防止模型凭空回答实时信息）
                     if "web_search" in tool_names:
                         for it in _intents:
@@ -440,6 +442,15 @@ class AgentCore:
         if (not onboarding and images and self.image_kb_fn
                 and any(getattr(i, "intent_type", "") == "remember_intent" for i in intents)):
             asyncio.create_task(self._image_kb_task(images))
+
+        # 特殊意图隐式工具补全：soul_feedback / output_preference_feedback
+        # 识别后若未指定工具，自动注入 memory_save 将用户反馈存入记忆层
+        if not onboarding:
+            for it in intents:
+                if it.intent_type == "soul_feedback" and not it.tools_needed:
+                    it.tools_needed = ["memory_save"]
+                if it.intent_type == "output_preference_feedback" and not it.tools_needed:
+                    it.tools_needed = ["memory_save"]
 
         # 第 5 步 流程编排
         shared = SharedState()

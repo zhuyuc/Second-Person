@@ -27,7 +27,7 @@
 
 | # | 文件 | 用途 | 加载点 | 加载时机 | 变量 | 分类 |
 | --- | ------ | ------ | -------- | ---------- | ------ | ------ |
-| 1 | agent/prompts/intent_system.md | 意图识别 system | agent/intent_parser.py | 惰性 | tool_names | A |
+| 1 | agent/prompts/intent_system.md | 意图识别 system | agent/intent_parser.py | 惰性 | tool_names, recent_history | A |
 | 2 | agent/prompts/compress_system.md | 上下文压缩 system | agent/compression.py | 导入时 | - | A |
 | 3 | agent/prompts/compact_prefix.md | 压缩摘要注入前缀 | agent/compression.py、agent/core.py、agent/session_context.py | 惰性 | - | A |
 | 4 | agent/prompts/replan.md | 工具失败 Replan 判定 system | agent/core.py | 惰性 | - | A |
