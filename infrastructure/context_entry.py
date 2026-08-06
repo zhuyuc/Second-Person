@@ -107,6 +107,18 @@ class ContextEntryManager:
             sections["系统状态"] = "\n".join(lines)
             self._write_sections(sections)
 
+    def set_consciousness_hint_raw(self, raw_text: str) -> None:
+        """按整串写入意识提示（约束句用；分隔，不做关键词切分）。
+        与 set_consciousness_hint 区别：后者按列表拼接会切断含顿号的约束句。"""
+        with self._lock:
+            sections = self._read_sections()
+            status = sections["系统状态"]
+            hint = "意识提示：" + raw_text
+            lines = [l for l in status.splitlines() if "意识提示" not in l]
+            lines.append(f"- {hint}")
+            sections["系统状态"] = "\n".join(lines)
+            self._write_sections(sections)
+
     def read_consciousness_hint(self) -> str:
         sections = self._read_sections()
         for ln in sections["系统状态"].splitlines():

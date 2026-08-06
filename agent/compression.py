@@ -41,8 +41,12 @@ def assemble_context(head: list[dict], summary: dict | None, tail: list[dict]) -
 
 
 def render_summary_body(s: dict) -> str:
-    """五段摘要渲染为文本（注入 context / 落盘 md 正文共用）。"""
+    """六段摘要渲染为文本（注入 context / 落盘 md 正文共用）。"""
     lines = []
+    if s.get("S0_constraints"):
+        lines.append(
+            "【本会话用户约束（必须遵守，不可绕过）】"
+            + "；".join(s["S0_constraints"]))
     if s.get("S1_decisions"):
         lines.append("关键决策：" + "；".join(
             f"[{d.get('date', '')}] {d.get('content', '')}" for d in s["S1_decisions"]))

@@ -251,6 +251,7 @@ class GapDetector:
 
 class DegradationError(Exception):
     """三态降级异常：携带 DegradationDecision，由调用方路由到对应态。"""
+
     def __init__(self, decision: DegradationDecision):
         super().__init__(decision.message or str(decision.decision_reason))
         self.decision = decision
@@ -288,7 +289,8 @@ class IntentParser:
             )
             data = repair_json(resp["content"]) or {}
             return QuickIntentResult(
-                intent_hypothesis=data.get("intent_hypothesis", user_message[:50]),
+                intent_hypothesis=data.get(
+                    "intent_hypothesis", user_message[:50]),
                 needs_convergence=data.get("needs_convergence", False),
                 complexity_reason=data.get("complexity_reason", ""),
             )

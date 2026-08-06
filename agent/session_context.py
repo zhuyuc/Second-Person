@@ -211,12 +211,13 @@ class SessionStore:
             pass
 
     # ---- 会话恢复（Head-Summary-Tail） -----------------------------------
-    def load_recovery_context(self, sid: str, buffer_rounds: int = 20,
-                              head_protected: int = 3) -> list[dict]:
+    def load_recovery_context(self, sid: str,
+                              head_protected_rounds: int = 2) -> list[dict]:
         """返回消息列表（含 id 字段供压缩水位推进，送 LLM 前需剔除）。
 
-        Head：会话最初 head_protected 条（存在压缩摘要时才拼入，保护背景设定）；
-        Summary：压缩摘要（有则拼入）；Tail：水位之后的最近 buffer_rounds 轮原文。
+        Head：会话最初 head_protected_rounds 轮（存在压缩摘要时才拼入）；
+        Summary：压缩摘要（有则拼入）；Tail：水位之后的全部原文。
+        水位后原文数量由压缩节奏保证不会过多（达 compression_trigger_rounds 即被收走）。
         """
         row = self.db.query_one(
             "SELECT compressed_summary_path,last_compressed_message_id FROM sessions "
@@ -230,27 +231,26 @@ class SessionStore:
                 _, summary_text = split_frontmatter(
                     p.read_text(encoding="utf-8"))
         watermark = row["last_compressed_message_id"]
-        # Tail：取最近若干轮（DESC 取最新后反转，避免长会话丢最新消息）；
-        # 系统通知不属于对话内容，不进 context
+        head_msgs = head_protected_rounds * 2  # 轮 → 条
+
+        # Tail：水位之后的全部原文
         if watermark:
             tail_rows = self.db.query_all(
-                "SELECT id,role,content FROM (SELECT id,role,content FROM conversations "
-                "WHERE session_id=? AND id>? AND message_type='normal' "
-                "ORDER BY id DESC LIMIT ?) ORDER BY id",
-                (sid, watermark, buffer_rounds * 2))
+                "SELECT id,role,content FROM conversations "
+                "WHERE session_id=? AND id>? AND message_type='normal' ORDER BY id",
+                (sid, watermark))
         else:
             tail_rows = self.db.query_all(
-                "SELECT id,role,content FROM (SELECT id,role,content FROM conversations "
-                "WHERE session_id=? AND message_type='normal' "
-                "ORDER BY id DESC LIMIT ?) ORDER BY id",
-                (sid, buffer_rounds * 2))
+                "SELECT id,role,content FROM conversations "
+                "WHERE session_id=? AND message_type='normal' ORDER BY id",
+                (sid,))
         msgs = []
         if summary_text:
             # Protected Head：已被压缩覆盖的最初几条原文保留不动（水位之前）
             head_rows = self.db.query_all(
                 "SELECT id,role,content FROM conversations WHERE session_id=? "
                 "AND id<=? AND message_type='normal' ORDER BY id LIMIT ?",
-                (sid, watermark or 0, head_protected)) if watermark else []
+                (sid, watermark or 0, head_msgs)) if watermark else []
             for r in head_rows:
                 if r["role"] in ("user", "assistant"):
                     msgs.append({"role": r["role"], "content": r["content"],

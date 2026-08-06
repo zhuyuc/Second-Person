@@ -65,6 +65,26 @@ _FACT_PATTERNS = [
     r"我的(目标|计划|原则)", r"以后(都|就)", r"从今天起", r"我最近",
 ]
 
+# 约束检测：识别用户明确的范围限定 / 方法约束 / 否定要求（零 LLM 启发式）
+_CONSTRAINT_PATTERNS = [
+    r"只(看|考虑|要|用|关注)", r"不(要|用|考虑|看)", r"必须", r"一定要",
+    r"绝对不", r"限定", r"仅限", r"除了.*都", r"改成", r"换成", r"以后(都|就)",
+]
+
+
+def _extract_constraints(message: str) -> list[str]:
+    """从用户消息中抽取约束句（整句保留，非关键词）。零 LLM。
+    命中任一约束模式 → 按标点切句，返回含约束信号的子句，每句截 40 字，最多 3 条。"""
+    if not any(re.search(p, message or "") for p in _CONSTRAINT_PATTERNS):
+        return []
+    clauses = re.split(r"[。；;\n]", message or "")
+    out = []
+    for c in clauses:
+        c = c.strip()
+        if c and any(re.search(p, c) for p in _CONSTRAINT_PATTERNS):
+            out.append(c[:40])
+    return out[:3]
+
 
 def _sanitize_input(text: str) -> str:
     """第 1 步输入清洗：去控制字符与首尾空白，不改写用户内容。"""
@@ -276,27 +296,30 @@ class AgentCore:
             preload_text = await self._preload_urls(message, emit)
 
         # 第 2 步 上下文加载（冻结快照）
+        trigger_rounds = self.config.get("compression_trigger_rounds", 20)
+        head_rounds = self.config.get("head_protected_rounds", 2)
+
         _sp = tracer.span_start("context_load", input={
             "session_id": sid, "onboarding": onboarding,
-            "buffer_rounds": self.config.get("conversation_buffer_rounds", 20),
-            "head_protected": self.config.get("head_protected_messages", 3),
+            "trigger_rounds": trigger_rounds,
+            "head_protected_rounds": head_rounds,
         })
         try:
             system_prompt = self._build_system_prompt(onboarding, location)
-            history = self.sessions.load_recovery_context(
-                sid, self.config.get("conversation_buffer_rounds", 20),
-                self.config.get("head_protected_messages", 3))
+            history = self.sessions.load_recovery_context(sid, head_rounds)
             # 当前用户消息已提前落库：从历史中剔除，避免与 prompt 尾部重复拼接
             history = [m for m in history if m.get("id") != user_msg_id]
 
-            # 压缩阈值判定（第 2 步拼装完之后、第 3 步之前，同步等待压缩完成）
-            est = estimate_tokens([{"content": system_prompt}] + history +
-                                  [{"content": message}])
+            # 压缩触发判定（纯轮次）：水位后原文轮数达阈值即压缩
+            # history 里带 id 的是原文（摘要块无 id），据此算轮数
+            raw_msg_count = sum(1 for m in history if m.get("id"))
+            raw_rounds = (raw_msg_count + 1) // 2  # 向上取整为轮
+
             _compressed = False
-            if est > self.config.get("compression_threshold_tokens", 80000):
+            if raw_rounds >= trigger_rounds:
                 _comp_sp = tracer.span_start("history_compression", input={
-                    "est_tokens": est,
-                    "threshold": self.config.get("compression_threshold_tokens", 80000),
+                    "raw_rounds": raw_rounds,
+                    "trigger_rounds": trigger_rounds,
                     "triggered": True})
                 try:
                     history, _compressed = await self._compress_history(sid, history)
@@ -309,7 +332,7 @@ class AgentCore:
                        for m in history]
             _sp.end(output={
                 "history_rounds": len(history),
-                "est_tokens": est,
+                "raw_rounds": raw_rounds,
                 "compressed": _compressed,
                 "system_prompt": mark_preview(
                     system_prompt, content_type="system_prompt"),
@@ -364,15 +387,15 @@ class AgentCore:
         _convergence_done = False
         if (not onboarding and quick_result and quick_result.needs_convergence
                 and llm_available):
-            understanding = await self._convergence_loop(
+            understanding, conv_memories = await self._convergence_loop(
                 sid, message, quick_result, history, tracer, emit,
                 max_rounds=max_rounds)
             if understanding is None:
                 return  # 收敛失败（已 emit error），中止
             # 从理解包提取 intents 给下游，跳过原有检索+意图流程
             intents = [understanding.rich_intent]
-            memories = []
-            loaded_ids = []
+            memories = conv_memories
+            loaded_ids = [m["id"] for m in conv_memories]
             _convergence_done = True
             # 思考过程外露：收敛后的丰满意图
             await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
@@ -382,13 +405,12 @@ class AgentCore:
             loaded_ids: list[str] = []
         cited_ids: list[str] = []
 
-        if not _convergence_done:
-            # 原有检索+意图并行流程（收敛环已完成时跳过）
-            retrieval_context = ""
         if not onboarding:
             retrieval_context = "\n".join(
                 f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
                 for m in history[-4:])
+        else:
+            retrieval_context = ""
 
         async def _run_retrieval():
             """第 3 步 记忆检索（query 用真实提问，不含附件正文）。"""
@@ -848,7 +870,7 @@ class AgentCore:
                                                       think_parts) or None,
                                                   visuals=_visuals or None)
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
-                                                     message, onboarding, intents)
+                                                     message, onboarding, user_msg_id=user_msg_id, intents=intents)
             _sp.end(output={"message_id": msg_id, "cited": cited_ids,
                             "signal_shape": _signal_shape, "budget_checked": True})
         except Exception:
@@ -965,7 +987,8 @@ class AgentCore:
 
     async def _execute_tools(self, intents, dag, shared, message, emit, sid=None) -> list[dict]:
         tool_results: list[dict] = []
-        self._replanned = False  # 每请求最多 1 次 Replan
+        self._replan_count = 0
+        self._replan_max = self.config.get("replan_max_per_request", 3)
         by_id = {it.id: it for it in intents}
         for layer in dag.order:
             # 同层内并行执行（asyncio.gather）
@@ -1022,9 +1045,9 @@ class AgentCore:
             result = await self.executor.execute_tool(
                 tool_name, params, intent_summary=intent.intent_summary,
                 emit=emit)
-            # DAG 层面 Replan：核心意图失败且尚未 Replan 时补救一次
-            if not result.get("ok") and not result.get("skipped") and not self._replanned:
-                self._replanned = True
+            # DAG 层面 Replan：核心意图失败且未达上限时补救
+            if not result.get("ok") and not result.get("skipped") and self._replan_count < self._replan_max:
+                self._replan_count += 1
                 # 图形工具降级提示：render_flowchart 校验失败 → 尝试 render_mermaid
                 if tool_name == "render_flowchart":
                     await emit("thinking_delta", {
@@ -1069,18 +1092,16 @@ class AgentCore:
         return out
 
     # ---- L1 压缩编排（Head-Middle-Tail + 落盘 + 失败兑底） ----------------
-    TAIL_PROTECTED_MESSAGES = 6   # Protected Tail：最近 3 轮原文保留不动
 
     # ---- 收敛式理解循环（§3.5） --------------------------------------------
     async def _convergence_loop(self, sid: str, message: str,
                                 quick_result: QuickIntentResult,
                                 history: list[dict],
                                 tracer, emit,
-                                max_rounds: int = 2) -> Understanding | None:
+                                max_rounds: int = 2) -> tuple[Understanding | None, list[dict]]:
         """收敛式理解循环：广撒网 → 意图收敛 → 缺口检测 → 定向重收集 → 再收敛。
 
-        返回 Understanding 包，失败返回 None（已 emit error）。
-        """
+        返回 (Understanding | None, 最后一轮检索结果 list[dict])。"""
         from observability_langfuse import mark_preview
         core_query = _strip_attachment_context(message)
         retrieval_context = "\n".join(
@@ -1092,6 +1113,7 @@ class AgentCore:
         memories_text = ""
         emotion = EmotionState(valence="平静", intensity=0.0)
         focus = None
+        all_mems: list[dict] = []  # 收敛环内检索结果，函数返回时带出
         prev_gap_types: set[str] = set()  # 上一轮缺口类型，用于检测收敛停滞
 
         for round_num in range(1, max_rounds + 1):
@@ -1192,8 +1214,7 @@ class AgentCore:
                 if _decision.state == DegradationState.STATE_3:
                     await emit("error", {"code": 503,
                                          "message": _decision.message or "意图收敛失败"})
-                    return None
-                # 态一/态二：记录但尝试继续
+                    return None, []
                 intents = [type("I", (), {
                     "id": "i1", "intent_summary": quick_result.intent_hypothesis,
                     "intent_type": "chat", "tools_needed": [],
@@ -1235,7 +1256,7 @@ class AgentCore:
 
             # 无缺口 → 理解完整，退出
             if not gap_result.has_gaps:
-                return current_understanding
+                return current_understanding, all_mems
 
             # 缺口收敛停滞检测：当前缺口类型与上一轮无变化或为其子集 → 早停
             cur_gap_types = {g.get("type", "") for g in gap_result.gaps}
@@ -1248,7 +1269,7 @@ class AgentCore:
                     "has_gaps": gap_result.has_gaps,
                     "early_exit_reason": "gap_stagnation",
                 })
-                return current_understanding
+                return current_understanding, all_mems
             prev_gap_types = cur_gap_types
 
             # 纯焦点竞争缺口：多诉求是用户提问结构的固有特征，
@@ -1262,7 +1283,7 @@ class AgentCore:
                     "has_gaps": gap_result.has_gaps,
                     "early_exit_reason": "focus_competition_inherent",
                 })
-                return current_understanding
+                return current_understanding, all_mems
 
             # 缺口无法消解 → 诚实澄清（态二）
             if gap_result.unresolvable:
@@ -1278,7 +1299,7 @@ class AgentCore:
                 # 生成诚实澄清回复
                 await self._emit_honest_clarify(
                     emit, gap_result, sid)
-                return None
+                return None, []
 
             # 有缺口且未达上限 → 准备下一轮定向重收集
             if round_num < max_rounds:
@@ -1292,7 +1313,7 @@ class AgentCore:
                 continue
 
         # 达到轮次上限：带当前理解退出
-        return current_understanding
+        return current_understanding, all_mems
 
     async def _emit_honest_clarify(self, emit, gap_result: GapResult,
                                    sid: str | None = None) -> None:
@@ -1333,18 +1354,28 @@ class AgentCore:
                 prev_text = m["content"].split("\n", 1)[-1]
             else:
                 body.append(m)
-        head_n = self.config.get("head_protected_messages", 3)
-        tail_n = self.TAIL_PROTECTED_MESSAGES
+        head_n = self.config.get("head_protected_rounds", 2) * 2   # 轮 → 条
+        tail_n = self.config.get("tail_protected_rounds", 3) * 2   # 轮 → 条
         if len(body) <= head_n + tail_n:
             return history, False  # 无可压缩的 middle 段
         head, middle, tail = body[:head_n], body[head_n:-
                                                  tail_n], body[-tail_n:]
-        threshold = self.config.get("compression_threshold_tokens", 80000)
+        window_check = self.config.get("compression_model_window", 80000)
         summary, ok = await self.compressor.compress(
-            middle, prev_summary_text=prev_text, threshold_tokens=threshold,
+            middle, prev_summary_text=prev_text, threshold_tokens=window_check,
             session_id=sid)
         if ok:
             self._compress_fails.pop(sid, None)
+
+            # 把 pinned 区约束并入摘要 S0（去重），保证压缩后约束不丢
+            pinned_raw = self.ctx_entry.read_consciousness_hint()
+            if pinned_raw:
+                pinned_list = [c.strip() for c in pinned_raw.split("；") if c.strip()]
+                s0 = summary.setdefault("S0_constraints", [])
+                for pc in pinned_list:
+                    if pc not in s0:
+                        s0.append(pc)
+
             # 水位 = middle 最后一条原文消息 id；摘要 md 落盘 + sessions 水位推进
             watermark = next(
                 (m["id"] for m in reversed(middle) if m.get("id")), None)
@@ -1661,6 +1692,47 @@ class AgentCore:
             path = ext_match.group(1).strip() if ext_match else "output.html"
         return {"path": path, "content": message}
 
+    # ---- 约束钉住与滚动更新 ------------------------------------------------
+    def _roll_pinned_constraints(self, new_constraints: list[str]) -> None:
+        """滚动更新会话 pinned 约束区。
+
+        规则（零 LLM，字符级启发式）：
+        - 完全相同 → 跳过
+        - 同一约束动词但内容不同 → 视为修正，替换旧条
+        - 全新 → 追加
+        上限保留最近 10 条，超出淘汰最旧。
+        """
+        existing_raw = self.ctx_entry.read_consciousness_hint()
+        existing = [c.strip() for c in existing_raw.split("；") if c.strip()]
+
+        for nc in new_constraints:
+            replaced = False
+            for i, ec in enumerate(existing):
+                if nc == ec:
+                    replaced = True  # 完全重复
+                    break
+                if self._is_constraint_revision(ec, nc):
+                    existing[i] = nc  # 修正 → 替换
+                    replaced = True
+                    break
+            if not replaced:
+                existing.append(nc)
+
+        merged = existing[-10:]  # 保留最近 10 条
+        self.ctx_entry.set_consciousness_hint_raw("；".join(merged))
+
+    @staticmethod
+    def _is_constraint_revision(old: str, new: str) -> bool:
+        """判断 new 是否是对 old 约束的修正（同主题、不同内容）。"""
+        verbs = ["看", "考虑", "用", "关注", "要"]
+        for v in verbs:
+            if v in old and v in new:
+                old_obj = old.split(v, 1)[-1][:10]
+                new_obj = new.split(v, 1)[-1][:10]
+                if old_obj != new_obj:
+                    return True
+        return False
+
     # ---- prompt 构建 ------------------------------------------------------
     def _build_system_prompt(self, onboarding: bool, location: str | None = None) -> str:
         # 当前时间（北京时间），让模型始终知晓“现在”
@@ -1692,7 +1764,8 @@ class AgentCore:
                          f"涉及天气、附近、本地信息的查询时直接使用该位置，无需再询问用户在哪。")
         hint = self.ctx_entry.read_consciousness_hint()
         if hint:
-            parts.append(f"你已知的重要记忆关键词：{hint}")
+            parts.append(
+                f"## 本会话用户约束（高优先级，回答时必须遵守）\n{hint}")
         ident = self.profile.identity_snippet()
         if ident:
             parts.append(ident)
@@ -1759,23 +1832,25 @@ class AgentCore:
             merged_system += "\n\n可参考的技能内容：" + skill_text
         if preload_text:
             merged_system += "\n\n预加载的外部内容（URL/附件）：\n" + preload_text
-        # 近期对话锚定：将最近6轮完整注入 system prompt，
-        # 确保模型在长上下文中不会丢失紧邻的对话关联
+        # 近期对话锚定：长会话时将最近6轮注入 system prompt，防止模型在长上下文中丢失近邻关联
         if len(history) > 6:
             recent = history[-6:]
             older = history[:-6]
+            recent_text = "\n".join(
+                f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
+                for m in recent)
+            merged_system += (
+                "\n\n## 近期对话（请务必基于此理解用户当前消息的指代和上下文）\n\n"
+                + recent_text)
+            return [{"role": "system", "content": merged_system}] + older + \
+                   [{"role": "user", "content": message}]
         else:
-            recent = history
-            older = []
-        recent_text = "\n".join(
-            f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
-            for m in recent)
-        merged_system += "\n\n## 近期对话（请务必基于此理解用户当前消息的指代和上下文）\n\n" + recent_text
-        return [{"role": "system", "content": merged_system}] + older + \
-               [{"role": "user", "content": message}]
+            # 会话短（≤6 轮），全部进 messages，不做锚定段
+            return [{"role": "system", "content": merged_system}] + history + \
+                   [{"role": "user", "content": message}]
 
     async def _post_process(self, sid, msg_id, content, loaded_ids, cited_ids,
-                            message, onboarding, intents=None):
+                            message, onboarding, user_msg_id=None, intents=None):
         if onboarding:
             return None  # 引导期只写 conversations（已在 append 完成）
         # 信号采集阶段一（context_label 复用第 4 步意图类型，零额外 LLM 成本）
@@ -1784,9 +1859,17 @@ class AgentCore:
             msg_id, shape, context_label=self._context_label(intents, message))
         # 主动记忆检测：未识别 remember_intent 但含明确新事实 → 被动回顾候选
         try:
-            self._mark_review_candidate(sid, msg_id, message, intents)
+            self._mark_review_candidate(sid, user_msg_id or msg_id, message, intents)
         except Exception:  # noqa: BLE001
             logger.warning("回顾候选标记失败", exc_info=True)
+
+        # 会话内约束提取 + 钉住（新增）
+        try:
+            new_constraints = _extract_constraints(message)
+            if new_constraints:
+                self._roll_pinned_constraints(new_constraints)
+        except Exception:  # noqa: BLE001
+            logger.warning("约束钉住失败", exc_info=True)
         # 频次三类更新
         self.lifecycle.update_access_stats(loaded_ids, cited_ids)
         # 引用明细落表：记忆/知识库统一溯源（被哪条消息、何时引用）
@@ -1864,24 +1947,19 @@ class AgentCore:
             return "chat"
         return "other"
 
-    def _mark_review_candidate(self, sid: str, msg_id: int, message: str,
-                               intents) -> None:
+    def _mark_review_candidate(self, sid: str, user_msg_id: int, message: str,
+                               intents, priority: int = 0) -> None:
         """第 8 步主动记忆检测：含新事实句式且非记忆指令 → 写入回顾候选表。"""
         types = {getattr(i, "intent_type", "") for i in (intents or [])}
         if "remember_intent" in types or "remember_confirm" in types:
             return  # 已走主动记忆路径
         if not any(re.search(p, message or "") for p in _FACT_PATTERNS):
             return
-        urow = self.db.query_one(
-            "SELECT id FROM conversations WHERE session_id=? AND role='user' "
-            "ORDER BY id DESC LIMIT 1", (sid,))
-        if not urow:
-            return
         from datetime import datetime as _dt
         self.db.execute(
-            "INSERT OR IGNORE INTO review_candidates(message_id,session_id,created_at) "
-            "VALUES(?,?,?)",
-            (urow["id"], sid, _dt.now().isoformat(timespec="seconds")))
+            "INSERT OR IGNORE INTO review_candidates"
+            "(message_id,session_id,created_at,priority) VALUES(?,?,?,?)",
+            (user_msg_id, sid, _dt.now().isoformat(timespec="seconds"), priority))
 
     def _check_budget_alert(self) -> None:
         """成本控制（产品文档 §预算告警 / 超预算策略）。

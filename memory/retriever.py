@@ -149,6 +149,7 @@ class Retriever:
         qtype = classify_query(query)
         pk_factor = cfg.get("personal_query_knowledge_factor", 0.7)
         km_factor = cfg.get("knowledge_query_memory_factor", 0.85)
+        important_factor = cfg.get("important_memory_factor", 1.3)
         rows_map = self.palace.get_many(list(scores.keys()))
         out: list[Candidate] = []
         for mid, c in scores.items():
@@ -162,6 +163,12 @@ class Retriever:
                 factor *= pk_factor      # 个人问题：知识库条目降权
             elif qtype == "knowledge" and stype == "memory":
                 factor *= km_factor      # 知识问题：个人记忆轻度降权
+            # 重要记忆加权（is_important=1 的条目检索得分上浮）
+            try:
+                if row["is_important"]:
+                    factor *= important_factor
+            except (IndexError, KeyError):
+                pass
             c.final_score = c.rrf_score * factor
             out.append(c)
         out.sort(key=lambda x: -x.final_score)
