@@ -113,15 +113,17 @@ class SessionStore:
                        message_type: str = "normal", citations: list | None = None,
                        notification_type: str = None,
                        thinking: str | None = None,
-                       images: list[str] | None = None) -> int:
+                       images: list[str] | None = None,
+                       visuals: list | None = None) -> int:
         cur = self.db.execute(
             "INSERT INTO conversations(session_id,role,message_type,notification_type,"
-            "content,citations,feedback,create_time,thinking,images) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?)",
+            "content,citations,feedback,create_time,thinking,images,visuals) "
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
-             json.dumps(images) if images else None))
+             json.dumps(images) if images else None,
+             json.dumps(visuals, ensure_ascii=False) if visuals else None))
         self.db.execute(
             "UPDATE sessions SET last_active=?, message_count=message_count+1 "
             "WHERE session_id=?", (_now(), sid))
@@ -155,7 +157,9 @@ class SessionStore:
                         "thinking": r["thinking"],
                         # 持久化图片：文件名转为可访问 URL，刷新后历史消息可回看
                         "images": [f"/chat-images/{f}" for f in
-                                   json.loads(r["images"])] if r["images"] else []})
+                                   json.loads(r["images"])] if r["images"] else [],
+                        # 持久化图形：刷新后历史消息可恢复图表渲染
+                        "visuals": json.loads(r["visuals"]) if r["visuals"] else []})
         return out
 
     def set_feedback(self, message_id: int, feedback: int) -> None:

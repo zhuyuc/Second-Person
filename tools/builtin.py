@@ -225,7 +225,8 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
          "required": ["path"]}), file_read)
 
     registry.register_function(ToolSpec(
-        "file_write", "写入工作区文件",
+        "file_write", "把内容写入工作区文件。仅在用户明确要求保存到文件/写入文件/存为文件时使用；"
+        "写文章、写代码、整理笔记等不指定文件路径的请求不应触发此工具",
         {"type": "object", "properties": {
             "path": {"type": "string"}, "content": {"type": "string"},
             "mode": {"type": "string", "enum": ["w", "a"]}},
@@ -257,6 +258,120 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
     registry.register_function(ToolSpec(
         "datetime_now", "获取当前时间",
         {"type": "object", "properties": {"tz": {"type": "string"}}}), datetime_now)
+
+    # ---- 图形工具 -------------------------------------------------------
+    _MERMAID_TYPES = [
+        "flowchart", "sequenceDiagram", "gantt", "classDiagram",
+        "erDiagram", "pie", "stateDiagram", "gitGraph", "timeline",
+        "mindmap", "quadrantChart", "sankey", "block", "packet",
+        "architecture", "kanban",
+    ]
+
+    async def render_mermaid(diagram_type: str, mermaid_code: str,
+                             type: str = "mermaid") -> dict:
+        """渲染 Mermaid 图表：时序图/甘特图/类图/ER图/饼图 或 >15 节点复杂流程图。
+        直接透传 DSL 字符串到前端 MermaidChart 渲染，后端不做语法校验。"""
+        dt = (diagram_type or "").strip()
+        if not dt:
+            raise ValueError("diagram_type 不能为空")
+        if dt not in _MERMAID_TYPES:
+            raise ValueError(
+                f"不支持的图表类型：{dt}，可选值：{', '.join(_MERMAID_TYPES)}")
+        code = (mermaid_code or "").strip()
+        if not code:
+            raise ValueError("mermaid_code 不能为空")
+        return {"type": "mermaid", "diagram_type": dt, "mermaid_code": code}
+
+    _FLOWCHART_NODE_TYPES = {"process", "decision", "terminal"}
+
+    async def render_flowchart(nodes: list, edges: list,
+                               type: str = "flowchart") -> dict:
+        """High quality SVG rendering. Validates id uniqueness, edge integrity,
+        node type validity, branch logic mutual exclusion.
+        Coordinates (x/y) optional: frontend dagre auto-layout when missing."""
+        if not nodes or not isinstance(nodes, list):
+            raise ValueError("nodes is required and must be an array")
+        if not isinstance(edges, list):
+            raise ValueError("edges must be an array")
+        seen_ids = set()
+        decision_nodes = set()
+        for i, n in enumerate(nodes):
+            if not isinstance(n, dict):
+                raise ValueError(f"nodes[{i}] must be an object")
+            nid = n.get("id")
+            if not nid or not isinstance(nid, str):
+                raise ValueError(f"nodes[{i}].id missing or not string")
+            if nid in seen_ids:
+                raise ValueError(f"duplicate node id: {nid}")
+            seen_ids.add(nid)
+            nt = n.get("type", "")
+            if nt not in _FLOWCHART_NODE_TYPES:
+                raise ValueError(
+                    f"nodes[{i}].type='{nt}' invalid, "
+                    f"allowed: {', '.join(sorted(_FLOWCHART_NODE_TYPES))}")
+            if nt == "decision":
+                decision_nodes.add(nid)
+            label = n.get("label", "")
+            if not isinstance(label, str) or not label.strip():
+                raise ValueError(f"nodes[{i}].label missing or empty")
+            if len(label) > 10:
+                pass
+            for axis in ("x", "y"):
+                v = n.get(axis)
+                if v is not None and (not isinstance(v, (int, float)) or v < 0):
+                    raise ValueError(
+                        f"nodes[{i}].{axis}={v} invalid, must be non-negative or omitted")
+        out_degree = {}
+        from_labels = {}
+        for j, e in enumerate(edges):
+            if not isinstance(e, dict):
+                raise ValueError(f"edges[{j}] must be an object")
+            for endpoint in ("from", "to"):
+                ep = e.get(endpoint)
+                if not ep or ep not in seen_ids:
+                    raise ValueError(
+                        f"edges[{j}].{endpoint}='{ep}' references unknown node")
+            src = e["from"]
+            out_degree[src] = out_degree.get(src, 0) + 1
+            lbl = (e.get("label") or "").strip()
+            if lbl:
+                s = from_labels.setdefault(src, set())
+                if lbl in s:
+                    raise ValueError(
+                        f"node '{src}' has duplicate edge label: '{lbl}', "
+                        "labels from same source must be unique")
+                s.add(lbl)
+        for dn in decision_nodes:
+            if out_degree.get(dn, 0) < 2:
+                raise ValueError(
+                    f"decision node '{dn}' needs at least 2 outgoing edges "
+                    f"(currently {out_degree.get(dn, 0)})")
+        return {"type": "flowchart", "nodes": nodes, "edges": edges}
+
+    registry.register_function(ToolSpec(
+        "render_flowchart",
+        "生成高质量 SVG 流程图（≤15 节点，含判断/循环/并行分支）。输出 nodes + edges 结构化"
+        " JSON，前端 FlowChartSVG 按品牌色系渲染。坐标规则：画布宽 800、起始 y=60、"
+        " 节点间距 100px、并行分支横向每列 200px、坐标一律整数。"
+        " 不适合渲染 >15 节点流程图/时序图/类图/ER图（请用 render_mermaid）",
+        {"type": "object", "properties": {
+            "nodes": {"type": "array", "items": {"type": "object", "properties": {
+                "id": {"type": "string", "description": "唯一英文标识"},
+                "type": {"type": "string",
+                         "enum": list(_FLOWCHART_NODE_TYPES),
+                         "description": "process=矩形处理 / decision=菱形判断 / terminal=胶囊起止"},
+                "label": {"type": "string", "description": "节点标签，不超过 10 个汉字"},
+                "x": {"type": "integer", "description": "节点中心 x 坐标"},
+                "y": {"type": "integer", "description": "节点顶部 y 坐标"}},
+                "required": ["id", "type", "label"]}},
+            "edges": {"type": "array", "items": {"type": "object", "properties": {
+                "from": {"type": "string", "description": "起始节点 id"},
+                "to": {"type": "string", "description": "目标节点 id"},
+                "label": {"type": "string", "description": "分支标签，如 是/否（仅判断分支需要）"}},
+                "required": ["from", "to"]}},
+            "type": {"type": "string", "const": "flowchart"}},
+         "required": ["nodes", "edges"]},
+        destructive=False), render_flowchart)
 
     registry.register_function(ToolSpec(
         "generate_document",

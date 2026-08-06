@@ -97,8 +97,8 @@ class ProviderRegistry:
             (task_type, provider_id, now_cst().isoformat(timespec="seconds")))
 
     def snapshot_for(self, task_type: str) -> ProviderSnapshot | None:
-        """按任务类型解析快照；agent 未配则回退 chat；intent/vision 未配则回退
-        agent→chat。"""
+        """按任务类型解析快照；agent 未配则回退 chat；intent/vision/convergence
+        未配则回退 intent→agent→chat。"""
         pid = self.assignment(task_type)
         if not pid and task_type == "agent":
             pid = self.assignment("chat")
@@ -109,6 +109,12 @@ class ProviderRegistry:
         if not pid and task_type == "vision":
             pid = self.assignment("agent") or self.assignment("chat")
             logger.info("未配置 vision 模型，回退使用 agent/chat 模型")
+        if not pid and task_type == "convergence":
+            # 收敛分析（attention_focus/gap_detect/mood）：轻量任务，优先走 intent，
+            # 未配则回退 intent→agent→chat
+            pid = self.assignment("intent") or self.assignment(
+                "agent") or self.assignment("chat")
+            logger.info("未配置 convergence 模型，回退使用 intent/agent/chat 模型")
         if not pid:
             return None
         return self.snapshot(pid)

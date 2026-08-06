@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS providers (
 );
 CREATE TABLE IF NOT EXISTS model_assignment (
     task_type TEXT PRIMARY KEY,
-    -- chat/agent/embedding
+    -- chat/agent/embedding/intent/vision/convergence
     provider_id TEXT NOT NULL,
     updated_at TEXT
 );

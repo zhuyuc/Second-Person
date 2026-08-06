@@ -41,9 +41,18 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
             if len(s) > TOOL_RESULT_MAX_CHARS:
                 return s[:TOOL_RESULT_MAX_CHARS] + f"\n…（已截断，原 {len(s)} 字）"
             return s
-        tr = "\n".join(
-            f"- {r.get('tool', '')}: {_clip(r.get('result', ''))}" for r in tool_results)
-        ctx_parts.append("工具执行结果：\n" + tr)
+        tr_parts = []
+        for r in tool_results:
+            tn = r.get('tool', '')
+            if tn in ('render_flowchart', 'render_mermaid') and r.get('ok'):
+                vd = r.get('result', {})
+                nc = len(vd.get('nodes', [])) if isinstance(vd, dict) else 0
+                tr_parts.append(
+                    f"- {tn}: 图表已生成（{nc} 个节点），将在前端渲染。"
+                    "回复中【禁止】重复输出 Mermaid/流程图代码，仅用自然语言解释即可。")
+            else:
+                tr_parts.append(f"- {tn}: {_clip(r.get('result', ''))}")
+        ctx_parts.append("工具执行结果：\n" + "\n".join(tr_parts))
     # disputed 记忆命中：要求 AI 主动告知矛盾并引导到健康度 Tab 裁决
     disputed = [m for m in memories if m.get("confidence") == "disputed"]
     if disputed:
@@ -62,9 +71,23 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
 
 
 def _strip_empty_fences(text: str) -> str:
-    """清理声明被挖走后残留的空代码围栏（如 ```json\n``` 会被渲染成空白块）。"""
+    """Clean empty code fences left after declaration extraction."""
     return re.sub(r"```[a-zA-Z]*\s*```", "", text).rstrip()
 
+
+def strip_mermaid_blocks(text: str) -> str:
+    """Strip Mermaid code blocks from response text.
+
+    When a diagram tool (render_flowchart / render_mermaid) has already
+    rendered the chart via tool_visual, remove any ```mermaid or ```flowchart
+    blocks from the text response to prevent duplicate rendering by marked.
+    """
+    return re.sub(
+        r"```(?:mermaid|flowchart)\s*\n[\s\S]*?\n```",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
 
 def extract_citations(text: str, valid_ids: set[str]) -> tuple[str, list[str]]:
     """从回复中提取 citations JSON 声明，返回 (去除声明后的正文, 有序去重的 memory_id)。"""

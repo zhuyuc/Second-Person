@@ -53,6 +53,12 @@
 | 24 | soul/prompts/output_style_meta_rule.md | 输出样式防僵化元规则 | soul/constants.py | 导入时 | - | B |
 | 25 | agent/prompts/mood.md | 情绪注入模板（双源） | soul/mood_manager.py | 惰性 | user_mood,user_intensity,user_time_hint,ai_mood,ai_intensity,ai_time_hint | A |
 | 26 | agent/prompts/mood_judge.md | 情绪判定（双源输出 JSON） | agent/core.py | 惰性 | user_message,assistant_reply | A |
+| 27 | agent/prompts/quick_intent.md | 快速预判 system（§3.1） | agent/intent_parser.py | 惰性 | - | A |
+| 28 | agent/prompts/converge_intent.md | 意图收敛 system（§3.3） | agent/intent_parser.py | 惰性 | - | A |
+| 29 | agent/prompts/attention_focus.md | 注意力聚焦 system（§3.4） | agent/intent_parser.py | 惰性 | - | A |
+| 30 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1） | agent/intent_parser.py | 惰性 | - | A |
+| 31 | agent/prompts/honest_clarify.md | 诚实澄清输出模板（§5.2 态二） | agent/core.py | 惰性 | gap_description | A |
+| 32 | agent/prompts/honest_abort.md | 明确中止输出模板（§5.2 态三） | agent/core.py | 惰性 | error_description | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -83,6 +89,11 @@
 | 16 | app/routes/misc.py::test_connection | chat | main_chat | 无（连通性 ping） | 引导页模型连通测试 |
 | 17 | app/routes/settings.py::_probe_snapshot | chat | main_chat | 无（连通性 ping） | 设置页模型探活 |
 | 18 | agent/core.py::_update_mood | chat | mood | agent/prompts/mood_judge.md | 情绪判定（双源：用户+AI） |
+| 19 | agent/intent_parser.py::quick_intent | chat | quick_intent | agent/prompts/quick_intent.md | 快速预判（§3.1） |
+| 20 | agent/intent_parser.py::converge_intent | chat | converge_intent | agent/prompts/converge_intent.md | 意图收敛（§3.3） |
+| 21 | agent/intent_parser.py::AttentionFocuser.focus | chat | attention_focus | agent/prompts/attention_focus.md | 注意力聚焦（§3.4） |
+| 22 | agent/intent_parser.py::GapDetector.detect | chat | gap_detect | agent/prompts/gap_detect.md | 缺口检测（§4.1） |
+| 23 | agent/core.py::_emit_honest_clarify | chat | honest_clarify | agent/prompts/honest_clarify.md | 诚实澄清输出（§5.2 态二） |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

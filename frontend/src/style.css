@@ -83,6 +83,20 @@
     --icon-sm: 18px;
     --icon-md: 22px;
     --icon-lg: 24px;
+    /* 图形能力 Diagram Tokens（从既有色板派生，禁止硬编码色值） */
+    --diagram-process-fill: var(--brand-soft);
+    --diagram-process-stroke: var(--brand-tx);
+    --diagram-decision-fill: #fef9e7;
+    --diagram-decision-stroke: #c4941a;
+    --diagram-terminal-gradient: var(--brand-grad);
+    --diagram-terminal-text: #fff;
+    --diagram-edge-stroke: var(--muted);
+    --diagram-edge-arrow: var(--muted);
+    --diagram-focus-stroke: #7c5cff;
+    --diagram-focus-shadow: var(--shadow-brand);
+    --diagram-radius: var(--radius-xs);
+    --diagram-terminal-radius: 23px;
+    --diagram-node-shadow: var(--shadow-1);
 }
 
 @media(prefers-color-scheme:dark) {
@@ -109,6 +123,8 @@
         --acctx: var(--brand-tx);
         --shadow-1: 0 1px 2px rgba(0, 0, 0, .3), 0 2px 8px rgba(0, 0, 0, .25);
         --shadow-2: 0 8px 28px rgba(0, 0, 0, .45);
+        /* 图形能力暗色覆盖 */
+        --diagram-decision-fill: #2c2410;
     }
 }
 

@@ -59,7 +59,11 @@ class MoodManager:
 
     # ---- 读取与注入 --------------------------------------------------------
     def build_hint(self) -> str:
-        """生成情绪注入段（system prompt 追加用）。neutral/衰减后/关闭时返回空串。"""
+        """生成情绪注入段（system prompt 追加用）。
+
+        收敛式理解优化方案 §3.1：情绪永远在场。即使 neutral/低强度也返回
+        轻量提示，强度决定浓淡——不再用空串做"跳过情绪"的开关。
+        """
         if not self.config.get("mood_enabled", True):
             return ""
         if self.config.get("mood_influence_strength", 0.5) <= 0:
@@ -68,6 +72,7 @@ class MoodManager:
         if not row:
             return ""
         kwargs: dict[str, object] = {}
+        any_active = False
         for scope in ("user", "ai"):
             mood = row[f"{scope}_mood"]
             intensity = self._decay(row[f"{scope}_intensity"],
@@ -77,12 +82,13 @@ class MoodManager:
                 kwargs[f"{scope}_intensity"] = round(intensity, 2)
                 kwargs[f"{scope}_time_hint"] = self._time_hint(
                     row[f"{scope}_updated_at"])
+                any_active = True
             else:
+                # 收敛式优化：低强度时仍注入"平静"标签，保证情绪始终在场
                 kwargs[f"{scope}_mood"] = "平静"
                 kwargs[f"{scope}_intensity"] = 0
                 kwargs[f"{scope}_time_hint"] = ""
-        if kwargs["user_mood"] == "平静" and kwargs["ai_mood"] == "平静":
-            return ""
+        # 即使双方都是"平静"也返回注入段（低强度轻调制），不再返回空串跳过
         return PROMPTS.render("agent/prompts/mood", **kwargs)
 
     # ---- 更新（融合 + 落库 + 留痕） ----------------------------------------

@@ -10,6 +10,7 @@
     },
     "dependencies": {
         "@tabler/icons-webfont": "^3.6.0",
+        "dagre": "^0.8.5",
         "graphology": "^0.26.0",
         "graphology-layout-forceatlas2": "^0.10.1",
         "marked": "^12.0.0",

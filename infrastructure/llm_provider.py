@@ -149,8 +149,15 @@ class LLMClient:
     async def chat(self, snap: ProviderSnapshot, messages: list[dict],
                    source: str = "main_chat", session_id: str | None = None,
                    tools: list[dict] | None = None, images: list[str] | None = None,
+                   extra_body: dict | None = None,
                    **kw) -> dict[str, Any]:
-        """返回 {content, tool_calls, usage}。images：可选图片 dataURL 列表（多模态）。"""
+        """返回 {content, tool_calls, usage}。
+
+        images：可选图片 dataURL 列表（多模态）。
+        extra_body：透传至 API 请求体的额外字段（如 {"thinking_enabled": false}
+          对推理模型禁用思考模式）。收敛分析等轻量结构化任务建议传
+          extra_body={"thinking_enabled": False} 以避免思考令牌拖慢响应。
+        """
         from observability_langfuse import get_tracer
         gen = get_tracer().generation_start(
             name=f"llm.{source}", model=snap.model_id, input=messages,
@@ -159,6 +166,8 @@ class LLMClient:
             model_parameters={k: kw[k] for k in ("temperature", "max_tokens")
                               if k in kw} or None)
         try:
+            if extra_body:
+                kw["extra_body"] = extra_body
             res = await self._call_with_retry(
                 snap, source, session_id,
                 lambda: self._do_chat(snap, messages, tools, images=images, **kw))
@@ -324,6 +333,9 @@ class LLMClient:
             body["tools"] = tools
         body.update({k: v for k, v in kw.items()
                     if k in ("temperature", "max_tokens")})
+        # extra_body：透传至请求体的额外字段（如 thinking_enabled=False 禁用思考模式）
+        if "extra_body" in kw and isinstance(kw["extra_body"], dict):
+            body.update(kw["extra_body"])
         async with httpx.AsyncClient(timeout=120) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/chat/completions",
                              json=body,
@@ -350,6 +362,8 @@ class LLMClient:
             body["system"] = sys
         if tools:
             body["tools"] = tools
+        if "extra_body" in kw and isinstance(kw["extra_body"], dict):
+            body.update(kw["extra_body"])
         async with httpx.AsyncClient(timeout=120) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/messages", json=body,
                              headers={"x-api-key": snap.api_key,

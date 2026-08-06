@@ -24,7 +24,22 @@ from soul.constants import ONBOARDING_PERSONA
 from . import response_synthesizer as rs
 from .compression import Compressor, assemble_context, render_summary_body
 from .dag_scheduler import SharedState, build_dag
-from .intent_parser import IntentParser
+from .degradation import (
+    DegradationDecision,
+    DegradationState,
+    FailureType,
+    decide_degradation,
+)
+from .intent_parser import (
+    AttentionFocuser,
+    DegradationError,
+    EmotionState,
+    FocusResult,
+    GapDetector,
+    IntentParser,
+    QuickIntentResult,
+    Understanding,
+)
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
@@ -130,6 +145,12 @@ class AgentCore:
         self.image_kb_fn = None
         self.intent_parser = IntentParser(
             llm_client, lambda: self.providers.snapshot_for("intent"))
+        # 收敛式理解：注意力聚焦 + 缺口检测（LLM 调用走 convergence 槽位，
+        # 轻量分析任务，默认回退 intent→agent→chat）
+        self.attention_focuser = AttentionFocuser(
+            llm_client, lambda: self.providers.snapshot_for("convergence"))
+        self.gap_detector = GapDetector(
+            llm_client, lambda: self.providers.snapshot_for("convergence"))
         self.compressor = Compressor(
             llm_client, lambda: self.providers.snapshot_for("agent"),
             lambda: self.providers.snapshot_for("chat"))
@@ -305,22 +326,65 @@ class AgentCore:
             raise
 
         chat_snap = self.providers.snapshot_for("chat")
-        # 是否配置了对话模型。熔断/半开恢复由 stream() 内的熔断器动态判定，不在此处
-        # 用早期状态快照预判可用性——否则中途 intent_parse 触发半开探测恢复后，本步
-        # 仍会用陈旧的 "unavailable" 误判，错误地回退"模型不可用"。
         chat_configured = chat_snap is not None
-        # 检索第 2 层 LLM 精筛可用性：有对话模型且熔断器允许（半开窗口亦视为可用）
         llm_available = chat_configured and self.llm.breaker(
             chat_snap.model_id).allow()
 
-        memories = []
-        loaded_ids: list[str] = []
+        # 近期对话上下文：供收敛分析节点消解悬空指代、理解对话脉络
+        recent_history = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
+            for m in history[-6:])
+
+        # ---- 收敛式理解：快速预判（§3.1） ----
+        quick_result: QuickIntentResult | None = None
+        understanding: Understanding | None = None
+        if not onboarding and chat_configured:
+            _sp = tracer.span_start("quick_intent", input={
+                "message": message})
+            try:
+                quick_result = await self.intent_parser.quick_intent(
+                    message, session_id=sid,
+                    recent_history=recent_history)
+                _sp.end(output={
+                    "needs_convergence": quick_result.needs_convergence,
+                    "hypothesis": quick_result.intent_hypothesis,
+                    "reason": quick_result.complexity_reason,
+                })
+                # 思考过程外露：快速预判结论
+                await emit("thinking_delta", {
+                    "text": f"【快速预判】{quick_result.intent_hypothesis}"
+                    f"{'（需深度收敛：' + quick_result.complexity_reason + '）'
+                       if quick_result.needs_convergence else '（简单，快速通道）'}\n"})
+            except Exception:
+                _sp.end(level="ERROR")
+                raise
+
+        # ---- 收敛环（§3.5）仅在 LLM 可用 + 需深度收敛时进入 ----
+        max_rounds = self.config.get("convergence_max_rounds", 2)
+        _convergence_done = False
+        if (not onboarding and quick_result and quick_result.needs_convergence
+                and llm_available):
+            understanding = await self._convergence_loop(
+                sid, message, quick_result, history, tracer, emit,
+                max_rounds=max_rounds)
+            if understanding is None:
+                return  # 收敛失败（已 emit error），中止
+            # 从理解包提取 intents 给下游，跳过原有检索+意图流程
+            intents = [understanding.rich_intent]
+            memories = []
+            loaded_ids = []
+            _convergence_done = True
+            # 思考过程外露：收敛后的丰满意图
+            await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
+        else:
+            # 快速通道或引导模式
+            memories = []
+            loaded_ids: list[str] = []
         cited_ids: list[str] = []
 
-        # 检索线索上下文：最近 2 轮对话尾部全文（history 已裁为 role/content）。
-        # 不截断：embedding 预算由 retriever 内部兜底（取尾部填 2000 字符），
-        # 精筛 LLM 看全量；此处保持与业务输入一致，Langfuse 记录同源同量。
-        retrieval_context = ""
+        if not _convergence_done:
+            # 原有检索+意图并行流程（收敛环已完成时跳过）
+            retrieval_context = ""
         if not onboarding:
             retrieval_context = "\n".join(
                 f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
@@ -399,24 +463,42 @@ class AgentCore:
                 _sp.end(level="ERROR")
                 raise
 
-        if not onboarding and llm_available:
+        if not _convergence_done and not onboarding and llm_available:
             # 记忆检索与意图识别互不依赖（分别产出 memories/intents），并行执行：
             # 第 2 层精筛 LLM 的耗时隐藏在意图识别耗时内，主链路净省数秒
             _results = await asyncio.gather(_run_retrieval(), _run_intent(),
                                             return_exceptions=True)
+            # 意图解析失败（DegradationError）→ 路由到三态降级
             for _r in _results:
-                if isinstance(_r, BaseException):
+                if isinstance(_r, DegradationError):
+                    _decision = _r.decision
+                    _tracer = get_tracer()
+                    _tracer.record_degradation(_decision)
+                    if _decision.state == DegradationState.STATE_3:
+                        await emit("error", {"code": 503,
+                                             "message": _decision.message or "服务暂不可用，请稍后重试"})
+                        return
+                    # 态一/态二：继续但记录
+                elif isinstance(_r, BaseException):
                     raise _r
             intents = _results[1]
-        else:
+        elif not _convergence_done:
             if not onboarding:
-                # 降级链第 4 级：LLM 不可用（熔断/未配置）→ 不检索，告知降级模式
-                await emit("degrade", {"reason": "llm_unavailable",
-                                       "message": "对话模型不可用，已进入降级模式（本轮跳过记忆检索）"})
+                # 态三：LLM 不可用（熔断/未配置），不再降级硬答
+                _decision = decide_degradation(
+                    failed_step="chat_llm",
+                    error="对话模型不可用（熔断或未配置）",
+                    skip_causes_misleading=True,
+                    failure_type=FailureType.SYSTEM_FAULT,
+                )
+                get_tracer().record_degradation(_decision)
+                await emit("error", {"code": 503,
+                                     "message": _decision.message or "对话模型不可用，请稍后重试"})
+                return
             intents = await _run_intent()
 
         # 思考过程外露：意图理解与任务拆解以 thinking_delta 流式推送给前端
-        if not onboarding:
+        if not onboarding and not _convergence_done:
             await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
 
         # mimo 内置联网搜索：query_external 意图且 chat 模型为 mimo 且开关开启时，
@@ -551,6 +633,14 @@ class AgentCore:
         })
         try:
             if not chat_configured and not onboarding:
+                # 态三：模型不可用 → 记录 decision_reason
+                _decision = decide_degradation(
+                    failed_step="response_synthesis",
+                    error="对话模型不可用",
+                    skip_causes_misleading=True,
+                    failure_type=FailureType.SYSTEM_FAULT,
+                )
+                get_tracer().record_degradation(_decision)
                 assistant_text = "当前对话模型不可用，请在设置页检查模型配置。"
                 await emit("content_delta", {"text": assistant_text})
                 # 不可用提示文案不应被导出成文档
@@ -615,6 +705,14 @@ class AgentCore:
                         if not doc_only:
                             await emit("content_delta", {"text": src_md})
                 except CircuitOpenError:
+                    # 态三：熔断兜底 → 记录 decision_reason
+                    _decision = decide_degradation(
+                        failed_step="response_synthesis",
+                        error="对话模型熔断中",
+                        skip_causes_misleading=True,
+                        failure_type=FailureType.SYSTEM_FAULT,
+                    )
+                    get_tracer().record_degradation(_decision)
                     fallback = "对话模型暂时不可用（熔断中），请稍后重试或切换模型。"
                     await emit("content_delta", {"text": fallback})
                     buf = [fallback]
@@ -633,6 +731,9 @@ class AgentCore:
                             mem_confirm["id"], mem_confirm["confirmed"])
                     except Exception:  # noqa: BLE001
                         logger.warning("low 确认处理失败", exc_info=True)
+                # Strip duplicate Mermaid blocks when diagram tool succeeded
+                if any(tr.get("ok") and tr.get("tool") in ("render_flowchart", "render_mermaid") for tr in (tool_results or [])):
+                    assistant_text = rs.strip_mermaid_blocks(assistant_text)
                 if citations:
                     cited_ids = citations
                     refs = [{"id": mid, "title": next(
@@ -733,10 +834,19 @@ class AgentCore:
                                 "session_id": sid, "cited_ids": cited_ids,
                                 "loaded_ids": loaded_ids or []})
         try:
+            # 从工具结果中提取图形数据供持久化（刷新后可恢复渲染）
+            _visuals = []
+            for tr in (tool_results or []):
+                if tr.get("ok") and tr.get("tool") in ("render_flowchart", "render_mermaid"):
+                    vd = tr.get("result")
+                    if isinstance(vd, dict) and vd.get("type"):
+                        _visuals.append({"type": vd["type"], "data": vd})
             msg_id = self.sessions.append_message(sid, "assistant", assistant_text,
                                                   citations=[{"id": c}
                                                              for c in cited_ids],
-                                                  thinking="".join(think_parts) or None)
+                                                  thinking="".join(
+                                                      think_parts) or None,
+                                                  visuals=_visuals or None)
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
                                                      message, onboarding, intents)
             _sp.end(output={"message_id": msg_id, "cited": cited_ids,
@@ -915,6 +1025,11 @@ class AgentCore:
             # DAG 层面 Replan：核心意图失败且尚未 Replan 时补救一次
             if not result.get("ok") and not result.get("skipped") and not self._replanned:
                 self._replanned = True
+                # 图形工具降级提示：render_flowchart 校验失败 → 尝试 render_mermaid
+                if tool_name == "render_flowchart":
+                    await emit("thinking_delta", {
+                        "text": f"【工具调用】{tool_name} JSON 校验失败，"
+                        f"尝试降级为 render_mermaid 重出…\n"})
                 decision = await self.executor.replan(
                     intent.intent_summary, tool_name,
                     result.get("error", ""), lambda *a, **kw: self._replan_fn(*a, sid=sid, **kw))
@@ -932,6 +1047,19 @@ class AgentCore:
                             new_tool, new_params,
                             intent_summary=intent.intent_summary, emit=emit)
                         tool_name = new_tool
+                elif tool_name == "render_flowchart":
+                    # 图形工具降级兜底：Replan 也未给出有效方案 → 明确告知
+                    await emit("thinking_delta", {
+                        "text": f"【工具调用】图形生成失败，已尝试降级但不可用，"
+                        f"将在回复中以文字说明\n"})
+            # 图形工具执行成功 → 发射 tool_visual 事件供前端渲染
+            if result.get("ok") and tool_name in ("render_flowchart", "render_mermaid"):
+                visual_data = result.get("result")
+                if isinstance(visual_data, dict) and visual_data.get("type"):
+                    await emit("tool_visual", {
+                        "type": visual_data["type"],
+                        "data": visual_data,
+                    })
             shared.put(intent.id, tool_name, 0, result.get("result"))
             ok = result.get("ok")
             await emit("thinking_delta",
@@ -942,6 +1070,253 @@ class AgentCore:
 
     # ---- L1 压缩编排（Head-Middle-Tail + 落盘 + 失败兑底） ----------------
     TAIL_PROTECTED_MESSAGES = 6   # Protected Tail：最近 3 轮原文保留不动
+
+    # ---- 收敛式理解循环（§3.5） --------------------------------------------
+    async def _convergence_loop(self, sid: str, message: str,
+                                quick_result: QuickIntentResult,
+                                history: list[dict],
+                                tracer, emit,
+                                max_rounds: int = 2) -> Understanding | None:
+        """收敛式理解循环：广撒网 → 意图收敛 → 缺口检测 → 定向重收集 → 再收敛。
+
+        返回 Understanding 包，失败返回 None（已 emit error）。
+        """
+        from observability_langfuse import mark_preview
+        core_query = _strip_attachment_context(message)
+        retrieval_context = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
+            for m in history[-4:])
+        recent_history = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
+            for m in history[-6:])
+        memories_text = ""
+        emotion = EmotionState(valence="平静", intensity=0.0)
+        focus = None
+        prev_gap_types: set[str] = set()  # 上一轮缺口类型，用于检测收敛停滞
+
+        for round_num in range(1, max_rounds + 1):
+            round_sp = tracer.span_start(
+                f"convergence_round_{round_num}",
+                input={"round": round_num, "max_rounds": max_rounds,
+                       "hypothesis": quick_result.intent_hypothesis})
+
+            # 1. 上下文收集：检索记忆（复用现有检索器，每轮可能不同策略）
+            cg_sp = tracer.span_start(
+                "context_gather",
+                input={"query": core_query, "round": round_num},
+                parent_observation_id=round_sp.id if hasattr(round_sp, 'id') else None)
+            try:
+                retrieval = await self.retriever.retrieve(
+                    core_query,
+                    llm_available=True,
+                    session_id=sid,
+                    context_text=retrieval_context)
+                all_mems = retrieval.hits + retrieval.related
+                memories_text = "\n".join(
+                    f"[{m['id']}] {m['title']}：{m.get('detail', m.get('summary', ''))}"
+                    for m in all_mems[:15])
+                cg_sp.end(output={"count": len(all_mems),
+                                  "titles": [m["title"] for m in all_mems[:10]]})
+            except Exception as e:
+                cg_sp.end(level="ERROR", status_message=str(e))
+                logger.warning("收敛环检索失败：%s", e)
+                # 检索失败 → 态一安全跳过（后续收敛缺少记忆，但可继续）
+
+            # 2. 情绪评估：读 MoodManager 当前衰减后的状态（零 LLM 成本）
+            ea_sp = tracer.span_start(
+                "emotion_assess",
+                input={"round": round_num},
+                parent_observation_id=round_sp.id if hasattr(round_sp, 'id') else None)
+            try:
+                if self.mood:
+                    row = self.mood.db.query_one(
+                        "SELECT * FROM mood_state WHERE id=1")
+                    if row:
+                        # sqlite3.Row 不支持 .get()，转为 dict 访问
+                        rd = dict(row)
+                        em = rd.get("user_mood", "neutral") or "neutral"
+                        ei = self.mood._decay(
+                            rd.get("user_intensity", 0) or 0,
+                            rd.get("user_updated_at"))
+                        emotion = EmotionState(
+                            valence=em, intensity=round(ei, 2))
+                ea_sp.end(output={"valence": emotion.valence,
+                                  "intensity": emotion.intensity})
+            except Exception as e:
+                ea_sp.end(level="ERROR", status_message=str(e))
+
+            # 3. 注意力聚焦：LLM 分析诉求点权重
+            af_sp = tracer.span_start(
+                "attention_focus",
+                input={"message": message[:500], "round": round_num},
+                parent_observation_id=round_sp.id if hasattr(round_sp, 'id') else None)
+            try:
+                focus = await self.attention_focuser.focus(
+                    message, memories_text[:3000], emotion, session_id=sid,
+                    recent_history=recent_history)
+                af_sp.end(output={
+                    "primary_focus": focus.primary_focus,
+                    "is_competitive": focus.is_competitive,
+                    "demand_count": len(focus.demand_points),
+                })
+            except Exception as e:
+                af_sp.end(level="ERROR", status_message=str(e))
+                focus = FocusResult(
+                    demand_points=[{"point": message[:60], "weight": 1.0}],
+                    primary_focus=message[:60])
+
+            # 4. 意图收敛：整合三者产出
+            ic_sp = tracer.span_start(
+                "intent_converge",
+                input={"hypothesis": quick_result.intent_hypothesis,
+                       "memories_count": len(all_mems) if 'all_mems' in dir() else 0,
+                       "emotion": f"{emotion.valence}({emotion.intensity})"},
+                parent_observation_id=round_sp.id if hasattr(round_sp, 'id') else None)
+            try:
+                tool_names = [s.name for s in self.registry.all_specs()]
+                intents, correction_note = await self.intent_parser.converge_intent(
+                    message, tool_names, quick_result,
+                    memories_text=memories_text,
+                    emotion_state=emotion,
+                    focus_result=focus,
+                    session_id=sid,
+                    recent_history=recent_history)
+                ic_sp.end(output={
+                    "intent_count": len(intents),
+                    "correction": correction_note,
+                })
+            except DegradationError as e:
+                ic_sp.end(level="ERROR")
+                _decision = e.decision
+                tracer.record_degradation(_decision)
+                if _decision.state == DegradationState.STATE_3:
+                    await emit("error", {"code": 503,
+                                         "message": _decision.message or "意图收敛失败"})
+                    return None
+                # 态一/态二：记录但尝试继续
+                intents = [type("I", (), {
+                    "id": "i1", "intent_summary": quick_result.intent_hypothesis,
+                    "intent_type": "chat", "tools_needed": [],
+                    "depends_on": []})()]
+
+            # 构建当前轮次的理解包
+            current_understanding = Understanding(
+                rich_intent=intents[0] if intents else type("I", (), {
+                    "id": "i1", "intent_summary": quick_result.intent_hypothesis,
+                    "intent_type": "chat", "tools_needed": [],
+                    "depends_on": []})(),
+                emotion_state=emotion,
+                focus=focus,
+            )
+
+            # 5. 缺口检测
+            gd_sp = tracer.span_start(
+                "gap_detect",
+                input={"round": round_num},
+                parent_observation_id=round_sp.id if hasattr(round_sp, 'id') else None)
+            try:
+                gap_result = await self.gap_detector.detect(
+                    current_understanding, message, session_id=sid,
+                    recent_history=recent_history)
+                gd_sp.end(output={
+                    "has_gaps": gap_result.has_gaps,
+                    "gap_count": len(gap_result.gaps),
+                    "unresolvable": gap_result.unresolvable,
+                })
+            except Exception as e:
+                gd_sp.end(level="ERROR", status_message=str(e))
+                gap_result = GapResult(
+                    gaps=[], has_gaps=False, retarget_tasks=[])
+
+            round_sp.end(output={
+                "intent": current_understanding.rich_intent.intent_summary,
+                "has_gaps": gap_result.has_gaps,
+            })
+
+            # 无缺口 → 理解完整，退出
+            if not gap_result.has_gaps:
+                return current_understanding
+
+            # 缺口收敛停滞检测：当前缺口类型与上一轮无变化或为其子集 → 早停
+            cur_gap_types = {g.get("type", "") for g in gap_result.gaps}
+            if prev_gap_types and cur_gap_types and cur_gap_types.issubset(prev_gap_types):
+                logger.info(
+                    "收敛环第 %d 轮缺口无改善（prev=%s cur=%s），提前退出",
+                    round_num, prev_gap_types, cur_gap_types)
+                round_sp.end(output={
+                    "intent": current_understanding.rich_intent.intent_summary,
+                    "has_gaps": gap_result.has_gaps,
+                    "early_exit_reason": "gap_stagnation",
+                })
+                return current_understanding
+            prev_gap_types = cur_gap_types
+
+            # 纯焦点竞争缺口：多诉求是用户提问结构的固有特征，
+            # 重收敛无法"修复"——用户确实需要多方面的回答，不应在此循环
+            if cur_gap_types == {"focus_competition_gap"}:
+                logger.info(
+                    "收敛环第 %d 轮仅剩 focus_competition_gap（多诉求固有特征），提前退出",
+                    round_num)
+                round_sp.end(output={
+                    "intent": current_understanding.rich_intent.intent_summary,
+                    "has_gaps": gap_result.has_gaps,
+                    "early_exit_reason": "focus_competition_inherent",
+                })
+                return current_understanding
+
+            # 缺口无法消解 → 诚实澄清（态二）
+            if gap_result.unresolvable:
+                _decision = decide_degradation(
+                    failed_step="gap_detect",
+                    error="理解缺口无法在系统内消解",
+                    skip_causes_misleading=True,
+                    failure_type=FailureType.CAPABILITY_BOUNDARY,
+                )
+                _decision.message = "；".join(
+                    g.get("description", "") for g in gap_result.gaps[:2])
+                tracer.record_degradation(_decision)
+                # 生成诚实澄清回复
+                await self._emit_honest_clarify(
+                    emit, gap_result, sid)
+                return None
+
+            # 有缺口且未达上限 → 准备下一轮定向重收集
+            if round_num < max_rounds:
+                await emit("thinking_delta", {
+                    "text": f"【理解收敛】第 {round_num} 轮发现 {len(gap_result.gaps)} 个缺口，进入定向重收集…\n"})
+                # 将缺口翻译为重收集任务，修改下一轮的检索查询
+                retarget_descs = "；".join(
+                    t.get("description", "") for t in gap_result.retarget_tasks[:3])
+                if retarget_descs:
+                    core_query = f"{message} {retarget_descs}"
+                continue
+
+        # 达到轮次上限：带当前理解退出
+        return current_understanding
+
+    async def _emit_honest_clarify(self, emit, gap_result: GapResult,
+                                   sid: str | None = None) -> None:
+        """态二：生成诚实澄清回复（LLM 基于缺口描述生成自然的反问）。"""
+        gap_desc = "；".join(
+            g.get("description", "") for g in gap_result.gaps[:2])
+        snap = self.providers.snapshot_for("chat")
+        if snap is None:
+            await emit("content_delta",
+                       {"text": f"我需要确认一下：{gap_desc}，能帮我clarify一下吗？"})
+            return
+        try:
+            system = PROMPTS.render(
+                "agent/prompts/honest_clarify", gap_description=gap_desc)
+            resp = await self.llm.chat(
+                snap,
+                [{"role": "system", "content": system},
+                 {"role": "user", "content": gap_desc}],
+                source="honest_clarify",
+                session_id=sid)
+            await emit("content_delta", {"text": resp["content"]})
+        except Exception:
+            await emit("content_delta",
+                       {"text": f"关于这个问题，我需要确认一下：{gap_desc}"})
 
     async def _compress_history(self, sid: str,
                                 history: list[dict]) -> tuple[list[dict], bool]:
@@ -1354,7 +1729,7 @@ class AgentCore:
                     f"本轮请在合适时机询问用户是否启用，告知用户可在记忆中心·健康度管理。）")
         except Exception:  # noqa: BLE001
             pass
-        # 情绪注入（双源：用户情绪 + AI 自身情绪；neutral/衰减后/关闭时不注入）
+        # 情绪注入（收敛式优化：永远在场，强度决定浓淡）
         if self.mood and self.config.get("mood_enabled", True):
             try:
                 mood_hint = self.mood.build_hint()
@@ -1384,7 +1759,19 @@ class AgentCore:
             merged_system += "\n\n可参考的技能内容：" + skill_text
         if preload_text:
             merged_system += "\n\n预加载的外部内容（URL/附件）：\n" + preload_text
-        return [{"role": "system", "content": merged_system}] + history + \
+        # 近期对话锚定：将最近6轮完整注入 system prompt，
+        # 确保模型在长上下文中不会丢失紧邻的对话关联
+        if len(history) > 6:
+            recent = history[-6:]
+            older = history[:-6]
+        else:
+            recent = history
+            older = []
+        recent_text = "\n".join(
+            f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
+            for m in recent)
+        merged_system += "\n\n## 近期对话（请务必基于此理解用户当前消息的指代和上下文）\n\n" + recent_text
+        return [{"role": "system", "content": merged_system}] + older + \
                [{"role": "user", "content": message}]
 
     async def _post_process(self, sid, msg_id, content, loaded_ids, cited_ids,
@@ -1436,7 +1823,7 @@ class AgentCore:
         """turn 后异步情绪判定：LLM 一次调用双输出 → 融合落库 → 发事件。
         全异常捕获静默降级（模型不可用/解析失败仅跳过本轮，不阻断任何流程）。"""
         try:
-            snap = self.providers.snapshot_for("chat")
+            snap = self.providers.snapshot_for("convergence")
             if snap is None:
                 return
             from infrastructure.json_repair import repair_json

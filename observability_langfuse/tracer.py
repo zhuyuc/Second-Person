@@ -234,6 +234,34 @@ class PipelineTracer:
         if self._client:
             await self._client.stop()
 
+    # ---- 降级决策记录（收敛式理解优化方案 §5.4） ----------------------------
+    def record_degradation(self, decision, span_id: str | None = None) -> None:
+        """将三态降级决策写入当前活跃 span 的 metadata。
+
+        decision：DegradationDecision 实例或 dict。
+        """
+        if not self.enabled:
+            return
+        sid = span_id or _active_obs.get()
+        if not sid:
+            return
+        if hasattr(decision, 'state'):
+            meta = {
+                "degradation": {
+                    "state": str(getattr(decision, 'state', '')),
+                    "decision_reason": str(getattr(decision, 'decision_reason', '')),
+                    "failed_step": str(getattr(decision, 'failed_step', '')),
+                    "failure_type": str(getattr(decision, 'failure_type', '')),
+                    "skip_causes_misleading": bool(getattr(decision, 'skip_causes_misleading', False)),
+                }
+            }
+        elif isinstance(decision, dict):
+            meta = {"degradation": decision}
+        else:
+            meta = {"degradation": {"decision_reason": str(decision)}}
+        self._emit("span-update", {"id": sid, "traceId": _active_trace.get(),
+                                    "timestamp": _now(), "metadata": _trim(meta)})
+
     async def flush(self) -> None:
         if self._client:
             await self._client.flush()
@@ -270,13 +298,20 @@ class PipelineTracer:
 
     # ---- span（步骤，进入时设为当前活跃 observation，其内的调用挂在它下面） ----
     def span_start(self, name: str, *, input: Any = None,
-                   metadata: dict | None = None):
+                   metadata: dict | None = None,
+                   parent_observation_id: str | None = None):
+        """创建 span。
+
+        parent_observation_id：可选，显式指定父 observation ID。
+        用于并行子 span 场景（避免 contextvars 竞态导致树形结构错乱）。
+        不传时默认取 _active_obs 当前值。
+        """
         tid = _active_trace.get()
         if not self.enabled or not tid:
             return _NOOP_SPAN
         sid = _uid()
         body: dict = {"id": sid, "traceId": tid, "name": name, "startTime": _now(),
-                      "parentObservationId": _active_obs.get()}
+                      "parentObservationId": parent_observation_id or _active_obs.get()}
         if input is not None:
             body["input"] = _trim(input)
         if metadata is not None:

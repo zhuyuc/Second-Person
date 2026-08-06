@@ -241,18 +241,29 @@ class Retriever:
             return result
 
         # 第 2 层：LLM 结合上下文精筛至 0-3 条（否决门：判空即本轮无相关记忆，
-        # 不再强制兜底 top-2；异常降级路径仍注入 top-3 未精筛）
+        # 不再强制兜底 top-2；异常降级路径仍注入 top-3 未精筛）。
+        # 超时保护：精筛 LLM 调用设置 10s 限期，超时走降级挑选避免检索卡死。
         chosen_ids: list[str]
         if llm_available and self.llm_refine_fn:
             try:
-                chosen_ids = await self.llm_refine_fn(
-                    query, [{"id": c.memory_id, "title": c.title,
-                             "summary": c.summary} for c in candidates[:10]],
-                    session_id=session_id, context_text=context_text)
+                refine_timeout = self.config.get("retrieval_refine_timeout_seconds", 10)
+                chosen_ids = await asyncio.wait_for(
+                    self.llm_refine_fn(
+                        query, [{"id": c.memory_id, "title": c.title,
+                                 "summary": c.summary} for c in candidates[:10]],
+                        session_id=session_id, context_text=context_text),
+                    timeout=refine_timeout)
                 chosen_ids = chosen_ids[:3]
                 diag_refined_count = len(chosen_ids)
                 if not chosen_ids:
                     diag_gate = "refine_empty"
+            except asyncio.TimeoutError:
+                chosen_ids = self._degrade_pick(candidates)
+                result.degraded = "第 2 层精筛超时（>10s），按得分降级注入"
+                diag_refined_count = len(chosen_ids)
+                logger.warning("检索精筛超时，降级挑选 %d 条", len(chosen_ids))
+            except asyncio.CancelledError:
+                raise
             except Exception:  # noqa: BLE001
                 chosen_ids = self._degrade_pick(candidates)
                 result.degraded = "第 2 层精筛不可用，按得分降级注入（已过滤弱尾）"

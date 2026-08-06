@@ -7,6 +7,7 @@ import { useSSE } from '@/composables/useSSE'
 import { useToast } from '@/stores/toast'
 import { useSessions } from '@/stores/sessions'
 import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
+import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 
 // Mermaid 初始化：暗色主题，禁止自动启动（我们手动触发 run）
 mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' })
@@ -58,6 +59,7 @@ const thinkText = ref('')     // 思考过程（意图理解/任务拆解 + 模�
 const thinkOpen = ref(true)   // 思考面板展开状态：思考中展开，正文首字出现后自动折叠
 const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认收起
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
+const streamVisuals = ref([])  // 本轮 tool 产出图形 [{type, data}]
 const degraded = ref(false)
 const scroller = ref(null)
 const ta = ref(null)          // 输入框，用于自适应高度
@@ -393,6 +395,7 @@ function handleEvent(ev, data) {
   else if (ev === 'citations') lastCitations = data.refs
   else if (ev === 'queued') toast.push('info', '正在处理上一条消息')
   else if (ev === 'degrade') { degraded.value = true }
+  else if (ev === 'tool_visual') { streamVisuals.value.push(data); maybeScroll() }
   else if (ev === 'turn_completed') finishStream(data.message_id)
   else if (ev === 'error') { toast.push('error', data.message || '出错'); finishStream() }
 }
@@ -407,7 +410,8 @@ function finishStream(msgId) {
     const m = {
       id: msgId, role: 'assistant', content: stripTail(streamText.value),
       citations: lastCitations, feedback: 0,
-      thinking: thinkText.value || '', thinkOpen: false
+      thinking: thinkText.value || '', thinkOpen: false,
+      visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
     }
     // 原位重生成：新回复插回被移除回复的位置，而非追加新对话
     if (regenAt !== null && regenAt <= messages.value.length) messages.value.splice(regenAt, 0, m)
@@ -416,6 +420,7 @@ function finishStream(msgId) {
   regenAt = null
   streamText.value = ''
   thinkText.value = ''
+  streamVisuals.value = []
   thinkOpen.value = true
   lastCitations = []
   generating.value = false
@@ -541,6 +546,8 @@ function stripTail(t) {
     (_, content) => '\n\n```html\n' + content.trim() + '\n```\n')
   // 剔除 <tool_call>...</tool_call> 块（模型内部工具调用不应展示给用户）
   s = s.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
+  // strip Mermaid blocks (already rendered by tool_visual, prevent marked duplicate)
+  s = s.replace(/```(?:mermaid|flowchart)\s*\n[\s\S]*?\n```/gi, '')
   return s
 }
 function render(md) {
@@ -691,6 +698,7 @@ function resetToHome() {
   messages.value = []
   streamText.value = ''
   thinkText.value = ''
+  streamVisuals.value = []
   input.value = ''
   attachments.value = []
   generating.value = false
@@ -855,6 +863,8 @@ onUnmounted(() => {
                   </div>
                   <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
                 </div>
+                <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv'+vi"
+                  :type="v.type" :data="v.data" />
                 <div class="content" v-html="render(webSrc(m.content).body)"></div>
                 <div v-if="webSrc(m.content).count" class="think-panel" style="margin-top:8px">
                   <div class="think-head" @click="m.srcOpen = !m.srcOpen">
@@ -902,6 +912,9 @@ onUnmounted(() => {
                 <span class="muted">思考中</span>
                 <span class="think-dots"><span></span><span></span><span></span></span>
               </div>
+              <!-- 图形组件 -->
+              <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv'+vi"
+                :type="v.type" :data="v.data" />
               <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body)"></div>
               <div v-if="streamText && webSrc(streamText).count" class="think-panel" style="margin-top:8px">
                 <div class="think-head" @click="streamSrcOpen = !streamSrcOpen">
