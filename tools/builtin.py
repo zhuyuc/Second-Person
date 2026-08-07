@@ -349,6 +349,21 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         return {"type": "flowchart", "nodes": nodes, "edges": edges}
 
     registry.register_function(ToolSpec(
+        "render_mermaid",
+        "生成 Mermaid 图表：时序图/甘特图/类图/ER图/饼图/状态图/思维导图等，"
+        "或节点数 >15 的复杂流程图（render_flowchart 只适合 ≤15 节点）。"
+        "直接透传 Mermaid DSL，前端 MermaidChart 渲染。"
+        "流程图请用 flowchart 类型（TB/LR 方向），同时输出 diagram_type 与 mermaid_code",
+        {"type": "object", "properties": {
+            "diagram_type": {"type": "string",
+                             "enum": list(_MERMAID_TYPES),
+                             "description": "Mermaid 图表类型：flowchart/sequenceDiagram/classDiagram/stateDiagram/erDiagram/pie/gantt/timeline/mindmap 等"},
+            "mermaid_code": {"type": "string", "description": "Mermaid DSL 源码（不含 ```mermaid 围栏）"},
+            "type": {"type": "string", "const": "mermaid"}},
+         "required": ["diagram_type", "mermaid_code"]},
+        destructive=False), render_mermaid)
+
+    registry.register_function(ToolSpec(
         "render_flowchart",
         "生成高质量 SVG 流程图（≤15 节点，含判断/循环/并行分支）。输出 nodes + edges 结构化"
         " JSON，前端 FlowChartSVG 按品牌色系渲染。坐标规则：画布宽 800、起始 y=60、"

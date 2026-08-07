@@ -47,6 +47,11 @@ from agent.response_synthesizer import SignalCollector
 from soul.skill_manager import SkillManager
 from soul.soul_manager import SoulManager
 from soul.mood_manager import MoodManager
+from soul.mood_trigger_recorder import MoodTriggerRecorder
+from soul.mood_action_dispatcher import MoodActionDispatcher
+from soul.mood_pattern_extractor import MoodPatternExtractor
+from soul.profile_conflict_scanner import ProfileConflictScanner
+from soul.profile_review_scanner import ProfileReviewScanner
 from tools.base import ToolRegistry
 from tools.builtin import register_builtins
 from tools.sandbox import Sandbox
@@ -307,8 +312,42 @@ class AppContainer:
                     "UPDATE skill_patterns SET drafted=1 WHERE pattern_key=?", (key,))
 
         async def soul_feedback_fn(item: dict) -> None:
-            self.ctx_entry.add_pending("behavior", item.get("summary", ""),
-                                       item.get("detail", ""))
+            """SOUL 反馈处理：style 即时生效，persona 走频次累积 → 达阈值入队列。"""
+            import hashlib
+
+            feedback_kind = item.get("feedback_kind", "persona")
+            proposed = item.get("detail", "")
+            canonical_dim = item.get("canonical_dim", "")
+
+            # style 反馈交给即时路径（不入 review queue）
+            if feedback_kind == "style" and canonical_dim and canonical_dim != "other":
+                # 即时生效：直接更新对话风格/行为原则对应维度
+                # 当前阶段为框架预留，后续实现根据 canonical_dim 做定向更新
+                logger.info(
+                    "SOUL style 即时反馈：dim=%s, detail=%s", canonical_dim, proposed[:80]
+                )
+                return
+
+            # persona 反馈走频次累积
+            ptype = "behavior" if feedback_kind == "behavior" else "behavior"
+            raw_key = f"persona:{proposed[:50].strip()}"
+            change_key = hashlib.md5(raw_key.encode()).hexdigest()[:16]
+            now_str = now_cst().isoformat(timespec="seconds")
+
+            # 检查拒绝保护
+            if self.conflict_scanner.check_rejection_protection(change_key, now_str):
+                return
+
+            # 频次门累积 + 入队
+            occ, newly_enqueued = self.conflict_scanner.accumulate_feedback(
+                change_key, proposed, item.get("summary", ""), ptype
+            )
+            if newly_enqueued:
+                current_dialog = self.soul.read_style().get("对话风格", "")
+                self.conflict_scanner.enqueue_persona_review(
+                    change_key, proposed, item.get(
+                        "summary", ""), occ, current_dialog
+                )
 
         # 合并前关系判定（相同/演变/矛盾/相关）：防止高相似矛盾被静默合并
         async def merge_judge_fn(new_item: dict, existing: dict) -> dict:
@@ -340,7 +379,18 @@ class AppContainer:
         # ---- Soul / Profile ----
         self.soul = SoulManager(d, self.fw, self.oplog, notifier)
         self.mood = MoodManager(self.db, self.config)
+        self.mood_trigger = MoodTriggerRecorder(self.db)
+        self.mood_action_dispatcher = MoodActionDispatcher(
+            self.db, self.config)
+        self.mood_pattern_extractor = MoodPatternExtractor(
+            self.db, self.distiller, self.config)
         self.profile = ProfileManager(d)
+
+        # ---- 画像审核队列 ----
+        self.conflict_scanner = ProfileConflictScanner(
+            self.db, self.llm, self.providers, self.config)
+        self.profile_review_scanner = ProfileReviewScanner(
+            self.db, self.conflict_scanner, self.config, notifier)
 
         # ---- 工具系统 ----
         self.registry = ToolRegistry()
@@ -362,7 +412,9 @@ class AppContainer:
             lifecycle=self.lifecycle, signal_collector=self.signals,
             llm_client=self.llm, provider_registry=self.providers,
             file_writer=self.fw, skill_manager=self.skills, event_bus=self.bus,
-            notifier=notifier, mood_manager=self.mood)
+            notifier=notifier, mood_manager=self.mood,
+            mood_trigger=self.mood_trigger,
+            mood_action_dispatcher=self.mood_action_dispatcher)
 
         # ---- 系统 Agent ----
         self.reviewer = ReviewAgent(self.db, self.distiller, self.config, d)
@@ -463,7 +515,7 @@ class AppContainer:
                         lambda: self.db.execute(
                             "DELETE FROM message_dedup WHERE processed_at < "
                             "datetime('now','-1 day')"))
-        s.register_task("temp_cleanup", "临时附件清理",
+        s.register_task("temp_cleanup", "接收文件缓存清理",
                         lambda: (self.ingest.cleanup_temp_attachments(7),
                                  self._cleanup_exports(7)))
         s.register_task("log_cleanup", "日志清理", lambda: (
@@ -491,7 +543,7 @@ class AppContainer:
         s.register_task("lint_check", "Lint 健康检查",
                         lambda: self.lint_agent.run("lint_scheduled"))
         s.register_task("profile_rebuild", "用户画像重建",
-                        lambda: self.profile_builder.rebuild())
+                        lambda: self._profile_rebuild_with_scan())
         s.register_chain("memory_maintenance",
                          ["passive_review", "lint_check", "profile_rebuild"])
         # 独立任务
@@ -501,6 +553,39 @@ class AppContainer:
                         lambda: self.folder_scanner.scan_all(
                             trigger="schedule"),
                         "每 N 小时（自门控）")
+        # v2 情绪模式提取：每周一 04:00 分析 mood_history 沉淀为记忆
+        s.register_task("mood_pattern_extract", "情绪模式提取",
+                        lambda: asyncio.run(
+                            self.mood_pattern_extractor.extract()),
+                        "每周一 04:00")
+        # 画像审核队列维护：每日 04:30 清理 + 通知
+        s.register_task("profile_review_scan", "画像审核队列维护",
+                        lambda: self.profile_review_scanner.daily_scan(),
+                        "每天 04:30")
+
+    async def _profile_rebuild_with_scan(self) -> bool:
+        """画像重建 + 冲突检测（整合版）。
+
+        先保存旧版画像内容，再执行 rebuild，最后对比新旧做冲突扫描。
+        这样冲突检测与重建在同一调用链中，避免每日扫描独立调用 rebuild
+        与记忆维护链的 profile_rebuild 冲突。
+        """
+        old_content = self.profile.read_raw()
+        ok = await self.profile_builder.rebuild()
+        if not ok:
+            return False
+        # 重建成功后触发冲突检测
+        if self.conflict_scanner and old_content:
+            try:
+                new_content = self.profile.read_raw()
+                added = await self.conflict_scanner.scan_profile_rebuild(
+                    old_content, new_content
+                )
+                if added:
+                    logger.info("画像冲突检测：%d 条入队", added)
+            except Exception:
+                logger.warning("画像冲突检测失败", exc_info=True)
+        return True
 
     # ---- 生命周期 ----
     def _ensure_local_embedding_provider(self) -> None:

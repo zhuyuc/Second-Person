@@ -255,23 +255,46 @@ async def feedback(request: Request):
 async def _handle_upvote(c, message_id: int):
     """点赞：对该回复引用的每条记忆执行 confidence 升级（medium→strong）。"""
     row = c.db.query_one(
-        "SELECT citations FROM conversations WHERE id=?", (message_id,))
+        "SELECT session_id, citations FROM conversations WHERE id=?", (message_id,))
     cites = json.loads(row["citations"]) if row and row["citations"] else []
     for cit in cites:
         if cit.get("id"):
             await c.lifecycle.upvote_upgrade(cit["id"])
 
+    # v2 情绪触发：点赞 → AI pleased
+    if hasattr(c, "mood_trigger") and c.mood_trigger and row:
+        c.mood_trigger.record(
+            session_id=row["session_id"], message_id=message_id,
+            scope="ai", source_type="evaluation", event_key="user_thumbs_up",
+            attribution="other", mood_hint="pleased", intensity_hint=0.4,
+            note="用户点赞")
+
 
 async def _handle_downvote(c, message_id: int, reason: str):
     row = c.db.query_one(
-        "SELECT citations FROM conversations WHERE id=?", (message_id,))
+        "SELECT session_id, content, citations FROM conversations WHERE id=?", (message_id,))
     cites = json.loads(row["citations"]) if row and row["citations"] else []
     if reason == "memory_stale":
         for cit in cites:
             await c.lifecycle.downvote_stale(cit.get("id"))
     elif reason == "tone_wrong":
-        c.ctx_entry.add_pending("tone", "用户点踩：语气不对", "调整对话风格")
+        # 改走画像审核队列，不再通过 ctx_entry.add_pending 直接注入对话
+        if hasattr(c, "conflict_scanner") and c.conflict_scanner:
+            context_snippet = (row.get("content") or "")[:300] if row else ""
+            c.conflict_scanner.enqueue_tone_review(
+                message_id,
+                row["session_id"] if row else "",
+                context_snippet,
+            )
     # output_format_wrong 已在 signal 负反馈记录
+
+    # v2 情绪触发：点踩 → AI concerned
+    if hasattr(c, "mood_trigger") and c.mood_trigger and row:
+        c.mood_trigger.record(
+            session_id=row["session_id"], message_id=message_id,
+            scope="ai", source_type="evaluation", event_key="user_thumbs_down",
+            mood_hint="concerned", intensity_hint=0.4,
+            note=f"用户点踩：{reason or '无原因'}")
 
 
 @router.post("/chat/session/rename")

@@ -253,7 +253,8 @@ class Retriever:
         chosen_ids: list[str]
         if llm_available and self.llm_refine_fn:
             try:
-                refine_timeout = self.config.get("retrieval_refine_timeout_seconds", 10)
+                refine_timeout = self.config.get(
+                    "retrieval_refine_timeout_seconds", 10)
                 chosen_ids = await asyncio.wait_for(
                     self.llm_refine_fn(
                         query, [{"id": c.memory_id, "title": c.title,

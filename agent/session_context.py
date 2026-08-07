@@ -104,6 +104,13 @@ class SessionStore:
             conn.execute("DELETE FROM sessions WHERE session_id=?", (sid,))
             conn.execute(
                 "DELETE FROM platform_sessions WHERE session_id=?", (sid,))
+            # 关联数据一并清理，避免残留：引用事件 / 回顾候选 / token 用量
+            conn.execute(
+                "DELETE FROM citation_events WHERE session_id=?", (sid,))
+            conn.execute(
+                "DELETE FROM review_candidates WHERE session_id=?", (sid,))
+            conn.execute(
+                "DELETE FROM token_usage WHERE session_id=?", (sid,))
         summary = self.data_dir / "sessions" / f"{sid}.md"
         if summary.exists():
             summary.unlink()

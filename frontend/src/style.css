@@ -97,6 +97,25 @@
     --diagram-radius: var(--radius-xs);
     --diagram-terminal-radius: 23px;
     --diagram-node-shadow: var(--shadow-1);
+
+    /* Mermaid 主题映射（供 MermaidChart.vue getComputedStyle 读取，从既有色板派生） */
+    --mc-bg:              transparent;
+    --mc-main-bkg:        var(--surface);
+    --mc-secondary-color: var(--surface-2);
+    --mc-tertiary-color:  var(--surface-3);
+    --mc-primary-color:   var(--brand-soft);
+    --mc-primary-border:  var(--brand-tx);
+    --mc-primary-text:    var(--fg);
+    --mc-secondary-border: var(--bd-strong);
+    --mc-secondary-text:  var(--sec);
+    --mc-tertiary-border: var(--bd);
+    --mc-tertiary-text:   var(--muted);
+    --mc-line-color:      var(--muted);
+    --mc-edge-label-bg:   var(--surface);
+    --mc-node-border:     var(--brand-tx);
+    --mc-cluster-bkg:     var(--surface-2);
+    --mc-cluster-border:  var(--bd-strong);
+    --mc-title-color:     var(--brand-tx);
 }
 
 @media(prefers-color-scheme:dark) {
@@ -125,6 +144,24 @@
         --shadow-2: 0 8px 28px rgba(0, 0, 0, .45);
         /* 图形能力暗色覆盖 */
         --diagram-decision-fill: #2c2410;
+
+        /* Mermaid 暗色覆盖 */
+        --mc-main-bkg:        var(--surface);
+        --mc-secondary-color: var(--surface-2);
+        --mc-tertiary-color:  var(--surface-3);
+        --mc-primary-color:   var(--brand-soft);
+        --mc-primary-border:  var(--brand-tx);
+        --mc-primary-text:    var(--fg);
+        --mc-secondary-border: var(--bd-strong);
+        --mc-secondary-text:  var(--sec);
+        --mc-tertiary-border: var(--bd);
+        --mc-tertiary-text:   var(--muted);
+        --mc-line-color:      var(--muted);
+        --mc-edge-label-bg:   var(--surface);
+        --mc-node-border:     var(--brand-tx);
+        --mc-cluster-bkg:     var(--surface-2);
+        --mc-cluster-border:  var(--bd-strong);
+        --mc-title-color:     var(--brand-tx);
     }
 }
 

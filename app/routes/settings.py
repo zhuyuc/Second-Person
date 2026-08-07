@@ -784,11 +784,13 @@ def _weixin_qrcode_png(content: str) -> str:
         import base64 as _b64
         import io
         import qrcode
-        qr = qrcode.QRCode(border=2, box_size=10, error_correction=qrcode.constants.ERROR_CORRECT_M)
+        qr = qrcode.QRCode(border=2, box_size=10,
+                           error_correction=qrcode.constants.ERROR_CORRECT_M)
         qr.add_data(content)
         qr.make(fit=True)
         buf = io.BytesIO()
-        qr.make_image(fill_color="black", back_color="white").save(buf, format="PNG")
+        qr.make_image(fill_color="black", back_color="white").save(
+            buf, format="PNG")
         return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
     except Exception as e:  # noqa: BLE001 - 二维码生成失败不阻断绑定流程
         print(f"[weixin] 二维码生成失败（前端将显示链接兜底）：{e}")
@@ -972,7 +974,7 @@ async def list_tasks():
         # 夜间维护链（每天 02:00 链首，后续由前驱完成事件驱动）
         "auto_backup": f"夜间维护链链首 · 每天 02:00 · 保留最近 {backup_keep} 份",
         "dedup_cleanup": "夜间维护链 · 备份完成后触发 · 清理 24h 前去重记录",
-        "temp_cleanup": "夜间维护链 · 清理 7 天前临时附件",
+        "temp_cleanup": "夜间维护链 · 清理 7 天前聊天渠道收到的临时文件缓存（图片已自动保存的不受影响）",
         "log_cleanup": f"夜间维护链 · 任务日志保 1 个月/操作日志 90 天/signal {sig_keep} 天",
         "conflict_cleanup": "夜间维护链 · 清理 30 天前已解决矛盾",
         "failed_rescan": "夜间维护链 · 重扫 failed 写入并重试",

@@ -40,7 +40,30 @@ MOOD_CN = {
     "tired": "疲惫", "eager": "渴望", "determined": "坚定",
     "playful": "玩味", "sarcastic": "嘲讽", "calm": "沉稳",
     "composed": "沉着", "humble": "谦逊", "concerned": "关切",
+    # v2 新增（双向情绪系统：归因/传染/平复用标签）
+    "indignant": "愤慨", "hurt": "受伤", "remorseful": "懊悔",
+    "apologetic": "歉意", "defensive": "防御", "self_critical": "自责",
+    "peaceful": "安宁", "wary": "警觉",
 }
+
+
+# v2 情绪分类常量（传染算法 + 平复事件 + 主动行为判定用）
+NEGATIVE_MOODS = {"angry", "irritated", "frustrated", "indignant", "hurt",
+                   "sad", "melancholy", "anxious", "ashamed", "defensive",
+                   "remorseful", "apologetic", "self_critical", "fearful",
+                   "disgusted", "disdainful", "guilty", "lonely", "bored",
+                   "tired", "confused", "wary"}
+
+POSITIVE_MOODS = {"joy", "pleased", "excited", "warm", "grateful", "proud",
+                   "affectionate", "curious", "eager", "relieved", "hopeful",
+                   "determined", "playful", "calm", "composed", "trusting",
+                   "caring", "compassionate", "aspiring", "competitive",
+                   "humble", "peaceful"}
+
+# 对立面情绪：归因 other 时对方负面不传染（对方觉得是你的问题，
+# 不会让你也同样愤怒），己方独立走防御路径
+CONTAGION_BLOCKED_MOODS = {"angry", "irritated", "frustrated", "indignant",
+                           "disgusted", "disdainful"}
 
 
 def _mood_cn(label: str) -> str:
@@ -59,74 +82,218 @@ class MoodManager:
 
     # ---- 读取与注入 --------------------------------------------------------
     def build_hint(self) -> str:
-        """生成情绪注入段（system prompt 追加用）。
+        """生成情绪注入段（system prompt 追加用）v2。
 
-        收敛式理解优化方案 §3.1：情绪永远在场。即使 neutral/低强度也返回
-        轻量提示，强度决定浓淡——不再用空串做"跳过情绪"的开关。
+        - strength 调制：根据 mood_influence_strength 调整注入浓度
+        - baseline 风味：即使 neutral 也根据历史关系给出有温度的基线描述
+        - attribution 提示：告知 AI 当前情绪来源（self/other/shared）
         """
         if not self.config.get("mood_enabled", True):
             return ""
-        if self.config.get("mood_influence_strength", 0.5) <= 0:
+        strength = float(self.config.get("mood_influence_strength", 0.5))
+        if strength <= 0:
             return ""
         row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
         if not row:
             return ""
-        kwargs: dict[str, object] = {}
-        any_active = False
+
+        kwargs: dict[str, object] = {"strength_hint": self._strength_hint(strength)}
         for scope in ("user", "ai"):
             mood = row[f"{scope}_mood"]
-            intensity = self._decay(row[f"{scope}_intensity"],
-                                    row[f"{scope}_updated_at"])
-            if mood != "neutral" and intensity > DECAY_FLOOR:
+            raw_intensity = self._decay(
+                row[f"{scope}_intensity"], row[f"{scope}_updated_at"])
+            adjusted = raw_intensity * strength
+            if mood != "neutral" and adjusted > DECAY_FLOOR:
                 kwargs[f"{scope}_mood"] = _mood_cn(mood)
-                kwargs[f"{scope}_intensity"] = round(intensity, 2)
+                kwargs[f"{scope}_intensity"] = round(adjusted, 2)
                 kwargs[f"{scope}_time_hint"] = self._time_hint(
                     row[f"{scope}_updated_at"])
-                any_active = True
             else:
-                # 收敛式优化：低强度时仍注入"平静"标签，保证情绪始终在场
-                kwargs[f"{scope}_mood"] = "平静"
+                kwargs[f"{scope}_mood"] = self._baseline_flavor(scope)
                 kwargs[f"{scope}_intensity"] = 0
                 kwargs[f"{scope}_time_hint"] = ""
-        # 即使双方都是"平静"也返回注入段（低强度轻调制），不再返回空串跳过
+
+        kwargs["ai_attribution_hint"] = self._attribution_hint(
+            row.get("ai_attribution") or "")
         return PROMPTS.render("agent/prompts/mood", **kwargs)
+
+    @staticmethod
+    def _strength_hint(strength: float) -> str:
+        if strength >= 0.8:
+            return "情绪表达可以充分外显"
+        if strength >= 0.4:
+            return "情绪表达适度流露"
+        return "情绪表达轻微暗示即可"
+
+    @staticmethod
+    def _attribution_hint(attribution: str) -> str:
+        return {
+            "self": "本次情绪主要来自你对自己表现的评估",
+            "other": "本次情绪主要来自对用户当前行为的感受",
+            "shared": "本次情绪来自双方互动过程",
+        }.get(attribution, "")
+
+    def _baseline_flavor(self, scope: str) -> str:
+        """根据历史情绪记录给出有温度的基线描述。"""
+        warm_count = self.db.query_one(
+            "SELECT count(*) c FROM mood_history "
+            "WHERE scope=? AND mood IN ('warm','affectionate','trusting','grateful') "
+            "AND create_time > datetime('now', '-7 days')", (scope,))["c"]
+        if warm_count >= self.config.get("mood_baseline_warm_threshold", 5):
+            return "平静但有暖意"
+        curious_count = self.db.query_one(
+            "SELECT count(*) c FROM mood_history "
+            "WHERE scope=? AND mood IN ('curious','eager','aspiring') "
+            "AND create_time > datetime('now', '-1 days')", (scope,))["c"]
+        if curious_count >= self.config.get("mood_baseline_curious_threshold", 2):
+            return "平静而好奇"
+        return "平静"
 
     # ---- 更新（融合 + 落库 + 留痕） ----------------------------------------
     def apply(self, user_res: dict, ai_res: dict) -> dict:
-        """应用一轮情感判定结果。返回 {scope}_changed/{scope}_mood/... 供事件广播。"""
+        """v1 兼容入口：委托 v2，归因默认 none，无平复事件。
+        现有调用点无需修改，_update_mood v2 直接调用 apply_v2 获得完整能力。"""
+        return self.apply_v2(
+            user_res={**user_res, "attribution": user_res.get("attribution", "none")},
+            ai_res={**ai_res, "attribution": ai_res.get("attribution", "none")},
+            peace_event="none",
+        )
+
+    def apply_v2(self, user_res: dict, ai_res: dict,
+                 peace_event: str = "none") -> dict:
+        """v2 情绪应用：融合 → 传染 → 平复事件 → 落库。
+        返回 {scope}_changed/{scope}_mood/{scope}_intensity/{scope}_attribution
+        + peace_event_applied。"""
         self._ensure_row()
         row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
         now = now_cst().isoformat(timespec="seconds")
-        out: dict = {"user_changed": False, "ai_changed": False}
+
+        new_moods = {}
         for scope, res in (("user", user_res), ("ai", ai_res)):
             fresh_mood = str(res.get("mood") or "neutral").strip() or "neutral"
             fresh_intensity = _clamp01(float(res.get("intensity") or 0.0))
             confidence = _clamp01(float(res.get("confidence") or 0.0))
             old_mood = row[f"{scope}_mood"]
-            old_intensity = self._decay(row[f"{scope}_intensity"],
-                                        row[f"{scope}_updated_at"])
+            old_intensity = self._decay(
+                row[f"{scope}_intensity"], row[f"{scope}_updated_at"])
             if old_intensity < DECAY_FLOOR:
                 old_mood, old_intensity = "neutral", 0.0
             new_mood, new_intensity = self._fuse(
                 old_mood, old_intensity, fresh_mood, fresh_intensity,
                 confidence, row[f"{scope}_updated_at"])
-            changed = new_mood != old_mood \
-                or abs(new_intensity - old_intensity) > 0.01
+            new_moods[scope] = {
+                "mood": new_mood, "intensity": new_intensity,
+                "attribution": res.get("attribution", "none"),
+                "confidence": confidence, "note": res.get("note", ""),
+            }
+
+        # 传染
+        contagion_factor = self.config.get("mood_contagion_factor", 0.25)
+        new_moods = self._apply_contagion(new_moods, contagion_factor)
+
+        # 平复事件
+        peace_applied = False
+        if peace_event != "none":
+            new_moods = self._apply_peace_event(new_moods, peace_event)
+            peace_applied = True
+            self.db.execute(
+                "UPDATE mood_state SET last_peace_event_at=? WHERE id=1", (now,))
+
+        # 落库
+        out = {"user_changed": False, "ai_changed": False,
+               "peace_event_applied": peace_applied}
+        for scope in ("user", "ai"):
+            nm = new_moods[scope]
+            old_mood = row[f"{scope}_mood"]
+            changed = (nm["mood"] != old_mood
+                       or abs(nm["intensity"] - row[f"{scope}_intensity"]) > 0.01)
             self.db.execute(
                 f"UPDATE mood_state SET {scope}_mood=?, {scope}_intensity=?, "
-                f"{scope}_updated_at=?, {scope}_source=? WHERE id=1",
-                (new_mood, round(new_intensity, 4), now,
-                 "analysis" if fresh_intensity > 0 else "decay"))
+                f"{scope}_updated_at=?, {scope}_source=?, {scope}_attribution=? "
+                f"WHERE id=1",
+                (nm["mood"], round(nm["intensity"], 4), now,
+                 "analysis" if nm.get("confidence", 0) > 0 else "decay",
+                 nm["attribution"]))
             if changed:
                 self.db.execute(
                     "INSERT INTO mood_history(scope,mood,intensity,source,"
                     "note,create_time) VALUES(?,?,?,?,?,?)",
-                    (scope, new_mood, round(new_intensity, 4), "analysis",
-                     str(res.get("note") or "")[:200], now))
+                    (scope, nm["mood"], round(nm["intensity"], 4), "analysis",
+                     f"attr={nm['attribution']};peace={peace_event};{nm.get('note','')[:120]}",
+                     now))
             out[f"{scope}_changed"] = changed
-            out[f"{scope}_mood"] = new_mood
-            out[f"{scope}_intensity"] = round(new_intensity, 4)
+            out[f"{scope}_mood"] = nm["mood"]
+            out[f"{scope}_intensity"] = round(nm["intensity"], 4)
+            out[f"{scope}_attribution"] = nm["attribution"]
         return out
+
+    def _apply_contagion(self, new_moods: dict, factor: float) -> dict:
+        """情绪传染规则：
+        - 强度 < 0.4 不传染
+        - 正面/中性：双向传染
+        - 负面 + 归因 self/shared：以关切方式传染
+        - 负面 + 归因 other：不传染（对方觉得是你的问题不会让你也难过）
+        """
+        for from_scope, to_scope in (("user", "ai"), ("ai", "user")):
+            fd, td = new_moods[from_scope], new_moods[to_scope]
+            if fd["intensity"] < 0.4:
+                continue
+            if fd["mood"] in CONTAGION_BLOCKED_MOODS and fd["attribution"] == "other":
+                continue
+            if fd["mood"] in POSITIVE_MOODS:
+                if td["intensity"] < fd["intensity"]:
+                    td["intensity"] = min(1.0,
+                        td["intensity"] + (fd["intensity"] - td["intensity"]) * factor)
+                    if td["mood"] == "neutral":
+                        td["mood"] = fd["mood"]
+            elif fd["mood"] in NEGATIVE_MOODS and fd["attribution"] in ("self", "shared"):
+                if td["mood"] == "neutral" or td["intensity"] < 0.3:
+                    td["mood"] = "compassionate" if to_scope == "ai" else "concerned"
+                    td["intensity"] = min(1.0, fd["intensity"] * factor * 1.5)
+        return new_moods
+
+    def _apply_peace_event(self, new_moods: dict, event: str) -> dict:
+        """平复事件触发快速衰减 + 情绪方向转换。"""
+        decay = self.config.get("peace_event_decay_factor", 0.3)
+        for scope in ("user", "ai"):
+            data = new_moods[scope]
+            if data["mood"] in NEGATIVE_MOODS:
+                data["intensity"] = data["intensity"] * decay
+                if event == "user_apology" and scope == "ai":
+                    data["mood"] = "relieved"
+                elif event == "ai_admission" and scope == "user":
+                    data["mood"] = "relieved"
+                elif event == "mutual_reconciliation":
+                    data["mood"] = "warm"
+                elif event == "task_celebration":
+                    data["mood"] = "pleased" if data["intensity"] > 0.1 else "warm"
+                elif event == "misunderstanding_resolved":
+                    data["mood"] = "relieved"
+        return new_moods
+
+    def natural_decline(self, sid: str) -> None:
+        """连续中性对话触发自然回落：强度额外 × factor。"""
+        recent_triggers = self.db.query_one(
+            "SELECT count(*) c FROM mood_triggers "
+            "WHERE session_id=? AND message_id > "
+            "(SELECT COALESCE(MAX(id)-6, 0) FROM conversations WHERE session_id=?)",
+            (sid, sid))["c"]
+        recent_moods = self.db.query_all(
+            "SELECT scope, mood FROM mood_history "
+            "WHERE create_time > datetime('now', '-30 minutes') "
+            "ORDER BY id DESC LIMIT 6")
+        all_neutral = all(m["mood"] == "neutral" for m in recent_moods)
+        min_turns = self.config.get("natural_decline_min_neutral_turns", 3)
+        factor = self.config.get("natural_decline_factor", 0.7)
+        if recent_triggers == 0 and all_neutral and len(recent_moods) >= min_turns:
+            row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
+            for scope in ("user", "ai"):
+                intensity = self._decay(
+                    row[f"{scope}_intensity"], row[f"{scope}_updated_at"])
+                new_intensity = intensity * factor
+                self.db.execute(
+                    f"UPDATE mood_state SET {scope}_intensity=? WHERE id=1",
+                    (round(new_intensity, 4),))
 
     def reset(self, scope: str | None = None) -> None:
         """重置指定（'user'/'ai'）或全部情绪回 neutral 基线。"""

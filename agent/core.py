@@ -13,6 +13,7 @@ import logging
 import re
 import time
 from collections import defaultdict
+from datetime import datetime
 from typing import Any, AsyncIterator
 
 from infrastructure.llm_provider import CircuitOpenError, estimate_tokens
@@ -104,8 +105,18 @@ def _strip_attachment_context(text: str) -> str:
 
 
 def _strip_mood_section(system_prompt: str) -> str:
-    """剥离 system prompt 中的情绪注入段（纯导出等结构化输出场景用）。
-    以 mood.md 的段首标记定位，删到下一段或结尾，保留其余内容。"""
+    """剥离 system prompt 中的情绪注入段与主动行为段（纯导出等结构化输出场景用）。
+    以 mood.md 的段首标记定位，删到下一段或结尾；同步剥离主动行为段。"""
+    # 先剥离主动行为段（如果存在）
+    action_marker = "【本轮主动行为："
+    idx = system_prompt.find(action_marker)
+    if idx >= 0:
+        end = system_prompt.find("\n\n", idx + len(action_marker))
+        if end < 0:
+            end = len(system_prompt)
+        system_prompt = system_prompt[:idx].rstrip() + system_prompt[end:]
+
+    # 再剥离情绪注入段
     marker = "## 当前情绪状态"
     idx = system_prompt.find(marker)
     if idx < 0:
@@ -141,7 +152,8 @@ class AgentCore:
                  profile_manager, retriever, tool_registry, tool_executor,
                  lifecycle, signal_collector, llm_client, provider_registry,
                  file_writer, skill_manager, event_bus=None, notifier=None,
-                 mood_manager=None):
+                 mood_manager=None, mood_trigger=None,
+                 mood_action_dispatcher=None):
         self.db = db
         self.config = config
         self.sessions = session_store
@@ -161,6 +173,10 @@ class AgentCore:
         self.notify = notifier or (lambda t, m: None)
         # 情绪模块（双源：用户情绪 + AI 自身情绪）；None 表示未启用
         self.mood = mood_manager
+        # v2 情绪触发采集器（规则通道）
+        self.mood_trigger = mood_trigger
+        # v2 主动行为调度器
+        self.mood_action_dispatcher = mood_action_dispatcher
         # 图片入库回调（container 在 ingest 就绪后接入）：async fn(images: list[dataURL])
         self.image_kb_fn = None
         self.intent_parser = IntentParser(
@@ -290,6 +306,9 @@ class AgentCore:
         user_msg_id = self.sessions.append_message(
             sid, "user", message, images=persisted_imgs)
 
+        # v2 情绪触发检测（规则通道，零 LLM）：在意图识别前采集本轮触发事件
+        self._detect_emotion_triggers(sid, message, user_msg_id)
+
         # 输入预处理：检测 URL → web_fetch 预加载（失败不中断本轮，作为附加上下文注入）
         preload_text = ""
         if not onboarding:
@@ -305,7 +324,8 @@ class AgentCore:
             "head_protected_rounds": head_rounds,
         })
         try:
-            system_prompt = self._build_system_prompt(onboarding, location)
+            system_prompt = self._build_system_prompt(
+                onboarding, location, sid)
             history = self.sessions.load_recovery_context(sid, head_rounds)
             # 当前用户消息已提前落库：从历史中剔除，避免与 prompt 尾部重复拼接
             history = [m for m in history if m.get("id") != user_msg_id]
@@ -631,7 +651,7 @@ class AgentCore:
         doc_only = bool(shared.deferred_docs)
         _sp = tracer.span_start("response_synthesis", input={
             "history_rounds": len(history),
-            "est_tokens": est,
+            "raw_rounds": raw_rounds,
             "memories_count": len(memories),
             "tool_results_count": len(tool_results),
             "memory_titles": [m["title"] for m in memories[:20]],
@@ -887,6 +907,23 @@ class AgentCore:
                                "model_id": _model_id})
 
         await emit("turn_completed", {"message_id": msg_id})
+
+        # v2 情绪快照推送：前端通过 SSE 实时更新情绪徽标（无需轮询）
+        if self.mood and self.config.get("mood_enabled", True):
+            try:
+                row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
+                if row:
+                    from soul.mood_manager import _mood_cn
+                    await emit("mood_updated", {
+                        "ai_mood": row["ai_mood"],
+                        "ai_mood_cn": _mood_cn(row["ai_mood"]),
+                        "ai_intensity": round(self.mood._decay(
+                            row["ai_intensity"], row["ai_updated_at"]), 2),
+                        "ai_attribution": row.get("ai_attribution", ""),
+                        "ai_active_action": row.get("active_action", ""),
+                    })
+            except Exception:  # noqa: BLE001
+                pass  # 静默降级，不影响对话
 
     async def _image_kb_task(self, images) -> None:
         """后台静默将当轮图片存入知识库（fire-and-forget，失败不影响对话）。"""
@@ -1370,7 +1407,8 @@ class AgentCore:
             # 把 pinned 区约束并入摘要 S0（去重），保证压缩后约束不丢
             pinned_raw = self.ctx_entry.read_consciousness_hint()
             if pinned_raw:
-                pinned_list = [c.strip() for c in pinned_raw.split("；") if c.strip()]
+                pinned_list = [c.strip()
+                               for c in pinned_raw.split("；") if c.strip()]
                 s0 = summary.setdefault("S0_constraints", [])
                 for pc in pinned_list:
                     if pc not in s0:
@@ -1733,9 +1771,97 @@ class AgentCore:
                     return True
         return False
 
+    # ---- 情绪触发检测 v2（规则通道，零 LLM） -------------------------------
+    def _detect_emotion_triggers(self, sid: str, message: str,
+                                 message_id: int | None) -> None:
+        """每轮消息接收后统一入口：调用全部规则触发检测器。"""
+        if not self.mood_trigger:
+            return
+        self._detect_task_repeat(sid, message, message_id)
+        self._detect_temporal_triggers(sid, message_id)
+
+    def _detect_task_repeat(self, sid: str, message: str,
+                            message_id: int | None) -> None:
+        """检测任务重复失败：用户连续否定表达 + 连续被踩。
+        阈值和窗口均从 config 读取，不再硬编码。"""
+        keywords = ["不对", "不行", "还是不", "重新", "再改", "不是这样",
+                    "错了", "不是我要的", "还不行"]
+        hit = any(k in message for k in keywords)
+        if not hit:
+            return
+
+        window = self.config.get("mood_task_repeat_window", 20)
+        threshold = self.config.get("mood_task_repeat_threshold", 3)
+
+        recent_downvote = self.db.query_one(
+            "SELECT count(*) c FROM conversations "
+            "WHERE session_id=? AND role='assistant' AND feedback=2 AND id > "
+            "(SELECT COALESCE(MAX(id)-?, 0) FROM conversations WHERE session_id=?)",
+            (sid, window, sid))["c"]
+
+        recent_negative = self.db.query_one(
+            "SELECT count(*) c FROM conversations "
+            "WHERE session_id=? AND role='user' AND id > "
+            "(SELECT COALESCE(MAX(id)-?, 0) FROM conversations WHERE session_id=?) "
+            "AND (content LIKE '%不对%' OR content LIKE '%不行%' "
+            "     OR content LIKE '%还是不%' OR content LIKE '%重新%')",
+            (sid, window // 2, sid))["c"]
+
+        if recent_negative >= threshold or recent_downvote >= max(2, threshold - 1):
+            self.mood_trigger.record(
+                session_id=sid, message_id=message_id,
+                scope="user", source_type="task", event_key="task_repeat_fail",
+                mood_hint="frustrated", intensity_hint=0.5,
+                note=f"近期否定表达 {recent_negative} 次，被踩 {recent_downvote} 次")
+            self.mood_trigger.record(
+                session_id=sid, message_id=message_id,
+                scope="ai", source_type="task", event_key="task_repeat_fail",
+                mood_hint="anxious", intensity_hint=0.4,
+                note="连续任务未达用户期望")
+
+    def _detect_temporal_triggers(self, sid: str, message_id: int) -> None:
+        """检测时间/节奏型触发：长时间未对话、连续轮数过多、深夜时段。"""
+        from datetime import timedelta
+
+        # 长时间未对话（>24h）→ AI curious
+        last_row = self.db.query_one(
+            "SELECT create_time FROM conversations WHERE session_id=? "
+            "AND id < ? ORDER BY id DESC LIMIT 1", (sid, message_id))
+        if last_row:
+            try:
+                last_dt = datetime.fromisoformat(last_row["create_time"])
+                elapsed = now_cst() - last_dt
+                if elapsed > timedelta(hours=24):
+                    self.mood_trigger.record(
+                        sid, message_id, "ai", "temporal",
+                        "long_absence_return", "none", "curious", 0.3,
+                        f"上次对话 {int(elapsed.total_seconds() // 3600)} 小时前")
+            except (ValueError, TypeError):
+                pass
+
+        # 连续轮数过多（≥15）→ AI tired
+        consecutive = self.db.query_one(
+            "SELECT count(*) c FROM conversations WHERE session_id=? AND role='user'",
+            (sid,))["c"]
+        threshold_tired = self.config.get("mood_consecutive_turns_tired", 15)
+        if consecutive >= threshold_tired:
+            self.mood_trigger.record(
+                sid, message_id, "ai", "temporal",
+                "consecutive_turns_tired", "shared", "tired", 0.3,
+                f"本 session 连续 {consecutive} 轮")
+
+        # 深夜时段（22:00-02:00）→ AI warm
+        hour = now_cst().hour
+        if 22 <= hour or hour < 2:
+            self.mood_trigger.record(
+                sid, message_id, "ai", "temporal",
+                "late_night_conversation", "none", "warm", 0.2,
+                f"深夜时段（{hour}:00）")
+
     # ---- prompt 构建 ------------------------------------------------------
-    def _build_system_prompt(self, onboarding: bool, location: str | None = None) -> str:
-        # 当前时间（北京时间），让模型始终知晓“现在”
+    def _build_system_prompt(self, onboarding: bool, location: str | None = None,
+                             sid: str = "") -> str:
+        # 当前时间（北京时间），让模型始终知晓"现在"
         from datetime import datetime
         from zoneinfo import ZoneInfo
         try:
@@ -1776,22 +1902,18 @@ class AgentCore:
                 parts.append(f"可用技能目录（需要时可展开）：\n{skill_index}")
         except Exception:  # noqa: BLE001
             pass
-        # pending_soul_update：本轮需主动询问用户确认（路径 1）
-        pendings = self.ctx_entry.list_pending()
-        if pendings:
-            asks = "；".join(p.get("proposed_change", "") for p in pendings[:2])
-            parts.append(f"（本轮请自然地向用户确认以下风格调整：{asks}）")
-        else:
-            # low 待确认记忆：与 soul 询问共用槽位，soul 优先，每轮最多问一条
-            cand = self.lifecycle.next_low_confirm_candidate()
-            if cand:
-                self.lifecycle.mark_low_confirm_asked(cand["id"])
-                parts.append(
-                    f"（本轮回复末尾请自然地向用户确认一条早前的推断是否属实："
-                    f"「{cand['title']}——{cand.get('summary') or ''}」。"
-                    f"若用户在本轮消息中已明确表态，则在回复最末尾另起一行输出 "
-                    f'{{"memory_confirm":{{"id":"{cand["id"]}","confirmed":true或false}}}} '
-                    f"声明；用户未表态则不输出该声明。）")
+        # 画像调整已全部迁移到后台审核队列（profile_review_queue），
+        # AI 不再在对话中主动询问画像变更。
+        # low 待确认记忆：每轮最多追问一条（独立于画像审核机制）
+        cand = self.lifecycle.next_low_confirm_candidate()
+        if cand:
+            self.lifecycle.mark_low_confirm_asked(cand["id"])
+            parts.append(
+                f"（本轮回复末尾请自然地向用户确认一条早前的推断是否属实："
+                f"「{cand['title']}——{cand.get('summary') or ''}」。"
+                f"若用户在本轮消息中已明确表态，则在回复最末尾另起一行输出 "
+                f'{{"memory_confirm":{{"id":"{cand["id"]}","confirmed":true或false}}}} '
+                f"声明；用户未表态则不输出该声明。）")
         # draft 技能待确认：AI 主动向用户提议启用
         try:
             drafts = self.skills.list_drafts()
@@ -1808,12 +1930,66 @@ class AgentCore:
                 mood_hint = self.mood.build_hint()
                 if mood_hint:
                     parts.append(mood_hint)
+
+                # v2 主动行为评估：根据情绪状态 + 对话上下文决定是否注入行为指令
+                if self.mood_action_dispatcher:
+                    state_row = self.db.query_one(
+                        "SELECT * FROM mood_state WHERE id=1")
+                    if state_row:
+                        state = {
+                            "user_mood": state_row["user_mood"],
+                            "user_intensity": self.mood._decay(
+                                state_row["user_intensity"],
+                                state_row["user_updated_at"]),
+                            "user_attribution": state_row.get("user_attribution", ""),
+                            "ai_mood": state_row["ai_mood"],
+                            "ai_intensity": self.mood._decay(
+                                state_row["ai_intensity"],
+                                state_row["ai_updated_at"]),
+                            "ai_attribution": state_row.get("ai_attribution", ""),
+                        }
+                        action_ctx = self._build_action_ctx(sid)
+                        action_key, action_prompt = \
+                            self.mood_action_dispatcher.evaluate(
+                                state, action_ctx)
+                        if action_prompt:
+                            parts.append(action_prompt)
+                            self.db.execute(
+                                "UPDATE mood_state SET active_action=? WHERE id=1",
+                                (action_key,))
             except Exception:  # noqa: BLE001
                 logger.warning("情绪注入失败（静默跳过）", exc_info=True)
         # 思考过程中文化：模型原生推理默认偏英文，末尾再次强调（首尾呼应，双保险）
         parts.append("再次强调：思考过程（包括模型原生推理）与回复正文必须使用中文，"
                      "仅代码、变量名、API 名称、专有名词与通用术语可保留英文原文。")
         return "\n\n".join(parts)
+
+    def _build_action_ctx(self, sid: str) -> dict:
+        """构建主动行为评估所需的对话上下文指标。"""
+        window = self.config.get("mood_task_repeat_window", 20)
+        task_repeat = self.db.query_one(
+            "SELECT count(*) c FROM conversations "
+            "WHERE session_id=? AND role='user' AND id > "
+            "(SELECT COALESCE(MAX(id)-?, 0) FROM conversations WHERE session_id=?) "
+            "AND (content LIKE '%不对%' OR content LIKE '%不行%' "
+            "     OR content LIKE '%还是不%' OR content LIKE '%重新%')",
+            (sid, window, sid))["c"]
+
+        consecutive = self.db.query_one(
+            "SELECT count(*) c FROM conversations WHERE session_id=? AND role='user'",
+            (sid,))["c"]
+
+        last_up = self.db.query_one(
+            "SELECT feedback FROM conversations "
+            "WHERE session_id=? AND role='assistant' "
+            "ORDER BY id DESC LIMIT 1", (sid,))
+        just_completed = last_up and last_up.get("feedback") == 1
+
+        return {
+            "task_repeat_count": task_repeat,
+            "consecutive_turns": consecutive,
+            "just_completed_task": 1 if just_completed else 0,
+        }
 
     def _build_final_prompt(self, system_prompt, history, message, tool_results,
                             memories, onboarding, skill_text="", preload_text=""):
@@ -1859,7 +2035,8 @@ class AgentCore:
             msg_id, shape, context_label=self._context_label(intents, message))
         # 主动记忆检测：未识别 remember_intent 但含明确新事实 → 被动回顾候选
         try:
-            self._mark_review_candidate(sid, user_msg_id or msg_id, message, intents)
+            self._mark_review_candidate(
+                sid, user_msg_id or msg_id, message, intents)
         except Exception:  # noqa: BLE001
             logger.warning("回顾候选标记失败", exc_info=True)
 
@@ -1894,44 +2071,127 @@ class AgentCore:
                 and self.config.get("mood_influence_strength", 0.5) > 0:
             try:
                 self._mood_task = asyncio.create_task(
-                    self._update_mood(sid, message, content))
+                    self._update_mood(sid, message, content, message_id=user_msg_id))
             except Exception:  # noqa: BLE001
                 logger.warning("情绪更新任务创建失败（静默跳过）", exc_info=True)
+            # v2 自然回落：fire-and-forget 异步调度，静默降级
+            if self.mood:
+                try:
+                    asyncio.create_task(self._natural_decline_task(sid))
+                except Exception:  # noqa: BLE001
+                    pass
         if self.bus:
             from infrastructure.event_bus import EVT_TURN_COMPLETED
             await self.bus.publish(EVT_TURN_COMPLETED, {"session_id": sid})
         return shape
 
-    async def _update_mood(self, sid: str, user_msg: str, ai_reply: str) -> None:
-        """turn 后异步情绪判定：LLM 一次调用双输出 → 融合落库 → 发事件。
+    async def _update_mood(self, sid: str, user_msg: str, ai_reply: str,
+                           message_id: int | None = None) -> None:
+        """turn 后异步情绪判定 v2：规则触发摘要 + 近轮历史 →
+        mood_judge_v2 LLM 判定（走 DeepSeek-V4-Flash mood 槽位）→
+        apply_v2 融合/传染/平复落库 → 发事件。
         全异常捕获静默降级（模型不可用/解析失败仅跳过本轮，不阻断任何流程）。"""
+        if not self._should_judge_mood(user_msg):
+            return
         try:
-            snap = self.providers.snapshot_for("convergence")
+            snap = self.providers.snapshot_for("mood")
             if snap is None:
                 return
             from infrastructure.json_repair import repair_json
+
+            rule_summary = ""
+            if self.mood_trigger and message_id:
+                rule_summary = self.mood_trigger.summarize_for_turn(
+                    sid, message_id)
+
+            recent_history = self._format_recent_history(sid, limit=5)
+
+            state = self.db.query_one(
+                "SELECT * FROM mood_state WHERE id=1") or {}
+            prev_user = state.get("user_mood", "neutral")
+            prev_user_i = self.mood._decay(
+                state.get("user_intensity", 0), state.get("user_updated_at"))
+            prev_ai = state.get("ai_mood", "neutral")
+            prev_ai_i = self.mood._decay(
+                state.get("ai_intensity", 0), state.get("ai_updated_at"))
+
             prompt = [{"role": "system", "content": PROMPTS.render(
-                "agent/prompts/mood_judge",
+                "agent/prompts/mood_judge_v2",
+                rule_triggers_summary=rule_summary,
+                prev_user_mood=prev_user, prev_user_intensity=round(
+                    prev_user_i, 2),
+                prev_ai_mood=prev_ai, prev_ai_intensity=round(prev_ai_i, 2),
+                recent_history=recent_history,
                 user_message=str(user_msg or "")[:800],
                 assistant_reply=str(ai_reply or "")[:800])}]
-            resp = await self.llm.chat(snap, prompt, source="mood",
-                                       session_id=sid)
+
+            resp = await self.llm.chat(snap, prompt, source="mood", session_id=sid)
             data = repair_json(resp["content"]) or {}
-            result = self.mood.apply(
-                {"mood": str(data.get("user_mood") or "neutral"),
-                 "intensity": float(data.get("user_intensity") or 0.0),
-                 "confidence": float(data.get("confidence") or 0.0),
-                 "note": data.get("note")},
-                {"mood": str(data.get("ai_mood") or "neutral"),
-                 "intensity": float(data.get("ai_intensity") or 0.0),
-                 "confidence": float(data.get("confidence") or 0.0),
-                 "note": data.get("note")})
-            if self.bus and (result.get("user_changed")
-                             or result.get("ai_changed")):
+
+            result = self.mood.apply_v2(
+                user_res={
+                    "mood": data.get("user_mood") or "neutral",
+                    "intensity": float(data.get("user_intensity") or 0.0),
+                    "attribution": data.get("user_attribution") or "none",
+                    "confidence": float(data.get("confidence") or 0.0),
+                    "note": data.get("note"),
+                },
+                ai_res={
+                    "mood": data.get("ai_mood") or "neutral",
+                    "intensity": float(data.get("ai_intensity") or 0.0),
+                    "attribution": data.get("ai_attribution") or "none",
+                    "confidence": float(data.get("confidence") or 0.0),
+                    "note": data.get("note"),
+                },
+                peace_event=data.get("peace_event") or "none",
+            )
+
+            if self.bus and (result.get("user_changed") or result.get("ai_changed")
+                             or result.get("peace_event_applied")):
                 from infrastructure.event_bus import EVT_MOOD_UPDATED
                 self.bus.publish_nowait(EVT_MOOD_UPDATED, result)
+
         except Exception:  # noqa: BLE001
             logger.warning("情绪更新失败（静默降级）", exc_info=True)
+
+    def _should_judge_mood(self, user_msg: str) -> bool:
+        """判定成本控制：消息过短或距上次判定太近时跳过 LLM 调用。"""
+        min_chars = self.config.get("mood_judge_min_msg_chars", 4)
+        if len(user_msg or "") < min_chars:
+            return False
+
+        min_interval = self.config.get("mood_judge_min_interval_sec", 30)
+        row = self.db.query_one(
+            "SELECT user_updated_at FROM mood_state WHERE id=1")
+        if row and row.get("user_updated_at"):
+            try:
+                last_dt = datetime.fromisoformat(row["user_updated_at"])
+                elapsed = (now_cst() - last_dt).total_seconds()
+                if elapsed < min_interval:
+                    return False
+            except (ValueError, TypeError):
+                pass
+        return True
+
+    def _format_recent_history(self, sid: str, limit: int = 5) -> str:
+        """取最近 N 轮对话，格式化为 mood_judge_v2 参考文本。"""
+        rows = self.db.query_all(
+            "SELECT role, content FROM conversations "
+            "WHERE session_id=? AND message_type='normal' "
+            "ORDER BY id DESC LIMIT ?", (sid, limit * 2))
+        lines = []
+        for r in reversed(rows):
+            role = "用户" if r["role"] == "user" else "助手"
+            content = str(r["content"] or "")[:200]
+            lines.append(f"[{role}] {content}")
+        return "\n".join(lines) or "（无历史）"
+
+    async def _natural_decline_task(self, sid: str) -> None:
+        """自然回落异步任务：fire-and-forget，静默降级。"""
+        try:
+            self.mood.natural_decline(sid)
+        except Exception:  # noqa: BLE001
+            logger.warning("自然回落失败", exc_info=True)
 
     @staticmethod
     def _context_label(intents, message: str) -> str:

@@ -155,6 +155,11 @@ class TaskScheduler:
                                       "skipped", "03:00 链首未启动/失败，本轮整链跳过",
                                       "schedule")
                         self._mark_ran("fallback_check_marker")
+                # 画像审核队列维护 04:30（清理过期 + 通知）
+                if now.hour == 4 and 30 <= now.minute < 35:
+                    if not self._ran_today("profile_review_scan_marker"):
+                        await self.run_task("profile_review_scan")
+                        self._mark_ran("profile_review_scan_marker")
             except Exception:  # noqa: BLE001
                 logger.exception("调度循环异常")
             await asyncio.sleep(60)

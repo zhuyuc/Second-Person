@@ -408,7 +408,7 @@ function finishStream(msgId) {
   const sameSession = streamSid.value === sessStore.currentSid
   if (streamText.value && sameSession) {
     const m = {
-      id: msgId, role: 'assistant', content: stripTail(streamText.value),
+      id: msgId, role: 'assistant', content: stripTail(streamText.value, streamVisuals.value),
       citations: lastCitations, feedback: 0,
       thinking: thinkText.value || '', thinkOpen: false,
       visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
@@ -534,7 +534,7 @@ const LIFE_MAP = { active: '活跃', stable: '稳定', stale: '过期', archived
 async function openMemory(id) {
   try { memDetail.value = await api.get('/memory/detail?id=' + id) } catch { /* api 层已提示 */ }
 }
-function stripTail(t) {
+function stripTail(t, visuals) {
   // 剔除模型在正文末尾泄漏的 {"citations":[...]} / {"memory_confirm":...} JSON 声明
   let s = (t || '').replace(/\s*\{\s*"citations"\s*:\s*\[[^\]]*\]\s*\}\s*/g, '\n')
   s = s.replace(/\s*\{\s*"memory_confirm"\s*:\s*\{[^}]*\}\s*\}\s*/g, '\n')
@@ -546,13 +546,17 @@ function stripTail(t) {
     (_, content) => '\n\n```html\n' + content.trim() + '\n```\n')
   // 剔除 <tool_call>...</tool_call> 块（模型内部工具调用不应展示给用户）
   s = s.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
-  // strip Mermaid blocks (already rendered by tool_visual, prevent marked duplicate)
-  s = s.replace(/```(?:mermaid|flowchart)\s*\n[\s\S]*?\n```/gi, '')
+  // 仅当 tool_visual 已产出图表时才剥离 Mermaid 代码块，避免重复渲染；
+  // 若 visuals 为空（工具未调用/失败），保留原文由 marked → mermaid.run() 兜底
+  const hasVisual = Array.isArray(visuals) && visuals.length > 0
+  if (hasVisual) {
+    s = s.replace(/```(?:mermaid|flowchart)\s*\n[\s\S]*?\n```/gi, '')
+  }
   return s
 }
-function render(md) {
+function render(md, visuals) {
   // 对话内容里的链接统一新标签打开，不在当前界面跳转
-  const html = marked.parse(stripTail(md))
+  const html = marked.parse(stripTail(md, visuals))
     .replace(/<a\s/gi, '<a target="_blank" rel="noopener noreferrer" ')
   return groupSections(html)
 }
@@ -865,7 +869,7 @@ onUnmounted(() => {
                 </div>
                 <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv'+vi"
                   :type="v.type" :data="v.data" />
-                <div class="content" v-html="render(webSrc(m.content).body)"></div>
+                <div class="content" v-html="render(webSrc(m.content).body, m.visuals)"></div>
                 <div v-if="webSrc(m.content).count" class="think-panel" style="margin-top:8px">
                   <div class="think-head" @click="m.srcOpen = !m.srcOpen">
                     <i class="ti ti-world"></i><span>联网来源（{{ webSrc(m.content).count }}）</span>
@@ -915,7 +919,7 @@ onUnmounted(() => {
               <!-- 图形组件 -->
               <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv'+vi"
                 :type="v.type" :data="v.data" />
-              <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body)"></div>
+              <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body, streamVisuals)"></div>
               <div v-if="streamText && webSrc(streamText).count" class="think-panel" style="margin-top:8px">
                 <div class="think-head" @click="streamSrcOpen = !streamSrcOpen">
                   <i class="ti ti-world"></i><span>联网来源（{{ webSrc(streamText).count }}）</span>
