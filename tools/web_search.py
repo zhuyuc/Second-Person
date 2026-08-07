@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import httpx
 
+from infrastructure.http_client import timeout_for
+
 logger = logging.getLogger("second_person.web_search")
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -41,8 +43,9 @@ def _unwrap_ddg(href: str) -> str:
 
 async def _search_bing(query: str, max_results: int, timeout: int) -> list[dict]:
     url = "https://cn.bing.com/search?q=" + quote(query) + "&ensearch=0"
-    tcfg = httpx.Timeout(connect=5.0, read=timeout,
-                         write=timeout, pool=timeout)
+    _web = timeout_for("web")
+    tcfg = httpx.Timeout(connect=_web.connect, read=timeout,
+                         write=timeout, pool=_web.pool)
     async with httpx.AsyncClient(timeout=tcfg, follow_redirects=True, max_redirects=5,
                                  headers={"User-Agent": _UA,
                                           "Accept-Language": "zh-CN,zh;q=0.9"}) as c:
@@ -69,8 +72,9 @@ def _parse_bing(html: str, max_results: int) -> list[dict]:
 
 
 async def _search_ddg(query: str, max_results: int, timeout: int) -> list[dict]:
-    tcfg = httpx.Timeout(connect=5.0, read=timeout,
-                         write=timeout, pool=timeout)
+    _web = timeout_for("web")
+    tcfg = httpx.Timeout(connect=_web.connect, read=timeout,
+                         write=timeout, pool=_web.pool)
     async with httpx.AsyncClient(timeout=tcfg, follow_redirects=True, max_redirects=5,
                                  headers={"User-Agent": _UA}) as c:
         r = await c.post("https://html.duckduckgo.com/html/",

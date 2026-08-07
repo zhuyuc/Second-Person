@@ -27,38 +27,39 @@
 
 | # | 文件 | 用途 | 加载点 | 加载时机 | 变量 | 分类 |
 | --- | ------ | ------ | -------- | ---------- | ------ | ------ |
-| 1 | agent/prompts/intent_system.md | 意图识别 system | agent/intent_parser.py | 惰性 | tool_names, recent_history | A |
-| 2 | agent/prompts/compress_system.md | 上下文压缩 system | agent/compression.py | 导入时 | - | A |
-| 3 | agent/prompts/compact_prefix.md | 压缩摘要注入前缀 | agent/compression.py、agent/core.py、agent/session_context.py | 惰性 | - | A |
-| 4 | agent/prompts/replan.md | 工具失败 Replan 判定 system | agent/core.py | 惰性 | - | A |
-| 5 | agent/prompts/memory_card.md | 主动记忆标题/摘要提炼 system | agent/core.py | 惰性 | - | A |
-| 6 | agent/prompts/profile_rebuild.md | 用户画像重建 system | agent/system_agents.py | 导入时 | - | A |
-| 7 | agent/prompts/initial_soul.md | 引导期初始 SOUL 生成 system | agent/system_agents.py | 导入时 | - | A |
-| 8 | agent/prompts/output_style.md | 输出画像提炼 system | agent/system_agents.py | 导入时 | - | A |
-| 9 | agent/prompts/response_synth.md | 最终回复合成 system 基底 | agent/response_synthesizer.py | 惰性 | - | A |
-| 10 | agent/prompts/synth_disputed_notice.md | disputed 记忆告知指令（条件注入） | agent/response_synthesizer.py | 惰性 | names | A |
-| 11 | agent/prompts/synth_doc_export.md | 文档导出只写正文指令（条件注入） | agent/response_synthesizer.py | 惰性 | - | A |
-| 12 | app/prompts/distill.md | 对话记忆提炼 system | app/container.py | 导入时 | - | A |
-| 13 | app/prompts/distill_document.md | 文档导入专用提炼 system | app/container.py | 导入时 | - | A |
-| 14 | app/prompts/extract_image.md | VLM 图片解析 system | app/container.py | 导入时 | - | A |
-| 15 | app/prompts/extract_image_user.md | VLM 图片解析 user 话术 | app/container.py | 导入时 | - | A |
-| 16 | app/prompts/domain_label.md | 领域名中文化翻译 system | app/container.py | 惰性 | - | A |
-| 17 | app/prompts/memory_refine.md | 第 2 层记忆精筛 system | app/container.py | 惰性 | - | A |
-| 18 | app/prompts/merge_judge.md | 记忆合并关系判定 system | app/container.py | 惰性 | - | A |
-| 19 | app/prompts/title_gen.md | 会话标题生成 system | app/routes/chat.py | 惰性 | - | A |
-| 20 | soul/prompts/onboarding_persona.md | 引导期临时人格 | soul/constants.py | 导入时 | - | B |
-| 21 | soul/prompts/default_soul_core.md | SOUL_CORE 基线/兜底 | soul/constants.py | 导入时 | - | B |
-| 22 | soul/prompts/default_soul_style_dialog.md | SOUL_STYLE 对话风格+行为原则基线 | soul/constants.py | 导入时 | - | B |
-| 23 | soul/prompts/default_soul_style_output.md | SOUL_STYLE 输出样式空段 | soul/constants.py | 导入时 | - | B |
-| 24 | soul/prompts/output_style_meta_rule.md | 输出样式防僵化元规则 | soul/constants.py | 导入时 | - | B |
-| 25 | agent/prompts/mood.md | 情绪注入模板（双源） | soul/mood_manager.py | 惰性 | strength_hint,user_mood,user_intensity,user_time_hint,ai_mood,ai_intensity,ai_time_hint,ai_attribution_hint | A |
-| 26 | agent/prompts/mood_judge.md | 情绪判定（双源输出 JSON） | agent/core.py | 惰性 | user_message,assistant_reply | A |
-| 27 | agent/prompts/mood_judge_v2.md | 情绪判定 v2（双源归因+平复事件） | agent/core.py | 惰性 | rule_triggers_summary,prev_user_mood,prev_user_intensity,prev_ai_mood,prev_ai_intensity,recent_history,user_message,assistant_reply | A |
-| 28 | agent/prompts/quick_intent.md | 快速预判 system（§3.1） | agent/intent_parser.py | 惰性 | - | A |
-| 29 | agent/prompts/converge_intent.md | 意图收敛 system（§3.3） | agent/intent_parser.py | 惰性 | - | A |
-| 30 | agent/prompts/attention_focus.md | 注意力聚焦 system（§3.4） | agent/intent_parser.py | 惰性 | - | A |
-| 31 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1） | agent/intent_parser.py | 惰性 | - | A |
-| 32 | agent/prompts/honest_clarify.md | 诚实澄清输出模板（§5.2 态二） | agent/core.py | 惰性 | gap_description | A |
+| 1 | agent/prompts/intent_system.md | 意图识别 system | agent/intent_parser.py | 惰性 | intent_shared,tool_names,recent_history | A |
+| 2 | agent/prompts/intent_shared.md | 意图枚举与工具边界共享片段（意图解析/收敛双通道复用） | agent/intent_parser.py | 惰性 | - | A |
+| 3 | agent/prompts/compress_system.md | 上下文压缩 system | agent/compression.py | 导入时 | - | A |
+| 4 | agent/prompts/compact_prefix.md | 压缩摘要注入前缀 | agent/compression.py、agent/core.py、agent/session_context.py | 惰性 | - | A |
+| 5 | agent/prompts/replan.md | 工具失败 Replan 判定 system | agent/core.py | 惰性 | - | A |
+| 6 | agent/prompts/memory_card.md | 主动记忆标题/摘要提炼 system | agent/core.py | 惰性 | - | A |
+| 7 | agent/prompts/profile_rebuild.md | 用户画像重建 system | agent/system_agents.py | 导入时 | - | A |
+| 8 | agent/prompts/initial_soul.md | 引导期初始 SOUL 生成 system | agent/system_agents.py | 导入时 | - | A |
+| 9 | agent/prompts/output_style.md | 输出画像提炼 system | agent/system_agents.py | 导入时 | - | A |
+| 10 | agent/prompts/response_synth.md | 最终回复合成 system 基底 | agent/response_synthesizer.py | 惰性 | - | A |
+| 11 | agent/prompts/synth_disputed_notice.md | disputed 记忆告知指令（条件注入） | agent/response_synthesizer.py | 惰性 | names | A |
+| 12 | agent/prompts/synth_doc_export.md | 文档导出只写正文指令（条件注入） | agent/response_synthesizer.py | 惰性 | - | A |
+| 13 | agent/prompts/profile_conflict_scan.md | 画像双版对比冲突识别 system | soul/profile_conflict_scanner.py | 惰性 | old_profile,new_profile | A |
+| 14 | app/prompts/distill.md | 对话记忆提炼 system | app/container.py | 导入时 | - | A |
+| 15 | app/prompts/distill_document.md | 文档导入专用提炼 system | app/container.py | 导入时 | - | A |
+| 16 | app/prompts/extract_image.md | VLM 图片解析 system | app/container.py | 导入时 | - | A |
+| 17 | app/prompts/extract_image_user.md | VLM 图片解析 user 话术 | app/container.py | 导入时 | - | A |
+| 18 | app/prompts/domain_label.md | 领域名中文化翻译 system | app/container.py | 惰性 | - | A |
+| 19 | app/prompts/memory_refine.md | 第 2 层记忆精筛 system | app/container.py | 惰性 | - | A |
+| 20 | app/prompts/merge_judge.md | 记忆合并关系判定 system | app/container.py | 惰性 | - | A |
+| 21 | app/prompts/title_gen.md | 会话标题生成 system | app/routes/chat.py | 惰性 | - | A |
+| 22 | soul/prompts/onboarding_persona.md | 引导期临时人格 | soul/constants.py | 导入时 | - | B |
+| 23 | soul/prompts/default_soul_core.md | SOUL_CORE 基线/兜底 | soul/constants.py | 导入时 | - | B |
+| 24 | soul/prompts/default_soul_style_dialog.md | SOUL_STYLE 对话风格+行为原则基线 | soul/constants.py | 导入时 | - | B |
+| 25 | soul/prompts/default_soul_style_output.md | SOUL_STYLE 输出样式空段 | soul/constants.py | 导入时 | - | B |
+| 26 | soul/prompts/output_style_meta_rule.md | 输出样式防僵化元规则 | soul/constants.py | 导入时 | - | B |
+| 27 | agent/prompts/mood.md | 情绪注入模板（双源） | soul/mood_manager.py | 惰性 | strength_hint,user_mood,user_intensity,user_time_hint,ai_mood,ai_intensity,ai_time_hint,ai_attribution_hint | A |
+| 28 | agent/prompts/mood_judge_v2.md | 情绪判定 v2（双源归因+平复事件） | agent/core.py | 惰性 | rule_triggers_summary,prev_user_mood,prev_user_intensity,prev_ai_mood,prev_ai_intensity,recent_history,user_message,assistant_reply | A |
+| 29 | agent/prompts/quick_intent.md | 快速预判 system（§3.1） | agent/intent_parser.py | 惰性 | - | A |
+| 30 | agent/prompts/converge_intent.md | 意图收敛 system（§3.3） | agent/intent_parser.py | 惰性 | intent_shared,tool_names | A |
+| 31 | agent/prompts/attention_focus.md | 注意力聚焦 system（§3.4） | agent/intent_parser.py | 惰性 | - | A |
+| 32 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1） | agent/intent_parser.py | 惰性 | - | A |
+| 33 | agent/prompts/honest_clarify.md | 诚实澄清输出模板（§5.2 态二） | agent/core.py | 惰性 | gap_description | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -76,7 +77,7 @@
 | 3 | agent/core.py::_replan_fn | chat | replan | agent/prompts/replan.md | 工具失败 Replan 判定 |
 | 4 | agent/core.py::_memory_save_params | chat | system_agent | agent/prompts/memory_card.md | 主动记忆标题/摘要提炼 |
 | 5 | agent/core.py::_infer_params_llm | function_call | tool_infer | 动态（工具 schema 拼装，C） | 工具参数推断 |
-| 6 | agent/intent_parser.py::parse | chat | intent_parse | agent/prompts/intent_system.md | 意图识别 |
+| 6 | agent/intent_parser.py::parse | chat | intent_parse | agent/prompts/intent_system.md + agent/prompts/intent_shared.md | 意图识别 |
 | 7 | agent/system_agents.py::rebuild | chat | system_agent | agent/prompts/profile_rebuild.md | 用户画像重建 |
 | 8 | agent/system_agents.py::build_initial_soul | chat | system_agent | agent/prompts/initial_soul.md | 引导期初始 SOUL 生成 |
 | 9 | agent/system_agents.py::build | chat | system_agent | agent/prompts/output_style.md | 输出画像提炼 |
@@ -88,13 +89,13 @@
 | 15 | app/routes/chat.py::_call_llm | chat | title_gen | app/prompts/title_gen.md | 会话标题生成 |
 | 16 | app/routes/misc.py::test_connection | chat | main_chat | 无（连通性 ping） | 引导页模型连通测试 |
 | 17 | app/routes/settings.py::_probe_snapshot | chat | main_chat | 无（连通性 ping） | 设置页模型探活 |
-| 18 | agent/core.py::_update_mood | chat | mood | agent/prompts/mood_judge.md | 情绪判定（双源：用户+AI） |
-| 19 | agent/core.py::_update_mood | chat | mood | agent/prompts/mood_judge_v2.md | 情绪判定 v2（双源归因+平复事件） |
-| 20 | agent/intent_parser.py::quick_intent | chat | quick_intent | agent/prompts/quick_intent.md | 快速预判（§3.1） |
-| 21 | agent/intent_parser.py::converge_intent | chat | converge_intent | agent/prompts/converge_intent.md | 意图收敛（§3.3） |
-| 22 | agent/intent_parser.py::focus | chat | attention_focus | agent/prompts/attention_focus.md | 注意力聚焦（§3.4） |
-| 23 | agent/intent_parser.py::detect | chat | gap_detect | agent/prompts/gap_detect.md | 缺口检测（§4.1） |
-| 24 | agent/core.py::_emit_honest_clarify | chat | honest_clarify | agent/prompts/honest_clarify.md | 诚实澄清输出（§5.2 态二） |
+| 18 | agent/core.py::_update_mood | chat | mood | agent/prompts/mood_judge_v2.md | 情绪判定 v2（双源归因+平复事件） |
+| 19 | agent/intent_parser.py::quick_intent | chat | quick_intent | agent/prompts/quick_intent.md | 快速预判（§3.1） |
+| 20 | agent/intent_parser.py::converge_intent | chat | converge_intent | agent/prompts/converge_intent.md + agent/prompts/intent_shared.md | 意图收敛（§3.3） |
+| 21 | agent/intent_parser.py::focus | chat | attention_focus | agent/prompts/attention_focus.md | 注意力聚焦（§3.4） |
+| 22 | agent/intent_parser.py::detect | chat | gap_detect | agent/prompts/gap_detect.md | 缺口检测（§4.1） |
+| 23 | agent/core.py::_emit_honest_clarify | chat | honest_clarify | agent/prompts/honest_clarify.md | 诚实澄清输出（§5.2 态二） |
+| 24 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像双版对比冲突识别 |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

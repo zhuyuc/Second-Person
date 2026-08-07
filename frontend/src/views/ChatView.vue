@@ -361,7 +361,8 @@ async function send() {
   const bubbleImages = attachments.value.filter(a => a.isImage && a.preview).map(a => a.preview)
   messages.value.push({
     role: 'user', content: text || (imgs.length ? '' : '（已上传附件）'),
-    atts: bubbleAtts, images: bubbleImages
+    atts: bubbleAtts, images: bubbleImages,
+    create_time: nowLocalIso()
   })
   input.value = ''
   attachments.value = []
@@ -410,6 +411,7 @@ function finishStream(msgId) {
     const m = {
       id: msgId, role: 'assistant', content: stripTail(streamText.value, streamVisuals.value),
       citations: lastCitations, feedback: 0,
+      create_time: nowLocalIso(),
       thinking: thinkText.value || '', thinkOpen: false,
       visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
     }
@@ -648,6 +650,14 @@ function formatTimeFull(iso) {
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
     ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
 }
+// 本地时间 ISO（秒级）：流式消息在屏上创建时即回填 create_time，
+// 与 DB 落库格式一致，避免消息时间要刷新页面后才显示
+function nowLocalIso() {
+  const d = new Date()
+  const pad = (n) => String(n).padStart(2, '0')
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+    'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+}
 function scrollBottom() { nextTick(() => { if (scroller.value) { scroller.value.scrollTop = scroller.value.scrollHeight; atBottom.value = true } }) }
 // 智能跟随：仅当用户已在底部附近时自动吸底；上翻后不强制拉回
 const atBottom = ref(true)
@@ -867,8 +877,7 @@ onUnmounted(() => {
                   </div>
                   <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
                 </div>
-                <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv'+vi"
-                  :type="v.type" :data="v.data" />
+                <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv' + vi" :type="v.type" :data="v.data" />
                 <div class="content" v-html="render(webSrc(m.content).body, m.visuals)"></div>
                 <div v-if="webSrc(m.content).count" class="think-panel" style="margin-top:8px">
                   <div class="think-head" @click="m.srcOpen = !m.srcOpen">
@@ -917,9 +926,9 @@ onUnmounted(() => {
                 <span class="think-dots"><span></span><span></span><span></span></span>
               </div>
               <!-- 图形组件 -->
-              <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv'+vi"
-                :type="v.type" :data="v.data" />
-              <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body, streamVisuals)"></div>
+              <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv' + vi" :type="v.type" :data="v.data" />
+              <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body, streamVisuals)">
+              </div>
               <div v-if="streamText && webSrc(streamText).count" class="think-panel" style="margin-top:8px">
                 <div class="think-head" @click="streamSrcOpen = !streamSrcOpen">
                   <i class="ti ti-world"></i><span>联网来源（{{ webSrc(streamText).count }}）</span>
@@ -970,8 +979,8 @@ onUnmounted(() => {
             <div v-for="g in EMOJI_GROUPS" :key="g.name" class="emoji-group">
               <div class="emoji-group-name">{{ g.name }}</div>
               <div class="emoji-grid">
-                <button v-for="em in g.items" :key="em" type="button" class="emoji-btn"
-                  @click="insertEmoji(em)">{{ em }}</button>
+                <button v-for="em in g.items" :key="em" type="button" class="emoji-btn" @click="insertEmoji(em)">{{ em
+                  }}</button>
               </div>
             </div>
           </div>
@@ -980,8 +989,9 @@ onUnmounted(() => {
               <i class="ti ti-paperclip" style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="上传文件"
                 @click="triggerFile"></i>
               <!-- mousedown.prevent：防止按钮抢焦点导致 textarea 光标位置丢失 -->
-              <i class="ti ti-mood-smile emoji-toggle" style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)"
-                title="表情" @mousedown.prevent @click.stop="emojiOpen = !emojiOpen"></i>
+              <i class="ti ti-mood-smile emoji-toggle"
+                style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="表情" @mousedown.prevent
+                @click.stop="emojiOpen = !emojiOpen"></i>
               <select v-if="providers.length" v-model="chatModelId" @change="switchModel(chatModelId)"
                 style="padding:4px 8px;font-size:var(--fs-sm);max-width:140px">
                 <option v-for="p in providers" :key="p.id" :value="p.id"

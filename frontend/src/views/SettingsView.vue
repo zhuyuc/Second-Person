@@ -398,7 +398,24 @@ async function testEditChannel() {
 const groups = ['memory', 'conversation', 'cost', 'retrieval', 'visualization', 'other']
 const groupNames = { memory: '记忆参数', conversation: '对话参数', cost: '成本控制', retrieval: '检索与去重', visualization: '可视化', other: '其他' }
 // 用量来源中文映射（未知值兜底显示原文）
-const SOURCE_NAMES = { main_chat: 'AI对话', agent: '工具prompt', system_agent: '系统prompt', title_gen: '标题生成', embedding: '向量分析', vision: '图片解析', intent_parse: '意图解析', tool_infer: '工具推断' }
+const SOURCE_NAMES = {
+  main_chat: 'AI对话',
+  agent: '工具prompt',
+  system_agent: '系统prompt',
+  title_gen: '标题生成',
+  embedding: '向量分析',
+  vision: '图片解析',
+  intent_parse: '意图解析',
+  tool_infer: '工具推断',
+  attention_focus: '注意力聚焦',
+  converge_intent: '意图收敛',
+  gap_detect: '缺口检测',
+  honest_clarify: '诚实澄清',
+  mood: '情绪分析',
+  quick_intent: '快速意图',
+  replan: '重规划',
+  profile_conflict: '画像冲突扫描'
+}
 function sourceName(s) { return SOURCE_NAMES[s] || s }
 const effectNames = { immediate: '立即生效', next_turn: '下一轮对话生效', next_session: '下次会话生效' }
 const enumLabels = { remind_only: '仅提醒（不阻断）' }

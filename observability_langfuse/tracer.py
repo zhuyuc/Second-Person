@@ -130,6 +130,7 @@ class _Trace:
         self._tok_t = tok_t
         self._tok_o = tok_o
         self._metadata: dict | None = None
+        self._ended = False
 
     def update(self, output=None, metadata=None) -> None:
         body: dict = {"id": self.id, "timestamp": _now()}
@@ -144,13 +145,17 @@ class _Trace:
         self._t._emit("trace-create", body)
 
     def end(self, output=None) -> None:
+        if self._ended:
+            logger.warning("Trace %s 重复 end() 调用，已忽略", self.id)
+            return
+        self._ended = True
         if output is not None:
             self.update(output=output)
         try:
             _active_obs.reset(self._tok_o)
             _active_trace.reset(self._tok_t)
-        except (ValueError, LookupError):
-            pass
+        except (ValueError, LookupError) as e:
+            logger.warning("Trace %s 清理 contextvars 失败：%s", self.id, e)
 
 
 class _Span:
@@ -161,6 +166,7 @@ class _Span:
         self._tok = tok
         self._output = None
         self._meta = None
+        self._ended = False
 
     def update(self, output=None, metadata=None) -> None:
         if output is not None:
@@ -177,6 +183,10 @@ class _Span:
         self._t._emit("span-update", body)
 
     def end(self, output=None, level=None, status_message=None) -> None:
+        if self._ended:
+            logger.warning("Span %s 重复 end() 调用，已忽略", self.id)
+            return
+        self._ended = True
         if output is not None:
             self._output = output
         body: dict = {"id": self.id,
@@ -192,8 +202,8 @@ class _Span:
         self._t._emit("span-update", body)
         try:
             _active_obs.reset(self._tok)
-        except (ValueError, LookupError):
-            pass
+        except (ValueError, LookupError) as e:
+            logger.warning("Span %s 清理 contextvars 失败：%s", self.id, e)
 
 
 class _Generation:
@@ -201,8 +211,13 @@ class _Generation:
         self._t = tracer
         self.trace_id = tid
         self.id = gid
+        self._ended = False
 
     def end(self, output=None, usage=None, level=None, status_message=None) -> None:
+        if self._ended:
+            logger.warning("Generation %s 重复 end() 调用，已忽略", self.id)
+            return
+        self._ended = True
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if output is not None:

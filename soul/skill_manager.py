@@ -120,9 +120,40 @@ class SkillManager:
         return int(fm.get("draft", 0))
 
     def load_index(self) -> str:
-        """Level 0：技能目录（约 500 token）。"""
-        idx = _skills_dir(self.data_dir) / "_index.md"
-        return idx.read_text(encoding="utf-8") if idx.exists() else ""
+        """Level 0：技能目录（约 500 token）。
+
+        输出格式化目录（技能名 + 一句话用途），剥离 _index.md 的
+        frontmatter 管理元数据（total/pending_confirm/时间戳等对 LLM 是噪声）。
+        """
+        lines = []
+        for name in self.active_names():
+            brief = self._skill_brief(name)
+            lines.append(f"- {name}：{brief}" if brief else f"- {name}")
+        return "\n".join(lines)
+
+    def _skill_brief(self, name: str) -> str:
+        """从 SKILL.md 提取一句话用途（标题后的首个正文行，截 80 字）。"""
+        text = self.load_skill(name)
+        if not text:
+            return ""
+        _fm, body = split_frontmatter(text)
+        for line in body.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            return s[:80]
+        return ""
+
+    def _skill_aliases(self, name: str) -> list[str]:
+        """读取 SKILL.md frontmatter 的 aliases 触发别名列表。"""
+        text = self.load_skill(name)
+        if not text:
+            return []
+        fm, _body = split_frontmatter(text)
+        aliases = fm.get("aliases") or []
+        if isinstance(aliases, str):
+            aliases = [aliases]
+        return [str(a).strip() for a in aliases if str(a).strip()]
 
     def load_skill(self, name: str) -> str:
         """Level 1：SKILL.md 主文件。"""
@@ -149,14 +180,19 @@ class SkillManager:
         return [r["skill_name"] for r in rows]
 
     def match_skills(self, text: str, limit: int = 2) -> list[str]:
-        """请求级按需匹配：活跃技能名（下划线转空格后）出现在文本中即命中。"""
+        """请求级按需匹配：技能名或 frontmatter aliases 别名出现在文本中即命中。
+
+        别名制解决"字面念出技能名才触发"的覆盖率问题：如用户问
+        "今天上证指数多少"可经别名"指数/股价"命中行情查询技能。
+        """
         if not text:
             return []
         low = text.lower()
         hits = []
         for name in self.active_names():
-            key = name.replace("_", " ").lower()
-            if key and (key in low or name.lower() in low):
+            keys = [name.lower(), name.replace("_", " ").lower()]
+            keys += [a.lower() for a in self._skill_aliases(name)]
+            if any(k and k in low for k in keys):
                 hits.append(name)
                 if len(hits) >= limit:
                     break

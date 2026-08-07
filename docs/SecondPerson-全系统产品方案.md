@@ -233,7 +233,7 @@ memory_timeline 表记录每条记忆的事件流（created/updated/evolved/impo
 
 - **SOUL_CORE.md（稳定层）**：身份 / 核心价值观 / 性格特征 / 禁止行为。仅用户手工编辑，AI 禁止自改；提供"恢复默认人格"；
 - **SOUL_STYLE.md（演化层）**三段：
-  - 对话风格 + 行为原则 → **dialog 版本序列**，由"对话确认"路径演化：用户的风格反馈（soul_feedback 意图 / 点踩"语气不对"）先进 CONTEXT_ENTRY 待确认区 → 下轮对话 AI 自然询问 → 用户确认后语义去重（embedding 余弦 ≥0.85 跳过）再落盘建版；
+  - 对话风格 + 行为原则 → **dialog 版本序列**，由"对话确认"路径演化：用户的风格反馈实时经 soul_feedback 意图记入记忆层（事实记录）；后台提炼判定 soul_feedback 归属后进 CONTEXT_ENTRY 待确认区 → 下轮对话 AI 自然询问 → 用户确认后语义去重（embedding 余弦 ≥0.85 跳过）再落盘建版；
   - 输出样式 → **auto 版本序列**，由输出画像 Agent 静默演化（见 3.4.2）；
 - 两条序列各保留 3 版，按序列独立回滚互不干扰；输出样式段固定附加防僵化元规则（用户显式格式要求优先于画像默认）。
 
@@ -541,7 +541,7 @@ frontend/ 下 `npm run build`，产物部署至 `app/static/` 由主应用挂载
 | --- | --- |
 | agent/prompts/intent_system.md | 意图解析器：11 种枚举、remember_intent/confirm 边界、实时信息必走 web_search 规则 |
 | agent/prompts/memory_card.md | 主动记忆卡片：20 字含主语标题 + 30 字第三人称摘要 |
-| agent/prompts/compress_system.md | 五段式对话压缩（S1 绝对日期防重复执行） |
+| agent/prompts/compress_system.md | 六段结构对话压缩（S0-S5，S1 绝对日期防重复执行） |
 | agent/prompts/replan.md | 工具失败补救判定（retry_other_tool/retry_same_tool/skip/abort） |
 | agent/prompts/response_synth.md | 响应合成：实时信息只依据工具结果、缺失如实告知、末尾 citations 声明 |
 | agent/prompts/compact_prefix.md | 压缩摘要注入前缀（声明为历史参考非当前指令） |

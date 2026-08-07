@@ -1360,7 +1360,7 @@ class AgentCore:
         snap = self.providers.snapshot_for("chat")
         if snap is None:
             await emit("content_delta",
-                       {"text": f"我需要确认一下：{gap_desc}，能帮我clarify一下吗？"})
+                       {"text": f"我需要确认一下：{gap_desc}，能再帮我说明一下吗？"})
             return
         try:
             system = PROMPTS.render(
@@ -1996,10 +1996,10 @@ class AgentCore:
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
-        # 纯导出场景：工程级剥离情绪注入段——情绪表达只发生在对话层，
-        # 不进入文档正文（避免模型受情绪注入影响写出对话式正文/思考过程）
-        if any(r.get("tool") == "generate_document" and r.get("deferred")
-               for r in (tool_results or [])):
+        # 结构化落盘场景（generate_document/file_write 延迟写入）：工程级剥离情绪
+        # 注入段——情绪表达只发生在对话层，不进入文档/文件正文
+        # （避免模型受情绪注入影响写出对话式正文/思考过程）
+        if any(r.get("deferred") for r in (tool_results or [])):
             system_prompt = _strip_mood_section(system_prompt)
         synth = rs.build_response_prompt(message, tool_results, memories)
         # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能

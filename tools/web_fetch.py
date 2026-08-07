@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from infrastructure.http_client import timeout_for
+
 MAX_BYTES = 10 * 1024 * 1024
 UA = "SecondPerson/1.0.0 (personal assistant; +local)"
 PRIVATE_NETS = [
@@ -69,8 +71,9 @@ async def web_fetch(url: str, timeout: int = 15,
     if not allow_private and await _is_private_async(parsed.hostname or ""):
         raise FetchError(f"拒绝访问私网地址（防 SSRF）：{url}")
 
+    _web = timeout_for("web")
     timeout_cfg = httpx.Timeout(
-        connect=5.0, read=timeout, write=timeout, pool=timeout)
+        connect=_web.connect, read=timeout, write=timeout, pool=_web.pool)
     async with httpx.AsyncClient(timeout=timeout_cfg, follow_redirects=True,
                                  max_redirects=5, headers={"User-Agent": UA}) as c:
         r = await c.get(url)

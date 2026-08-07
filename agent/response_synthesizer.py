@@ -34,7 +34,8 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
         mem_txt = "\n".join(
             f"[{i+1}] {m['title']}（id={m['id']}）：{m.get('detail', m.get('summary', ''))}"
             for i, m in enumerate(memories))
-        ctx_parts.append("已检索到的相关记忆：\n" + mem_txt)
+        ctx_parts.append(
+            "已检索到的相关记忆（若用到其中任何一条，必须在回复末尾声明 citations）：\n" + mem_txt)
     if tool_results:
         def _clip(v) -> str:
             s = str(v)
@@ -88,6 +89,7 @@ def strip_mermaid_blocks(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     ).strip()
+
 
 def extract_citations(text: str, valid_ids: set[str]) -> tuple[str, list[str]]:
     """从回复中提取 citations JSON 声明，返回 (去除声明后的正文, 有序去重的 memory_id)。"""

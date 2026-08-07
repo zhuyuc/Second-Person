@@ -38,39 +38,7 @@ INTENT_TYPES = [
 ]
 
 
-def load_intent_taxonomy(data_dir: str | None = None) -> tuple[list[str], dict[str, str]]:
-    """从 data/soul/intent_taxonomy.md 加载意图分类。
-
-    返回 (types_list, labels_dict)。文件不存在或解析失败时使用默认值。
-    """
-    if not data_dir:
-        return INTENT_TYPES, INTENT_TYPE_LABELS
-    from pathlib import Path
-    path = Path(data_dir) / "soul" / "intent_taxonomy.md"
-    if not path.exists():
-        return INTENT_TYPES, INTENT_TYPE_LABELS
-    try:
-        types_list: list[str] = []
-        labels_dict: dict[str, str] = {}
-        content = path.read_text(encoding="utf-8")
-        for line in content.splitlines():
-            line = line.strip()
-            if line.startswith("|") and "|" in line[1:]:
-                parts = [p.strip() for p in line.split("|")]
-                if len(parts) >= 3 and parts[1] not in ("intent_type", "---", ""):
-                    itype = parts[1]
-                    label = parts[2] if len(parts) > 2 else itype
-                    if itype:
-                        types_list.append(itype)
-                        labels_dict[itype] = label
-        if types_list:
-            return types_list, labels_dict
-    except Exception:
-        logger.warning("意图分类文件读取失败，使用默认枚举", exc_info=True)
-    return INTENT_TYPES, INTENT_TYPE_LABELS
-
-
-# 默认中文标签（文件加载失败时的兜底）
+# 默认中文标签
 INTENT_TYPE_LABELS = {
     "query_memory": "检索记忆", "query_knowledge": "查询知识库",
     "query_external": "查询外部信息", "compute": "计算任务",
@@ -327,7 +295,10 @@ class IntentParser:
                 skip_causes_misleading=True,
                 failure_type=FailureType.SYSTEM_FAULT,
             ))
-        system = PROMPTS.load_raw("agent/prompts/converge_intent")
+        system = PROMPTS.render(
+            "agent/prompts/converge_intent",
+            intent_shared=PROMPTS.load_raw("agent/prompts/intent_shared"),
+            tool_names=", ".join(tool_names))
         # 拼接 context：近期对话在前，消解悬空指代
         parts = []
         if recent_history:
@@ -384,6 +355,7 @@ class IntentParser:
         base_messages = [
             {"role": "system", "content": PROMPTS.render(
                 "agent/prompts/intent_system",
+                intent_shared=PROMPTS.load_raw("agent/prompts/intent_shared"),
                 tool_names=", ".join(tool_names),
                 recent_history=(
                     f"最近对话上下文（仅供理解用户意图，不作为回答材料）：\n{history_block}"

@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from .http_client import timeout_for
 from .observability import get_trace_id
 from infrastructure.timeutil import now_cst
 
@@ -336,7 +337,7 @@ class LLMClient:
         # extra_body：透传至请求体的额外字段（如 thinking_enabled=False 禁用思考模式）
         if "extra_body" in kw and isinstance(kw["extra_body"], dict):
             body.update(kw["extra_body"])
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/chat/completions",
                              json=body,
                              headers={"Authorization": f"Bearer {snap.api_key}"})
@@ -364,7 +365,7 @@ class LLMClient:
             body["tools"] = tools
         if "extra_body" in kw and isinstance(kw["extra_body"], dict):
             body.update(kw["extra_body"])
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/messages", json=body,
                              headers={"x-api-key": snap.api_key,
                                       "anthropic-version": "2023-06-01"})
@@ -383,7 +384,7 @@ class LLMClient:
                     for m in messages if m["role"] != "system"]
         url = (f"{snap.base_url.rstrip('/')}/models/{snap.model_id}:generateContent"
                f"?key={snap.api_key}")
-        async with httpx.AsyncClient(timeout=120) as c:
+        async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
             r = await c.post(url, json={"contents": contents})
             r.raise_for_status()
             data = r.json()
@@ -396,7 +397,8 @@ class LLMClient:
                           "output_tokens": um.get("candidatesTokenCount", 0)}}
 
     async def _do_embed(self, snap, texts) -> list[list[float]]:
-        async with httpx.AsyncClient(timeout=120) as c:
+        # 本地 Embedding 微服务毫秒级返回，用短读超时快速失败（不再傻等 120s）
+        async with httpx.AsyncClient(timeout=timeout_for("embedding")) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/embeddings",
                              json={"model": snap.model_id, "input": texts},
                              headers={"Authorization": f"Bearer {snap.api_key}"})
@@ -435,7 +437,8 @@ class LLMClient:
             body["tools"] = extra_tools
         body.update({k: v for k, v in kw.items()
                     if k in ("temperature", "max_tokens")})
-        async with httpx.AsyncClient(timeout=120) as c:
+        # 流式回复可持续数分钟：读超时按 chunk 间隔计时，用 stream 长超时
+        async with httpx.AsyncClient(timeout=timeout_for("stream")) as c:
             async with c.stream("POST", f"{snap.base_url.rstrip('/')}/chat/completions",
                                 json=body,
                                 headers={"Authorization": f"Bearer {snap.api_key}"}) as r:

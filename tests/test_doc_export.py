@@ -21,7 +21,8 @@ FAIL: list[str] = []
 
 
 def check(name: str, cond: bool, detail: str = "") -> None:
-    print(f"[{'PASS' if cond else 'FAIL'}] {name}" + (f" - {detail}" if detail else ""))
+    print(f"[{'PASS' if cond else 'FAIL'}] {name}" +
+          (f" - {detail}" if detail else ""))
     if not cond:
         FAIL.append(name)
 
@@ -105,12 +106,14 @@ def test_pptx_boundaries() -> None:
     md = "\n".join(f"## 第{i}节" for i in range(45))
     prs = Presentation(io.BytesIO(md_to_pptx_bytes(md)))
     check("pptx 页数上限 40", len(list(prs.slides)) == 40)
-    md2 = "## 页\n\n```py\n" + "\n".join(f"line{i}" for i in range(30)) + "\n```\n"
+    md2 = "## 页\n\n```py\n" + \
+        "\n".join(f"line{i}" for i in range(30)) + "\n```\n"
     prs2 = Presentation(io.BytesIO(md_to_pptx_bytes(md2)))
     check("pptx 代码块截断不报错", len(list(prs2.slides)) >= 1)
     prs3 = Presentation(io.BytesIO(md_to_pptx_bytes("")))
     check("pptx 空文档仅封面", len(list(prs3.slides)) == 1)
-    md3 = "## 表\n\n| c |\n|---|\n" + "\n".join(f"| {i} |" for i in range(30)) + "\n"
+    md3 = "## 表\n\n| c |\n|---|\n" + \
+        "\n".join(f"| {i} |" for i in range(30)) + "\n"
     prs4 = Presentation(io.BytesIO(md_to_pptx_bytes(md3)))
     check("pptx 大表格截断不报错", len(list(prs4.slides)) >= 1)
     md4 = "# 主标题\n\n## 甲\n\n正文甲\n\n# 附录\n\n正文附录\n"
@@ -144,7 +147,7 @@ def test_xlsx_boundaries() -> None:
           f"A1={ws5['A1'].value} A2={ws5['A2'].value}")
 
 
-async def test_tool_level(tmp: Path) -> None:
+async def _tool_level(tmp: Path) -> None:
     from types import SimpleNamespace
     from tools.base import ToolRegistry
     from tools.builtin import register_builtins
@@ -185,6 +188,12 @@ async def test_tool_level(tmp: Path) -> None:
         check("空内容被拒", True)
 
 
+def test_tool_level(tmp_path) -> None:
+    """pytest 入口：用内置 tmp_path fixture 包装，内部自管事件循环；
+    脚本直跑模式由 main() 直接调 _tool_level。"""
+    asyncio.run(_tool_level(tmp_path))
+
+
 def test_frontend_no_hardcode() -> None:
     """前端下载卡片不依赖扩展名白名单：新增格式对 UI 零改动。"""
     import re
@@ -203,7 +212,7 @@ def main() -> None:
     test_converters()
     test_pptx_boundaries()
     test_xlsx_boundaries()
-    asyncio.run(test_tool_level(tmp))
+    asyncio.run(_tool_level(tmp))
     test_frontend_no_hardcode()
     print(f"\n结果：{len(FAIL)} 项失败")
     if FAIL:
