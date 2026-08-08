@@ -14,7 +14,6 @@ import json
 import time
 
 from fastapi import APIRouter, Request, UploadFile, File
-from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from infrastructure.prompt_loader import PROMPTS
@@ -371,11 +370,3 @@ async def upload_attachment(file: UploadFile = File(...)):
 async def delete(session_id: str):
     _c().sessions.delete_session(session_id)
     return {"code": 200, "data": {}}
-
-
-@router.get("/chat/session/{session_id}/usage")
-async def session_usage(session_id: str):
-    row = _c().db.query_one(
-        "SELECT COALESCE(SUM(input_tokens),0) i, COALESCE(SUM(output_tokens),0) o "
-        "FROM token_usage WHERE session_id=?", (session_id,))
-    return {"code": 200, "data": {"input_tokens": row["i"], "output_tokens": row["o"]}}

@@ -132,7 +132,8 @@ class _Trace:
         self._metadata: dict | None = None
         self._ended = False
 
-    def update(self, output=None, metadata=None) -> None:
+    def update(self, output=None, metadata=None,
+               level=None, status_message=None) -> None:
         body: dict = {"id": self.id, "timestamp": _now()}
         if output is not None:
             body["output"] = _trim(output)
@@ -142,15 +143,20 @@ class _Trace:
             merged = _deep_merge(existing, metadata) if existing else metadata
             self._metadata = merged
             body["metadata"] = _trim(merged)
+        if level:
+            body["level"] = level
+        if status_message:
+            body["statusMessage"] = status_message[:_MAX_STR]
         self._t._emit("trace-create", body)
 
-    def end(self, output=None) -> None:
+    def end(self, output=None, level=None, status_message=None) -> None:
         if self._ended:
             logger.warning("Trace %s 重复 end() 调用，已忽略", self.id)
             return
         self._ended = True
-        if output is not None:
-            self.update(output=output)
+        if output is not None or level or status_message:
+            self.update(output=output, level=level,
+                        status_message=status_message)
         try:
             _active_obs.reset(self._tok_o)
             _active_trace.reset(self._tok_t)
@@ -275,7 +281,7 @@ class PipelineTracer:
         else:
             meta = {"degradation": {"decision_reason": str(decision)}}
         self._emit("span-update", {"id": sid, "traceId": _active_trace.get(),
-                                    "timestamp": _now(), "metadata": _trim(meta)})
+                                   "timestamp": _now(), "metadata": _trim(meta)})
 
     async def flush(self) -> None:
         if self._client:

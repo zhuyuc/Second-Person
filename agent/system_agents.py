@@ -10,7 +10,6 @@ Agent 失败隔离：单个 Agent 失败不影响主流程（调度器包裹异�
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import datetime, timedelta
 
@@ -420,20 +419,42 @@ class OutputStyleBuilder:
         cutoff = (now_cst() - timedelta(days=window)
                   ).isoformat(timespec="seconds")
         rows = self.db.query_all(
-            "SELECT char_count,bullet_count,table_count,conclusion_position,"
-            "explicit_reaction,explicit_keywords FROM response_signals "
-            "WHERE create_time>=?", (cutoff,))
+            "SELECT context_label,char_count,bullet_count,table_count,"
+            "conclusion_position,explicit_reaction,explicit_keywords "
+            "FROM response_signals WHERE create_time>=?", (cutoff,))
         if not rows:
             return False
-        # 分箱统计
-        liked = [r for r in rows if r["explicit_reaction"] == 1]
-        disliked = [r for r in rows if r["explicit_reaction"] == 2]
-        avg_like_len = sum(r["char_count"]
-                           for r in liked) / len(liked) if liked else 0
-        keywords = ";".join(r["explicit_keywords"]
-                            for r in rows if r["explicit_keywords"])
-        stat = (f"样本 {len(rows)} 条；点赞平均字数 {avg_like_len:.0f}；"
-                f"点赞 {len(liked)} 踩 {len(disliked)}；偏好关键词：{keywords or '无'}")
+        # 分场景统计（context_label：chat/opinion/fact_query/tech_help/other）：
+        # 避免把不同场景混在一起得出“点赞平均字数”式的一刀切结论
+        scenes: dict[str, dict] = {}
+        for r in rows:
+            label = r["context_label"] or "other"
+            s = scenes.setdefault(
+                label, {"n": 0, "like": 0, "dislike": 0, "like_chars": 0,
+                        "keywords": []})
+            s["n"] += 1
+            if r["explicit_reaction"] == 1:
+                s["like"] += 1
+                s["like_chars"] += r["char_count"] or 0
+            elif r["explicit_reaction"] == 2:
+                s["dislike"] += 1
+            if r["explicit_keywords"]:
+                s["keywords"].append(r["explicit_keywords"])
+        scene_names = {"chat": "闲聊寒暄", "opinion": "观点征询",
+                       "fact_query": "事实/知识查询",
+                       "tech_help": "计算/文件/技术任务", "other": "其他"}
+        scene_lines = []
+        for label in ("chat", "opinion", "fact_query", "tech_help", "other"):
+            s = scenes.get(label)
+            if not s:
+                continue
+            avg_like = s["like_chars"] / s["like"] if s["like"] else 0
+            kws = ";".join(s["keywords"]) or "无"
+            scene_lines.append(
+                f"- {scene_names.get(label, label)}：样本 {s['n']} 条，"
+                f"点赞 {s['like']} 踩 {s['dislike']}，"
+                f"点赞平均字数 {avg_like:.0f}，偏好关键词：{kws}")
+        stat = "\n".join(scene_lines)
         try:
             resp = await self.llm.chat(
                 snap, [{"role": "system", "content": OUTPUT_STYLE_PROMPT},

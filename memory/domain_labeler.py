@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from infrastructure.timeutil import now_iso
 from typing import Awaitable, Callable
 
 logger = logging.getLogger("second_person.domain_labeler")
@@ -66,7 +66,7 @@ class DomainLabeler:
         self._seed()
 
     def _seed(self) -> None:
-        now = datetime.now().isoformat(timespec="seconds")
+        now = now_iso()
         self.db.executemany(
             "INSERT OR IGNORE INTO domain_labels(domain,label,source,created_at) "
             "VALUES(?,?,?,?)",
@@ -113,7 +113,7 @@ class DomainLabeler:
         self._inflight.update(need)
         try:
             result = await self.translate_fn(need) or {}
-            now = datetime.now().isoformat(timespec="seconds")
+            now = now_iso()
             rows = []
             for d in need:
                 label = str(result.get(d) or result.get(

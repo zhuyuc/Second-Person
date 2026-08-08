@@ -15,11 +15,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.scheduler")
-TZ = ZoneInfo("Asia/Shanghai")
 TASK_RETRY = 2
 
 
@@ -101,7 +99,7 @@ class TaskScheduler:
 
     async def _loop(self) -> None:
         while self._running:
-            now = datetime.now(TZ)
+            now = now_cst()
             try:
                 # 夜间维护链 02:00（用分钟窗口<5 而非==0：60s 循环漂移不至跳过整点，
                 # 由 _ran_today 标记保证当日只跑一次）

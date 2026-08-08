@@ -13,11 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from infrastructure.event_bus import (EVT_EMBEDDING_MIGRATION_COMPLETED,
                                       EVT_TASK_PROGRESS)
-from memory.vector_store import deserialize_vector
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.emb_migration")

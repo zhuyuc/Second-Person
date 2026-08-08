@@ -46,10 +46,13 @@ class MoodPatternExtractor:
             title = f"用户情绪模式：{_mood_cn(mood)}"[:30]
             summary = (f"过去 {window_days} 天内出现 {count} 次 "
                        f"{_mood_cn(mood)} 情绪，作为长期沟通模式参考。")[:30]
+            # 示例取当前情绪自己的带备注样本（sqlite3.Row 无 .get，用方括号索引）
+            sample = next((r["note"] for r in rows
+                           if r["mood"] == mood and r["note"]), "") or ""
             detail = (f"情绪标签：{mood}\n"
                       f"窗口：{window_days} 天\n"
                       f"出现次数：{count}\n"
-                      f"近期示例：{(rows[0].get('note', '') or '')[:100]}")
+                      f"近期示例：{sample[:100]}")
             await self.distiller.write_item({
                 "title": title,
                 "summary": summary,

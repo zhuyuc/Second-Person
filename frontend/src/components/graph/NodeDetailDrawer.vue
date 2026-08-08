@@ -72,7 +72,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMousedown))
   background: none;
   border: none;
   cursor: pointer;
-  font-size: 18px;
+  font-size: var(--icon-sm);
   color: var(--muted);
 }
 

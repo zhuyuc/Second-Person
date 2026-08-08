@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
 
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
@@ -27,8 +26,10 @@ TOOL_RESULT_MAX_CHARS = 30000
 
 
 def build_response_prompt(user_message: str, tool_results: list[dict],
-                          memories: list[dict]) -> list[dict]:
-    """合成 prompt：把工具结果 + 命中记忆交给 LLM，要求输出 citations。"""
+                          memories: list[dict],
+                          depth_level: str = "normal") -> list[dict]:
+    """合成 prompt：把工具结果 + 命中记忆交给 LLM，要求输出 citations。
+    depth_level（brief/normal/detailed）：场景化篇幅档位，normal 为默认不额外注入。"""
     ctx_parts = []
     if memories:
         mem_txt = "\n".join(
@@ -65,6 +66,12 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
     if any(r.get("tool") == "generate_document" and r.get("deferred")
            for r in (tool_results or [])):
         ctx_parts.append(PROMPTS.load_raw("agent/prompts/synth_doc_export"))
+    # 场景化篇幅档位：brief/detailed 注入对应指令并明确本轮档位，
+    # 优先于输出画像的全局长度倾向（normal 为默认行为，不注入）
+    if depth_level in ("brief", "detailed"):
+        ctx_parts.append(
+            PROMPTS.load_raw("agent/prompts/response_depth")
+            + f"\n\n本轮判定档位：{depth_level}，必须按该档位控制回复篇幅。")
     system = (PROMPTS.load_raw("agent/prompts/response_synth")
               + "\n\n" + "\n\n".join(ctx_parts))
     return [{"role": "system", "content": system},

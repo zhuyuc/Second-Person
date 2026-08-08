@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
 
 import numpy as np
 from infrastructure.timeutil import now_cst

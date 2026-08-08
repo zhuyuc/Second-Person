@@ -15,9 +15,9 @@ def _c():
 # ---- 三点五 首次引导 ------------------------------------------------------
 @router.get("/onboarding/status")
 async def onboarding_status():
-    c = _c()
-    completed = c.config.get_raw("onboarding_completed", False)
-    return {"code": 200, "data": {"completed": completed}}
+    """首次引导是否已完成（App.vue 启动时据此决定是否展示引导流程）。"""
+    return {"code": 200,
+            "data": {"completed": bool(_c().config.get_raw("onboarding_completed", False))}}
 
 
 @router.post("/onboarding/test-connection")
@@ -87,7 +87,6 @@ async def soul_confirm(request: Request):
                                          "create_version": True,
                                          "diff_summary": "引导初始化"})
     c.config.set_raw("onboarding_completed", True)
-    from datetime import datetime
     if not c.config.get_raw("first_installed", None):
         c.config.set_raw("first_installed",
                          now_cst().strftime("%Y-%m-%d"))
@@ -157,17 +156,6 @@ async def import_document_stream(file: UploadFile = File(...)):
                 task.cancel()
 
     return EventSourceResponse(gen(), ping=5)
-
-
-@router.post("/import/url")
-async def import_url(request: Request):
-    body = await request.json()
-    c = _c()
-    from tools.web_fetch import web_fetch
-    result = await c.ingest.ingest_url(
-        body["url"],
-        lambda u: web_fetch(u, c.config.get("web_fetch_timeout_seconds", 15)))
-    return {"code": 200, "data": result}
 
 
 @router.get("/import/documents")
@@ -309,28 +297,7 @@ async def download_generated_file(stored_name: str):
     return FileResponse(path, media_type=media, filename=display)
 
 
-# ---- 2.14 一次性任务状态 --------------------------------------------------
-@router.get("/tasks/{task_id}/status")
-async def task_status(task_id: str):
-    c = _c()
-    row = c.db.query_one(
-        "SELECT result,fail_reason FROM task_logs WHERE task_id LIKE ? "
-        "ORDER BY run_time DESC LIMIT 1", (f"{task_id}%",))
-    status = "completed" if row and row["result"] == "success" else \
-             ("failed" if row and row["result"] == "failed" else "running")
-    # 真实进度：Embedding 迁移读取 done_count/total_count
-    progress = 50
-    if task_id.startswith("embedding_migration"):
-        mrow = c.db.query_one(
-            "SELECT done_count, total_count FROM embedding_migration "
-            "WHERE id=?", (task_id.split("_")[-1],))
-        if mrow and mrow["total_count"]:
-            progress = int(mrow["done_count"] / mrow["total_count"] * 100)
-    return {"code": 200, "data": {"task_id": task_id, "status": status,
-                                  "progress": progress}}
-
-
-# ---- IM 平台入站 webhook（飞书/钉钉） ------------------------------------
+# ---- IM 平台入站 webhook（飞书/钉钉等）------------------------------------
 @router.post("/im/webhook/{platform}")
 async def im_webhook(platform: str, request: Request):
     c = _c()

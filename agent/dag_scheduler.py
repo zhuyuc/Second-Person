@@ -58,7 +58,6 @@ class DAGResult:
 
 def build_dag(intents: list[Intent], registered_tools: set[str]) -> DAGResult:
     ids = {it.id for it in intents}
-    by_id = {it.id: it for it in intents}
 
     # 依赖容错
     for it in intents:

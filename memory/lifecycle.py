@@ -14,8 +14,10 @@ Lifecycle —— 生命周期五态流转（产品文档 §生命周期流转规
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
+
+from infrastructure.timeutil import now_cst
 
 from .md_file import parse_memory_md
 
@@ -75,7 +77,7 @@ class LifecycleManager:
             if not _row_flag(row, "user_cleared_important"):
                 doc.frontmatter["is_important"] = True
             doc.change_history.insert(
-                0, f"[{datetime.now():%Y-%m-%d}] access_count 达 {row['access_count']}，"
+                0, f"[{now_cst():%Y-%m-%d}] access_count 达 {row['access_count']}，"
                 f"lifecycle: active → stable")
             await self._submit_update(doc, "stable 升级")
             return True
@@ -89,7 +91,7 @@ class LifecycleManager:
         if row["lifecycle"] == "stale" and not row["user_marked_stale"]:
             doc.frontmatter["lifecycle"] = "active"
             doc.change_history.insert(
-                0, f"[{datetime.now():%Y-%m-%d}] 检索命中，stale → active")
+                0, f"[{now_cst():%Y-%m-%d}] 检索命中，stale → active")
             # 自动归档周期计数清零（已恢复活跃）
             self.db.execute(
                 "UPDATE memories SET stale_lint_runs=0 WHERE id=?", (mid,))
@@ -111,7 +113,7 @@ class LifecycleManager:
         fm["is_important"] = False
         fm["user_marked_stale"] = True
         doc.change_history.insert(
-            0, f"[{datetime.now():%Y-%m-%d}] 用户点踩'记忆过时'：stale + 降置信 + 移出重要")
+            0, f"[{now_cst():%Y-%m-%d}] 用户点踩'记忆过时'：stale + 降置信 + 移出重要")
         await self._submit_update(doc, "点踩过时复合操作")
         return True
 
@@ -122,7 +124,7 @@ class LifecycleManager:
             return False
         doc.frontmatter["confidence"] = "strong"
         doc.change_history.insert(
-            0, f"[{datetime.now():%Y-%m-%d}] 用户点赞引用回复，confidence: medium → strong")
+            0, f"[{now_cst():%Y-%m-%d}] 用户点赞引用回复，confidence: medium → strong")
         await self._submit_update(doc, "点赞升级")
         return True
 
@@ -131,7 +133,7 @@ class LifecycleManager:
         row, doc = self._load_doc(mid)
         if not row or not doc:
             return False
-        now = datetime.now()
+        now = now_cst()
         if confirmed and row["confidence"] == "low":
             doc.frontmatter["confidence"] = "medium"
             doc.change_history.insert(
@@ -146,9 +148,9 @@ class LifecycleManager:
 
     def next_low_confirm_candidate(self) -> dict | None:
         """取一条待对话确认的 low 记忆（超 30 天未确认且 7 天内未问过）。"""
-        created_cutoff = (datetime.now() - timedelta(days=30)
+        created_cutoff = (now_cst() - timedelta(days=30)
                           ).isoformat(timespec="seconds")
-        asked_cutoff = (datetime.now() - timedelta(days=7)
+        asked_cutoff = (now_cst() - timedelta(days=7)
                         ).isoformat(timespec="seconds")
         row = self.db.query_one(
             "SELECT id, title, summary FROM memories WHERE confidence='low' "
@@ -161,12 +163,12 @@ class LifecycleManager:
     def mark_low_confirm_asked(self, mid: str) -> None:
         self.db.execute(
             "UPDATE memories SET low_confirm_asked_at=? WHERE id=?",
-            (datetime.now().isoformat(timespec="seconds"), mid))
+            (now_cst().isoformat(timespec="seconds"), mid))
 
     # ---- active → stale（Lint 过期检测批量） ------------------------------
     def detect_stale_candidates(self) -> list[str]:
         days = self.config.get("stale_detection_days", 90)
-        cutoff = (datetime.now() - timedelta(days=days)
+        cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         rows = self.db.query_all(
             "SELECT id FROM memories WHERE lifecycle='active' "
@@ -179,14 +181,14 @@ class LifecycleManager:
             return
         doc.frontmatter["lifecycle"] = "stale"
         doc.change_history.insert(
-            0, f"[{datetime.now():%Y-%m-%d}] 过期检测：active → stale")
+            0, f"[{now_cst():%Y-%m-%d}] 过期检测：active → stale")
         await self._submit_update(doc, "过期降级")
 
     # ---- 频次更新（第 8 步）：last_accessed / access_count / implicit -----
     def update_access_stats(self, loaded_ids: list[str], cited_ids: list[str]) -> None:
         """批量更新频次；走索引表直接更新（frontmatter 由后续 update 同步）。
         全部改 executemany 批处理，避免逐条 execute 的 N+1。"""
-        now = datetime.now().isoformat(timespec="seconds")
+        now = now_cst().isoformat(timespec="seconds")
         if loaded_ids:
             self.db.executemany(
                 "UPDATE memories SET last_accessed=? WHERE id=?",
@@ -226,7 +228,7 @@ class LifecycleManager:
         同步回溯 doc_id，使文档侧也能展示被引用记录。"""
         if not cited_ids:
             return
-        now = datetime.now().isoformat(timespec="seconds")
+        now = now_cst().isoformat(timespec="seconds")
         # 一次性扫 raw_docs 构建 memory_id -> doc_id 映射，替代逐条 LIKE 查询（N+1）
         doc_map: dict[str, int] = {}
         for r in self.db.query_all(

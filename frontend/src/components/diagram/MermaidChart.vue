@@ -6,6 +6,8 @@
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import mermaid from 'mermaid'
 import { useToast } from '@/stores/toast'
+import { usePanZoom } from '@/composables/usePanZoom'
+import { applyMermaidTheme } from '@/utils/mermaidTheme'
 
 const toast = useToast()
 
@@ -15,54 +17,62 @@ const props = defineProps({
 })
 
 const container = ref(null)
+const viewport = ref(null)
 const svgHtml = ref('')
 const errorMsg = ref('')
 const errorLine = ref(-1)
 const showSrc = ref(false)
 
+// ---- 平移缩放（CSS transform 作用于内容层，不侵入 Mermaid 生成的 SVG 结构） ----
+const view = usePanZoom()
+const { cssTransform: mcTransform } = view  // 解包为顶层 ref，模板中自动解包
+const panning = ref(false)
+
+// 滚轮缩放（以光标为中心；passive:false 才能 preventDefault 阻止页面滚动）
+function onWheel(e) {
+    if (!svgHtml.value || !viewport.value) return
+    e.preventDefault()
+    const rect = viewport.value.getBoundingClientRect()
+    view.zoomAt(e.clientX - rect.left, e.clientY - rect.top,
+        e.deltaY > 0 ? 1 / view.step : view.step)
+}
+
+// 拖拽平移
+let panStart = null
+function onPanStart(e) {
+    if (!svgHtml.value || e.button !== 0) return
+    e.preventDefault()
+    panning.value = true
+    panStart = { mx: e.clientX, my: e.clientY, vx: view.x.value, vy: view.y.value }
+    window.addEventListener('mousemove', onPanMove)
+    window.addEventListener('mouseup', onPanUp, { once: true })
+}
+function onPanMove(e) {
+    if (!panning.value || !panStart) return
+    view.x.value = panStart.vx + (e.clientX - panStart.mx)
+    view.y.value = panStart.vy + (e.clientY - panStart.my)
+}
+function onPanUp() {
+    panning.value = false
+    panStart = null
+    window.removeEventListener('mousemove', onPanMove)
+}
+
+// 按钮缩放：以视口中心为基准
+function zoomCenter(factor) {
+    const rect = viewport.value?.getBoundingClientRect()
+    if (!rect) return
+    view.zoomAt(rect.width / 2, rect.height / 2, factor)
+}
+
 // 渲染竞态防护：每次 render 递增，回调中比对是否仍是最新请求
 let renderId = 0
 
-// 读取 CSS 变量（getComputedStyle 天然跟随 prefers-color-scheme 切换）
+// 读取 CSS 变量（PNG 导出背景色用；getComputedStyle 天然跟随深浅色切换）
 function readVar(name, fallback) {
     const style = getComputedStyle(document.documentElement)
     const val = style.getPropertyValue(name).trim()
     return val || fallback
-}
-
-// 注入品牌主题变量 —— 全部通过 CSS 变量驱动，深浅模式自动跟随
-function applyTheme() {
-    mermaid.initialize({
-        startOnLoad: false,
-        theme: 'base',
-        suppressErrorRendering: true,
-        themeVariables: {
-            background:           readVar('--mc-bg',              'transparent'),
-            mainBkg:              readVar('--mc-main-bkg',        '#ffffff'),
-            secondaryColor:       readVar('--mc-secondary-color', '#f2f2f3'),
-            tertiaryColor:        readVar('--mc-tertiary-color',  '#e9e9eb'),
-            primaryColor:         readVar('--mc-primary-color',   '#eef2ff'),
-            primaryBorderColor:   readVar('--mc-primary-border',  '#3b5bdb'),
-            primaryTextColor:     readVar('--mc-primary-text',    '#1c1c21'),
-            secondaryBorderColor: readVar('--mc-secondary-border','rgba(17,20,28,.11)'),
-            secondaryTextColor:   readVar('--mc-secondary-text',  '#5e616a'),
-            tertiaryBorderColor:  readVar('--mc-tertiary-border', 'rgba(17,20,28,.06)'),
-            tertiaryTextColor:    readVar('--mc-tertiary-text',   '#94949b'),
-            lineColor:            readVar('--mc-line-color',      '#94949b'),
-            edgeLabelBackground:  readVar('--mc-edge-label-bg',   '#ffffff'),
-            nodeBorder:           readVar('--mc-node-border',     '#3b5bdb'),
-            clusterBkg:           readVar('--mc-cluster-bkg',     '#f2f2f3'),
-            clusterBorder:        readVar('--mc-cluster-border',  'rgba(17,20,28,.11)'),
-            titleColor:           readVar('--mc-title-color',     '#3b5bdb'),
-            fontSize: '14px',
-            fontFamily: 'var(--sans, ui-sans-serif, system-ui, sans-serif)',
-        },
-        securityLevel: 'loose',
-        flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis', padding: 20 },
-        sequence:  { useMaxWidth: false, boxMargin: 10, messageMargin: 35, mirrorActors: false },
-        er:        { useMaxWidth: false },
-        gantt:     { useMaxWidth: false },
-    })
 }
 
 // SVG 后处理：字体兜底 + 节点圆角统一（Mermaid 的部分属性无法通过 CSS 覆盖）
@@ -87,7 +97,7 @@ async function renderDiagram() {
         errorMsg.value = 'Mermaid 代码为空'
         return
     }
-    applyTheme()
+    applyMermaidTheme()
 
     const thisId = ++renderId
     const uid = 'mermaid-' + Math.random().toString(36).slice(2, 10)
@@ -98,6 +108,7 @@ async function renderDiagram() {
         svgHtml.value = svg
         errorMsg.value = ''
         errorLine.value = -1
+        view.reset()  // 重新渲染后复位视口
         await nextTick()
         const svgEl = container.value?.querySelector('svg')
         if (svgEl) postProcess(svgEl)
@@ -176,6 +187,13 @@ function onDarkChange() {
     nextTick(() => renderDiagram())
 }
 
+// 视口层由 v-if 控制，元素重建后需重新绑定 wheel（passive:false 才能阻止页面滚动）
+watch(() => svgHtml.value, () => {
+    nextTick(() => {
+        viewport.value?.addEventListener('wheel', onWheel, { passive: false })
+    })
+})
+
 onMounted(() => {
     darkMediaQuery.addEventListener('change', onDarkChange)
     nextTick(() => renderDiagram())
@@ -183,6 +201,7 @@ onMounted(() => {
 
 onUnmounted(() => {
     darkMediaQuery.removeEventListener('change', onDarkChange)
+    viewport.value?.removeEventListener('wheel', onWheel)
 })
 
 // code 或 diagram_type 变化时重新渲染
@@ -193,15 +212,21 @@ watch([() => props.code, () => props.diagram_type], () => {
 
 <template>
     <div class="mc-wrap" ref="container">
-        <!-- 操作按钮 -->
+        <!-- 操作按钮（图表操作条公共样式已提升全 style.css .fc-actions/.fc-btn） -->
         <div class="fc-actions">
+            <button class="fc-btn" title="放大" @click="zoomCenter(view.step)"><i class="ti ti-zoom-in"></i></button>
+            <button class="fc-btn" title="缩小" @click="zoomCenter(1 / view.step)"><i class="ti ti-zoom-out"></i></button>
+            <button class="fc-btn" title="复位视图（也可双击画布）" @click="view.reset()"><i class="ti ti-focus-2"></i></button>
             <button class="fc-btn" title="查看源码" @click="toggleSource"><i class="ti ti-code"></i> 查看源码</button>
             <button class="fc-btn" title="复制图片" @click="copyImage"><i class="ti ti-copy"></i> 图片</button>
             <button class="fc-btn" title="下载 PNG" @click="downloadPng"><i class="ti ti-photo"></i> PNG</button>
         </div>
 
-        <!-- 渲染成功 -->
-        <div v-if="svgHtml" class="mc-svg" v-html="svgHtml" />
+        <!-- 渲染成功：视口层承接拖拽平移 / 双击复位 -->
+        <div v-if="svgHtml" ref="viewport" class="mc-viewport" :class="{ 'mc-panning': panning }"
+            @mousedown="onPanStart" @dblclick="view.reset()">
+            <div class="mc-svg" :style="{ transform: mcTransform }" v-html="svgHtml" />
+        </div>
 
         <!-- 源码查看面板 -->
         <div v-if="showSrc" class="mc-src">
@@ -232,11 +257,22 @@ watch([() => props.code, () => props.diagram_type], () => {
     padding: 20px 16px 16px;
 }
 
+/* 视口层：拖拽平移 + 滚轮缩放 */
+.mc-viewport {
+    overflow: hidden;
+    cursor: grab;
+    padding: 8px 0;
+}
+
+.mc-viewport.mc-panning {
+    cursor: grabbing;
+    user-select: none;
+}
+
 .mc-svg {
     display: flex;
     justify-content: center;
-    overflow-x: auto;
-    padding: 8px 0;
+    transform-origin: 0 0;
 }
 
 .mc-svg :deep(svg) {

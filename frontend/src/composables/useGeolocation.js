@@ -84,8 +84,3 @@ export async function resolveLocation(force = false) {
 export function cachedLocation() {
     return sessionStorage.getItem(CACHE_KEY) || null
 }
-
-export function clearLocation() {
-    sessionStorage.removeItem(CACHE_KEY)
-    sessionStorage.removeItem(CACHE_COORD_KEY)
-}

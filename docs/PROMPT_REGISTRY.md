@@ -60,6 +60,7 @@
 | 31 | agent/prompts/attention_focus.md | 注意力聚焦 system（§3.4） | agent/intent_parser.py | 惰性 | - | A |
 | 32 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1） | agent/intent_parser.py | 惰性 | - | A |
 | 33 | agent/prompts/honest_clarify.md | 诚实澄清输出模板（§5.2 态二） | agent/core.py | 惰性 | gap_description | A |
+| 34 | agent/prompts/response_depth.md | 场景化回复篇幅档位指令（按场景注入） | agent/response_synthesizer.py | 惰性 | - | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 

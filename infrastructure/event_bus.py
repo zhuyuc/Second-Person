@@ -5,10 +5,10 @@ EventBus —— 模块间零直接调用，通过事件通信解耦。
 - 模块只写订阅者：新功能通过 subscribe() 挂接，不改发布方
 - 同步与异步订阅者都支持；异步订阅者在事件循环中调度
 - 订阅者异常被捕获并记日志，不影响其他订阅者与发布方
-核心事件（11 个，其中 session.ended 为预留未接线）：
+核心事件（11 个）：
   memory.created / memory.updated / turn.completed / lint.completed /
-  session.ended / review.completed / soul_style.updated / output_style.updated /
-  profile.rebuilt / task.progress / embedding.migration.completed
+  review.completed / soul_style.updated / output_style.updated /
+  profile.rebuilt / task.progress / embedding.migration.completed / mood.updated
 订阅方：container 启动时为全部预置事件挂接审计日志订阅者；
 插件通过 on_load(event_bus=...) 按需追加订阅。
 """
@@ -27,7 +27,6 @@ EVT_MEMORY_CREATED = "memory.created"
 EVT_MEMORY_UPDATED = "memory.updated"
 EVT_TURN_COMPLETED = "turn.completed"
 EVT_LINT_COMPLETED = "lint.completed"
-EVT_SESSION_ENDED = "session.ended"
 EVT_REVIEW_COMPLETED = "review.completed"
 EVT_SOUL_STYLE_UPDATED = "soul_style.updated"
 EVT_OUTPUT_STYLE_UPDATED = "output_style.updated"
@@ -35,15 +34,12 @@ EVT_PROFILE_REBUILT = "profile.rebuilt"
 EVT_TASK_PROGRESS = "task.progress"
 EVT_EMBEDDING_MIGRATION_COMPLETED = "embedding.migration.completed"
 EVT_MOOD_UPDATED = "mood.updated"
-EVT_DEGRADATION_STATE_2 = "degradation.state_2"
-EVT_DEGRADATION_STATE_3 = "degradation.state_3"
 
 KNOWN_EVENTS = {
     EVT_MEMORY_CREATED, EVT_MEMORY_UPDATED, EVT_TURN_COMPLETED, EVT_LINT_COMPLETED,
-    EVT_SESSION_ENDED, EVT_REVIEW_COMPLETED, EVT_SOUL_STYLE_UPDATED,
+    EVT_REVIEW_COMPLETED, EVT_SOUL_STYLE_UPDATED,
     EVT_OUTPUT_STYLE_UPDATED, EVT_PROFILE_REBUILT, EVT_TASK_PROGRESS,
     EVT_EMBEDDING_MIGRATION_COMPLETED, EVT_MOOD_UPDATED,
-    EVT_DEGRADATION_STATE_2, EVT_DEGRADATION_STATE_3,
 }
 
 

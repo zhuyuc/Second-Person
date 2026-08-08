@@ -12,6 +12,8 @@ const props = defineProps({
     // 关闭方式开关（个别流程需禁止遮罩/ESC 关闭时置 false）
     closeOnOverlay: { type: Boolean, default: true },
     closeOnEsc: { type: Boolean, default: true },
+    // 右上角 X 开关（线性强制流程如首次引导可隐藏，此时必须同时关闭遮罩/ESC）
+    showClose: { type: Boolean, default: true },
 })
 const emit = defineEmits(['close'])
 
@@ -44,7 +46,7 @@ onBeforeUnmount(() => {
                 <span class="mt" style="margin:0">
                     <slot name="header">{{ title }}</slot>
                 </span>
-                <i class="ti ti-x btn-ghost"
+                <i v-if="showClose" class="ti ti-x btn-ghost"
                     style="cursor:pointer;font-size:var(--icon-sm);color:var(--muted);padding:4px;border-radius:8px;border:none;background:none"
                     title="关闭（Esc）" @click="close"></i>
             </div>

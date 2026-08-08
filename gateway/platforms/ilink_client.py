@@ -164,16 +164,18 @@ class ILinkClient:
                                          headers=headers)
                 if r.status_code in (429,) or r.status_code >= 500:
                     if attempt < MAX_RETRY:
-                        logger.warning("iLink HTTP %s 限流/服务端错误，%.1fs 后重试", r.status_code, delay)
+                        logger.warning(
+                            "iLink HTTP %s 限流/服务端错误，%.1fs 后重试", r.status_code, delay)
                         await asyncio.sleep(delay)
                         delay *= 2
                         continue
-                    raise RuntimeError(f"iLink HTTP {r.status_code}: {r.text[:200]}")
+                    raise RuntimeError(
+                        f"iLink HTTP {r.status_code}: {r.text[:200]}")
                 r.raise_for_status()
                 return r.json()
             except httpx.TimeoutException:
                 raise
-            except (httpx.HTTPStatusError, httpx.RequestError) as e:  # noqa: BLE001
+            except (httpx.HTTPStatusError, httpx.RequestError):  # noqa: BLE001
                 if attempt < MAX_RETRY:
                     await asyncio.sleep(delay)
                     delay *= 2

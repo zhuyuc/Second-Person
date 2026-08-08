@@ -10,7 +10,7 @@ BaseTool + 工具注册表（产品文档 §工具系统 / 开发文档 §6.2）
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 

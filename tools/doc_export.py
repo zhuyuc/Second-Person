@@ -313,8 +313,7 @@ def md_to_pptx_bytes(md_text: str, title: str | None = None) -> bytes:
     """
     try:
         from pptx import Presentation
-        from pptx.util import Inches, Pt
-        from pptx.dml.color import RGBColor
+        from pptx.util import Inches
     except ImportError:
         raise RuntimeError(
             "PPT 导出功能不可用：缺少 python-pptx 依赖，安装后重试") from None
@@ -331,7 +330,8 @@ def md_to_pptx_bytes(md_text: str, title: str | None = None) -> bytes:
     prs.slide_height = Inches(_PPT_SLIDE_H)
 
     blocks = [b for b in soup.children if getattr(b, "name", None)]
-    h1_text = next((b.get_text(strip=True) for b in blocks if b.name == "h1"), "")
+    h1_text = next((b.get_text(strip=True)
+                   for b in blocks if b.name == "h1"), "")
     _add_pptx_cover(prs, title or h1_text or "文档",
                     h1_text if title and h1_text else None)
 
@@ -390,7 +390,8 @@ def md_to_pptx_bytes(md_text: str, title: str | None = None) -> bytes:
             _advance(0.45, len(text) + 10)
         elif name == "table":
             rows = b.find_all("tr")
-            ncols = max((len(r.find_all(["th", "td"])) for r in rows), default=0)
+            ncols = max((len(r.find_all(["th", "td"]))
+                        for r in rows), default=0)
             if not rows or not ncols:
                 continue
             ncols = min(ncols, _PPT_MAX_TABLE_COLS)
@@ -514,7 +515,8 @@ def _fill_pptx_runs(p, nodes, bold=False, italic=False, strike=False,
             _fill_pptx_runs(p, node.children, bold, italic, strike, True)
         elif name == "a":
             run = p.add_run()
-            run.text = (node.get_text() or node.get("href", "")).replace("\n", "\v")
+            run.text = (node.get_text() or node.get(
+                "href", "")).replace("\n", "\v")
             _set_pptx_font(run, _PPT_FONT_CN)
         elif name == "img":
             run = p.add_run()
@@ -552,7 +554,8 @@ def _collect_pptx_items(el, out: list, level: int = 0,
         if text:
             out.append((text, min(level, 2), ordered))
         for sub in nested:
-            _collect_pptx_items(sub, out, level + 1, ordered=(sub.name == "ol"))
+            _collect_pptx_items(sub, out, level + 1,
+                                ordered=(sub.name == "ol"))
 
 
 def _add_pptx_list(slide, items: list, y: float) -> None:
@@ -613,7 +616,8 @@ def _add_pptx_table(slide, rows, ncols: int, y: float, height: float) -> None:
         cells = tr.find_all(["th", "td"])[:ncols]
         for ci in range(ncols):
             cell = table.cell(ri, ci)
-            text = cells[ci].get_text(" ", strip=True) if ci < len(cells) else ""
+            text = cells[ci].get_text(
+                " ", strip=True) if ci < len(cells) else ""
             cell.text = text[:_PPT_CELL_TEXT_MAX]
             is_head = ci < len(cells) and cells[ci].name == "th"
             for p in cell.text_frame.paragraphs:
@@ -733,7 +737,8 @@ def md_to_xlsx_bytes(md_text: str, title: str | None = None) -> bytes:
             rows = b.find_all("tr")
             if not rows:
                 continue
-            ncols = max((len(r.find_all(["th", "td"])) for r in rows), default=0)
+            ncols = max((len(r.find_all(["th", "td"]))
+                        for r in rows), default=0)
             if not ncols:
                 continue
             sheet = wb.create_sheet(_sheet_name(st["pending_title"]))

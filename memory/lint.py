@@ -11,7 +11,7 @@ Lint 健康检查（产品文档 §记忆维护 / §健康度 / 开发文档 §2
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from .naming import suggestion_id as make_sug_id
 from infrastructure.timeutil import now_cst

@@ -29,7 +29,7 @@ function goHome() {
 
 // 点击历史会话：切到对话页并打开该会话
 function openSession(sid) {
-  sess.currentSid = sid
+  sess.setCurrent(sid)
   if (route.path !== '/chat') router.push('/chat')
   window.dispatchEvent(new CustomEvent('sp-open-session', { detail: sid }))
 }

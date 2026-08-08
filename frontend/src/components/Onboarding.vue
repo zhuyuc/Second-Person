@@ -4,6 +4,7 @@ import { api } from '@/api/client'
 import { useSSE } from '@/composables/useSSE'
 import { useToast } from '@/stores/toast'
 import { useBusy } from '@/composables/useBusy'
+import BaseModal from '@/components/BaseModal.vue'
 
 const emit = defineEmits(['done'])
 const toast = useToast()
@@ -64,10 +65,9 @@ async function testChat() {
 }
 
 async function saveChatProvider() {
-  await api.post('/settings/providers', { ...chat.value, display_name: chat.value.display_name || chat.value.model_id })
-  const list = await api.get('/settings/providers')
-  const pid = list[list.length - 1].id
-  await api.put('/settings/model-assignment', { chat_model: pid, agent_model: pid })
+  // 后端创建/去重更新均返回真实 id，不再用“列表最后一个”推断
+  const r = await api.post('/settings/providers', { ...chat.value, display_name: chat.value.display_name || chat.value.model_id })
+  await api.put('/settings/model-assignment', { chat_model: r.id, agent_model: r.id })
   step.value = 2
 }
 
@@ -75,9 +75,8 @@ async function testEmb() {
   const r = await api.post('/onboarding/test-embedding', { provider_config: emb.value })
   toast.push(r.ok ? 'success' : 'warning', r.ok ? 'Embedding 可用' : '测试失败，可跳过先用全文搜索')
   if (r.ok) {
-    await api.post('/settings/providers', { display_name: emb.value.model_id, provider_type: 'openai_compatible', ...emb.value, context_window: 8192 })
-    const list = await api.get('/settings/providers')
-    await api.put('/settings/model-assignment', { embedding_model: list[list.length - 1].id })
+    const rr = await api.post('/settings/providers', { display_name: emb.value.model_id, provider_type: 'openai_compatible', ...emb.value, context_window: 8192 })
+    await api.put('/settings/model-assignment', { embedding_model: rr.id })
   }
 }
 
@@ -96,9 +95,9 @@ async function confirmSoul() {
 </script>
 
 <template>
-  <div class="overlay">
-    <div class="modal modal-md">
-      <div class="mt">首次使用引导 · 第 {{ step }}/4 步</div>
+  <!-- 线性引导流程：禁止遮罩/ESC 关闭（例外已登记 UI_UX_SPEC） -->
+  <BaseModal size="md" :show-close="false" :close-on-overlay="false" :close-on-esc="false">
+    <template #header>首次使用引导 · 第 {{ step }}/4 步</template>
 
       <div v-if="step === 1">
         <p class="muted" style="margin-bottom:12px">配置对话模型（必须，测试通过才能继续）</p>
@@ -186,6 +185,5 @@ async function confirmSoul() {
               v-if="busy('confSoul')" class="ti ti-loader-2"></i> 确认并开始使用</button>
         </div>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 </template>

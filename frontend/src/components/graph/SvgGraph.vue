@@ -126,7 +126,7 @@ function edgeSW(e) {
 function onWheel(evt) {
   evt.preventDefault()
   const p = getSvgPoint(evt)
-  const factor = evt.deltaY > 0 ? 1.12 : 1 / 1.12
+  const factor = evt.deltaY > 0 ? THEME.zoomStep : 1 / THEME.zoomStep
   const base = fitBox().w   // 缩放限幅基于内容尺寸，而非固定画布
   const nw = Math.max(base * 0.05, Math.min(base * 4, vb.value.w * factor))
   const nh = nw * (H / W)

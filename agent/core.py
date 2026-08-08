@@ -14,9 +14,9 @@ import re
 import time
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
-from infrastructure.llm_provider import CircuitOpenError, estimate_tokens
+from infrastructure.llm_provider import CircuitOpenError
 from infrastructure.observability import get_trace_id
 from infrastructure.prompt_loader import PROMPTS
 from observability_langfuse import get_tracer, mark_preview
@@ -26,7 +26,6 @@ from . import response_synthesizer as rs
 from .compression import Compressor, assemble_context, render_summary_body
 from .dag_scheduler import SharedState, build_dag
 from .degradation import (
-    DegradationDecision,
     DegradationState,
     FailureType,
     decide_degradation,
@@ -37,6 +36,7 @@ from .intent_parser import (
     EmotionState,
     FocusResult,
     GapDetector,
+    GapResult,
     IntentParser,
     QuickIntentResult,
     Understanding,
@@ -523,7 +523,12 @@ class AgentCore:
                     # 态一/态二：继续但记录
                 elif isinstance(_r, BaseException):
                     raise _r
-            intents = _results[1]
+            _intent_r = _results[1]
+            if isinstance(_intent_r, BaseException):
+                # 意图解析降级（态一/态二）：兜底空意图，避免异常对象流入下游格式化/迭代
+                intents = []
+            else:
+                intents = _intent_r
         elif not _convergence_done:
             if not onboarding:
                 # 态三：LLM 不可用（熔断/未配置），不再降级硬答
@@ -689,9 +694,16 @@ class AgentCore:
                 doc_only = False
                 shared.deferred_docs.clear()
             else:
+                # 场景篇幅档位（纯规则，零 LLM）：brief 寒暄 / normal 常规 / detailed 深度；
+                # 开关关闭时恒为 normal（不注入指令，行为与画像默认一致）
+                depth_level = "normal"
+                if self.config.get("response_depth_enabled", True):
+                    depth_level = self._decide_depth_level(
+                        message, quick_result, intents, memories, tool_results)
                 prompt = self._build_final_prompt(system_prompt, history, message,
                                                   tool_results, memories, onboarding,
-                                                  skill_text, preload_text)
+                                                  skill_text, preload_text,
+                                                  depth_level=depth_level)
                 valid_ids = {m["id"] for m in memories}
 
                 # 推理模型（DeepSeek 等）的原生思考过程同样以 thinking_delta 外露
@@ -1110,8 +1122,8 @@ class AgentCore:
                 elif tool_name == "render_flowchart":
                     # 图形工具降级兜底：Replan 也未给出有效方案 → 明确告知
                     await emit("thinking_delta", {
-                        "text": f"【工具调用】图形生成失败，已尝试降级但不可用，"
-                        f"将在回复中以文字说明\n"})
+                        "text": "【工具调用】图形生成失败，已尝试降级但不可用，"
+                        "将在回复中以文字说明\n"})
             # 图形工具执行成功 → 发射 tool_visual 事件供前端渲染
             if result.get("ok") and tool_name in ("render_flowchart", "render_mermaid"):
                 visual_data = result.get("result")
@@ -1139,7 +1151,6 @@ class AgentCore:
         """收敛式理解循环：广撒网 → 意图收敛 → 缺口检测 → 定向重收集 → 再收敛。
 
         返回 (Understanding | None, 最后一轮检索结果 list[dict])。"""
-        from observability_langfuse import mark_preview
         core_query = _strip_attachment_context(message)
         retrieval_context = "\n".join(
             f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
@@ -1697,7 +1708,7 @@ class AgentCore:
             return {"title": text[:30], "summary": text[:30],
                     "detail": message, "domain": "general"}
         if tool_name == "file_write":
-            return self._heuristic_file_write(message)
+            return AgentCore._heuristic_file_write(message)
         if tool_name == "web_search":
             return {"query": message}
         if tool_name == "web_fetch":
@@ -1861,11 +1872,9 @@ class AgentCore:
     # ---- prompt 构建 ------------------------------------------------------
     def _build_system_prompt(self, onboarding: bool, location: str | None = None,
                              sid: str = "") -> str:
-        # 当前时间（北京时间），让模型始终知晓"现在"
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
+        # 当前时间（北京时间），让模型始终知道"现在"
         try:
-            now = datetime.now(ZoneInfo("Asia/Shanghai"))
+            now = now_cst()
             wd = "一二三四五六日"[now.weekday()]
             time_hint = f"当前时间（北京时间 UTC+8）：{now:%Y-%m-%d %H:%M} 星期{wd}"
         except Exception:  # noqa: BLE001
@@ -1941,12 +1950,12 @@ class AgentCore:
                             "user_intensity": self.mood._decay(
                                 state_row["user_intensity"],
                                 state_row["user_updated_at"]),
-                            "user_attribution": state_row.get("user_attribution", ""),
+                            "user_attribution": state_row["user_attribution"] or "",
                             "ai_mood": state_row["ai_mood"],
                             "ai_intensity": self.mood._decay(
                                 state_row["ai_intensity"],
                                 state_row["ai_updated_at"]),
-                            "ai_attribution": state_row.get("ai_attribution", ""),
+                            "ai_attribution": state_row["ai_attribution"] or "",
                         }
                         action_ctx = self._build_action_ctx(sid)
                         action_key, action_prompt = \
@@ -1983,7 +1992,7 @@ class AgentCore:
             "SELECT feedback FROM conversations "
             "WHERE session_id=? AND role='assistant' "
             "ORDER BY id DESC LIMIT 1", (sid,))
-        just_completed = last_up and last_up.get("feedback") == 1
+        just_completed = last_up and last_up["feedback"] == 1
 
         return {
             "task_repeat_count": task_repeat,
@@ -1992,7 +2001,8 @@ class AgentCore:
         }
 
     def _build_final_prompt(self, system_prompt, history, message, tool_results,
-                            memories, onboarding, skill_text="", preload_text=""):
+                            memories, onboarding, skill_text="", preload_text="",
+                            depth_level: str = "normal"):
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
@@ -2001,7 +2011,8 @@ class AgentCore:
         # （避免模型受情绪注入影响写出对话式正文/思考过程）
         if any(r.get("deferred") for r in (tool_results or [])):
             system_prompt = _strip_mood_section(system_prompt)
-        synth = rs.build_response_prompt(message, tool_results, memories)
+        synth = rs.build_response_prompt(
+            message, tool_results, memories, depth_level=depth_level)
         # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能
         merged_system = system_prompt + "\n\n" + synth[0]["content"]
         if skill_text:
@@ -2207,6 +2218,29 @@ class AgentCore:
             return "chat"
         return "other"
 
+    @staticmethod
+    def _decide_depth_level(message: str, quick_result, intents,
+                            memories, tool_results) -> str:
+        """场景篇幅档位决策（纯规则，零 LLM 成本）：
+        brief 寒暄 / normal 常规 / detailed 深度解答。
+        brief 优先于 detailed：简单问候即使命中背景记忆也保持简短。"""
+        types = {getattr(i, "intent_type", "") for i in (intents or [])}
+        tools = {t for i in (intents or [])
+                 for t in (getattr(i, "tools_needed", None) or [])}
+        # brief：快速通道 + 短消息 + 无工具需求 + 纯 chat/meta 意图
+        if (quick_result is not None and not quick_result.needs_convergence
+                and len(message) <= 20 and not tools
+                and types and types <= {"chat", "meta"}):
+            return "brief"
+        # detailed：需深度收敛 / 工具类意图 / 有工具执行 / 记忆命中较多
+        if (quick_result is not None and quick_result.needs_convergence
+                or bool(types & {"query_external", "query_knowledge",
+                                 "compute", "file_op"})
+                or bool(tool_results)
+                or len(memories or []) >= 3):
+            return "detailed"
+        return "normal"
+
     def _mark_review_candidate(self, sid: str, user_msg_id: int, message: str,
                                intents, priority: int = 0) -> None:
         """第 8 步主动记忆检测：含新事实句式且非记忆指令 → 写入回顾候选表。"""
@@ -2228,7 +2262,6 @@ class AgentCore:
         时按 over_budget_strategy 处置。当前唯一策略 remind_only：仅推系统通知
         提醒（配合 NotificationManager 24h 去重），不阻断对话。
         """
-        from datetime import datetime
         strategy = self.config.get("over_budget_strategy", "remind_only")
         alert_ratio = self.config.get("budget_alert_ratio", 80)
         now = now_cst()

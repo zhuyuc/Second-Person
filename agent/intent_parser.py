@@ -17,14 +17,12 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from infrastructure.json_repair import repair_json
 from infrastructure.prompt_loader import PROMPTS
 
 from .degradation import (
     DegradationDecision,
-    DegradationState,
     FailureType,
     decide_degradation,
 )

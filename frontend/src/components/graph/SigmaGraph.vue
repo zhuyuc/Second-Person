@@ -106,9 +106,6 @@ watch(() => [props.nodes, props.edges], () => {
 
 onMounted(mount)
 onBeforeUnmount(() => { if (renderer) { renderer.kill(); renderer = null } })
-
-function resetView() { if (renderer) renderer.getCamera().animatedReset() }
-defineExpose({ resetView })
 </script>
 
 <template>

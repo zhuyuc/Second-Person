@@ -7,7 +7,10 @@ import { useConfirm } from '@/stores/confirm'
 import { useSessions } from '@/stores/sessions'
 import { useBusy } from '@/composables/useBusy'
 import KnowledgeGraph from '@/components/graph/KnowledgeGraph.vue'
+import BaseModal from '@/components/BaseModal.vue'
 import { domainLabel, loadDomainLabels } from '@/utils/domainLabel'
+import { formatTimeFull as formatTime, fmtSize as fmtSizeBase } from '@/utils/format'
+import { CONF_MAP, LIFE_MAP, SRC_MAP, ATTR_MAP } from '@/utils/enumLabel'
 
 const router = useRouter()
 const toast = useToast()
@@ -107,18 +110,9 @@ const timelineGroups = computed(() => {
   return groups
 })
 
-function formatTime(iso) {
-  if (!iso) return '-'
-  const d = new Date(String(iso).replace(' ', 'T'))
-  if (isNaN(d.getTime())) return iso
-  const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-}
+// 文件大小：空值显示 '-'（基础实现在 utils/format.js）
+function fmtSize(n) { return fmtSizeBase(n) || '-' }
 
-const CONF_MAP = { strong: '强', medium: '中', low: '弱', disputed: '争议' }
-const LIFE_MAP = { active: '活跃', stable: '稳定', stale: '过期', archived: '已归档', missing: '缺失' }
-const SRC_MAP = { memory: '对话记忆', knowledge: '外部知识' }
-const ATTR_MAP = { imported: '外部导入', verified: '已验证经验', inferred: '待验证推断' }
 // 用户画像维度状态中文化（未知值兜底显示原文）
 const DIM_STATUS = { active: '活跃', building: '积累中', stable: '稳定', mature: '成熟', sparse: '样本较少', empty: '暂无内容' }
 function dimStatus(s) { return DIM_STATUS[s] || s }
@@ -133,8 +127,9 @@ const DEDUCT_MAP = {
 
 async function loadProfile() {
   try {
-    const [p, s, o, h, pd] = await Promise.all([
+    const [p, s, o] = await Promise.all([
       api.get('/profile'), api.get('/soul'), api.get('/output-style'),
+      // 联动刷新：SOUL 版本历史与待确认项（结果写入各自 ref）
       (async () => {
         soulHistory.value = await api.get('/soul/style/history?source=' + soulSource.value)
       })(),
@@ -401,7 +396,7 @@ async function uploadDocs(fileList) {
       docQueue.value[fi].status = 'done'
       if (result.preview) {
         // 预览模式（已关闭静默导入）：提炼结果先进勾选确认队列
-        previewQueue.push({
+        previewQueue.value.push({
           doc_id: result.doc_id, filename: f.name, items: result.items,
           checked: result.items.map(() => true),
         })
@@ -425,9 +420,9 @@ async function uploadDocs(fileList) {
 
 // 预览导入确认弹窗（silent_doc_import=false）
 const importPreview = ref(null)   // { doc_id, filename, items, checked }
-const previewQueue = []
+const previewQueue = ref([])
 const previewSubmitting = ref(false)
-function openNextPreview() { importPreview.value = previewQueue.shift() || null }
+function openNextPreview() { importPreview.value = previewQueue.value.shift() || null }
 function previewCheckedCount() {
   const p = importPreview.value
   return p ? p.checked.filter(Boolean).length : 0
@@ -470,13 +465,6 @@ async function deleteDoc(d) {
     toast.push('success', '已删除')
   }
 }
-function fmtSize(bytes) {
-  if (!bytes) return '-'
-  if (bytes < 1024) return bytes + ' B'
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
-  return (bytes / 1024 / 1024).toFixed(1) + ' MB'
-}
-
 // 本地目录接入：添加 / 列表 / 手动扫描 / 启用暂停 / 移除 / 文件详情
 const localDirs = ref([])
 const localDirPath = ref('')
@@ -543,7 +531,7 @@ function selectTab(i) {
   else if (i === 5) { loadDocs(); loadLocalDirs() }
 }
 
-onMounted(() => selectTab(1))
+onMounted(() => selectTab(0))
 onActivated(() => selectTab(tab.value))
 </script>
 
@@ -898,10 +886,8 @@ onActivated(() => selectTab(tab.value))
         <!-- 多文件：总进度条 + 逐文件状态队列 -->
         <template v-if="docProgress.totalFiles > 1">
           <div style="margin:12px auto 0;max-width:320px;display:flex;align-items:center;gap:8px">
-            <div style="flex:1;height:6px;border-radius:var(--radius-pill);background:var(--bd);overflow:hidden">
-              <div
-                :style="{ width: docOverallPct + '%', height: '100%', background: 'var(--acctx)', transition: '.25s' }">
-              </div>
+            <div class="progress" style="flex:1">
+              <div :style="{ width: docOverallPct + '%', background: 'var(--acctx)' }"></div>
             </div>
             <span class="muted" style="font-size:var(--fs-xs);min-width:32px;text-align:right">{{ docOverallPct
             }}%</span>
@@ -913,10 +899,9 @@ onActivated(() => selectTab(tab.value))
             </div>
           </div>
         </template>
-        <div v-else-if="docProgress.stage === 'distilling' && docProgress.total"
-          style="margin:10px auto 0;max-width:280px;height:6px;border-radius:var(--radius-pill);background:var(--bd);overflow:hidden">
-          <div
-            :style="{ width: (docProgress.current / docProgress.total * 100) + '%', height: '100%', background: 'var(--acctx)', transition: '.25s' }">
+        <div v-else-if="docProgress.stage === 'distilling' && docProgress.total" class="progress"
+          style="margin:10px auto 0;max-width:280px">
+          <div :style="{ width: (docProgress.current / docProgress.total * 100) + '%', background: 'var(--acctx)' }">
           </div>
         </div>
       </template>
@@ -948,11 +933,9 @@ onActivated(() => selectTab(tab.value))
     </div>
   </div>
 
-  <!-- 记忆详情弹窗（可从文档详情/知识图谱抽屉等二级弹窗内打开，需置于其上层） -->
-  <div v-if="detail" class="overlay" style="z-index:var(--z-modal-2)" @click.self="detail = null">
-    <div class="modal">
-      <div class="mt">记忆详情</div>
-      <h3 class="modal-subtitle">{{ detail.frontmatter?.title }}</h3>
+  <!-- 记忆详情弹窗（可从文档详情/知识图谱抽屉等二级弹窗内打开，需置于其上层；统一走 BaseModal） -->
+  <BaseModal v-if="detail" title="记忆详情" stacked @close="detail = null">
+    <h3 class="modal-subtitle">{{ detail.frontmatter?.title }}</h3>
       <!-- missing：文件丢失提示 -->
       <div v-if="detail.degraded || detail.frontmatter?.lifecycle === 'missing'" class="banner"
         style="background:var(--warnbg);color:var(--warntx);margin-bottom:12px">
@@ -1053,12 +1036,10 @@ onActivated(() => selectTab(tab.value))
           'missing'
           ? '删除索引' : '删除' }}</button>
       </div>
-    </div>
-  </div>
-  <!-- 导入预览确认弹窗（silent_doc_import=false） -->
-  <div v-if="importPreview" class="overlay" style="z-index:var(--z-modal-2)">
-    <div class="modal modal-lg">
-      <div class="mt">确认导入内容</div>
+  </BaseModal>
+  <!-- 导入预览确认弹窗（silent_doc_import=false；需明确抉择，禁用遮罩/ESC/X 关闭） -->
+  <BaseModal v-if="importPreview" title="确认导入内容" size="lg" :show-close="false" :close-on-overlay="false"
+    :close-on-esc="false">
       <div class="muted" style="margin-bottom:10px">「{{ importPreview.filename }}」提炼出 {{ importPreview.items.length
       }} 条候选记忆，勾选需要写入的条目（未勾选的将丢弃）：</div>
       <div style="max-height:360px;overflow-y:auto;margin-bottom:14px">
@@ -1079,62 +1060,50 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-primary" :disabled="previewSubmitting" @click="submitImportPreview(false)">
           写入勾选的 {{ previewCheckedCount() }} 条</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
   <!-- SOUL diff 弹窗 -->
-  <div v-if="diffData" class="overlay" @click.self="diffData = null">
-    <div class="modal">
-      <div class="mt">版本对比</div>
-      <div class="label">旧版</div>
-      <pre style="white-space:pre-wrap;max-height:200px;overflow:auto">{{ diffData.from }}</pre>
-      <div class="label" style="margin-top:10px">新版</div>
-      <pre style="white-space:pre-wrap;max-height:200px;overflow:auto">{{ diffData.to }}</pre>
-      <div class="fg" style="justify-content:flex-end;margin-top:16px">
-        <button @click="diffData = null">关闭</button>
-      </div>
-    </div>
-  </div>
+  <BaseModal v-if="diffData" title="版本对比" @close="diffData = null">
+    <div class="label">旧版</div>
+    <pre style="white-space:pre-wrap;max-height:200px;overflow:auto">{{ diffData.from }}</pre>
+    <div class="label" style="margin-top:10px">新版</div>
+    <pre style="white-space:pre-wrap;max-height:200px;overflow:auto">{{ diffData.to }}</pre>
+    <template #footer>
+      <button @click="diffData = null">关闭</button>
+    </template>
+  </BaseModal>
   <!-- SOUL_CORE 编辑弹窗 -->
-  <div v-if="showSoulCoreEdit" class="overlay" @click.self="showSoulCoreEdit = false">
-    <div class="modal">
-      <div class="mt">编辑 SOUL_CORE 核心人格</div>
-      <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 核心人格影响全局行为，保存前会二次确认，下次会话生效。</div>
-      <textarea v-model="soulCoreDraft"
-        style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button @click="showSoulCoreEdit = false">取消</button>
-        <button class="btn-primary" :disabled="busy('saveSoul')" @click="run('saveSoul', saveSoulCore)"><i
-            v-if="busy('saveSoul')" class="ti ti-loader-2"></i> 保存</button>
-      </div>
-    </div>
-  </div>
+  <BaseModal v-if="showSoulCoreEdit" title="编辑 SOUL_CORE 核心人格" @close="showSoulCoreEdit = false">
+    <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 核心人格影响全局行为，保存前会二次确认，下次会话生效。</div>
+    <textarea v-model="soulCoreDraft"
+      style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
+    <template #footer>
+      <button @click="showSoulCoreEdit = false">取消</button>
+      <button class="btn-primary" :disabled="busy('saveSoul')" @click="run('saveSoul', saveSoulCore)"><i
+          v-if="busy('saveSoul')" class="ti ti-loader-2"></i> 保存</button>
+    </template>
+  </BaseModal>
   <!-- 输出样式画像编辑弹窗 -->
-  <div v-if="showOutputStyleEdit" class="overlay" @click.self="showOutputStyleEdit = false">
-    <div class="modal">
-      <div class="mt">编辑输出样式画像</div>
-      <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 将覆盖当前画像内容，保存前会二次确认，下次会话生效。</div>
-      <textarea v-model="outputStyleDraft"
-        style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button @click="showOutputStyleEdit = false">取消</button>
-        <button class="btn-primary" :disabled="busy('saveOut')" @click="run('saveOut', saveOutputStyle)"><i
-            v-if="busy('saveOut')" class="ti ti-loader-2"></i> 保存</button>
-      </div>
-    </div>
-  </div>
+  <BaseModal v-if="showOutputStyleEdit" title="编辑输出样式画像" @close="showOutputStyleEdit = false">
+    <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 将覆盖当前画像内容，保存前会二次确认，下次会话生效。</div>
+    <textarea v-model="outputStyleDraft"
+      style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
+    <template #footer>
+      <button @click="showOutputStyleEdit = false">取消</button>
+      <button class="btn-primary" :disabled="busy('saveOut')" @click="run('saveOut', saveOutputStyle)"><i
+          v-if="busy('saveOut')" class="ti ti-loader-2"></i> 保存</button>
+    </template>
+  </BaseModal>
   <!-- 知识库文档详情弹窗 -->
-  <div v-if="docDetail" class="overlay" style="z-index:var(--z-modal)" @click.self="docDetail = null">
-    <div class="modal">
-      <div class="mt">文档详情</div>
-      <h3 class="modal-subtitle">
-        <i class="ti ti-file-text" style="margin-right:6px;color:var(--acctx)"></i>{{ docDetail.filename }}
-      </h3>
+  <BaseModal v-if="docDetail" title="文档详情" @close="docDetail = null">
+    <h3 class="modal-subtitle">
+      <i class="ti ti-file-text" style="margin-right:6px;color:var(--acctx)"></i>{{ docDetail.filename }}
+    </h3>
       <div class="muted" style="margin-bottom:12px">{{ fmtSize(docDetail.size) }} · 提炼 {{ docDetail.memory_count }} 条记忆
         ·
         {{ formatTime(docDetail.imported_at) }}</div>
       <div class="label">文档正文</div>
       <pre
-        style="white-space:pre-wrap;max-height:280px;overflow:auto;margin-bottom:12px;background:var(--surface-2);padding:12px;border-radius:8px;font-family:var(--mono);font-size:var(--fs-sm)">
+        style="white-space:pre-wrap;max-height:280px;overflow:auto;margin-bottom:12px;background:var(--surface-2);padding:12px;border-radius:var(--radius-sm);font-family:var(--mono);font-size:var(--fs-sm)">
       {{ docDetail.content || '（无法解析正文或内容为空）' }}</pre>
       <div class="label">提炼的记忆（{{ docDetail.memories.length }}）</div>
       <div v-for="m in docDetail.memories" :key="m.id" class="cw" style="cursor:pointer;padding:12px"
@@ -1160,13 +1129,10 @@ onActivated(() => selectTab(tab.value))
       <div class="fg" style="justify-content:flex-end;margin-top:16px">
         <button @click="docDetail = null">关闭</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
   <!-- 本地目录文件详情弹窗 -->
-  <div v-if="localDirFiles" class="overlay" style="z-index:var(--z-modal)" @click.self="localDirFiles = null">
-    <div class="modal">
-      <div class="mt">目录文件</div>
-      <h3 class="modal-subtitle">{{ localDirFiles.dir.path }}</h3>
+  <BaseModal v-if="localDirFiles" title="目录文件" @close="localDirFiles = null">
+    <h3 class="modal-subtitle">{{ localDirFiles.dir.path }}</h3>
       <div class="muted" style="margin-bottom:12px">
         已导入 {{ localDirFiles.files.filter(f => f.status === 'imported').length }}/{{ localDirFiles.files.length }} 个文件
       </div>
@@ -1186,25 +1152,19 @@ onActivated(() => selectTab(tab.value))
       <div class="fg" style="justify-content:flex-end">
         <button @click="localDirFiles = null">关闭</button>
       </div>
+  </BaseModal>
+  <!-- 重复检测：并排对比弹窗（裁决按钮与信息维度均与矛盾对比弹窗对齐；统一走 BaseModal） -->
+  <BaseModal v-if="dupCompare" title="疑似重复对比" size="xl" @close="dupCompare = null">
+    <div class="fg" style="gap:6px;justify-content:flex-end;margin-bottom:14px">
+      <button class="btn-xs" :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_a'))">保留 A</button>
+      <button class="btn-xs" :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_b'))">保留 B</button>
+      <button class="btn-xs btn-primary" :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_both'))">都保留</button>
+      <button class="btn-xs btn-danger" :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'delete_both'))">全部删除</button>
     </div>
-  </div>
-  <!-- 重复检测：并排对比弹窗（裁决按钮与信息维度均与矛盾对比弹窗对齐） -->
-  <div v-if="dupCompare" class="overlay" style="z-index:var(--z-modal)" @click.self="dupCompare = null">
-    <div class="modal modal-xl">
-      <div class="row"
-        style="margin-bottom:14px;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-        <span class="mt" style="margin:0">疑似重复对比</span>
-        <div class="fg" style="gap:6px">
-          <button class="btn-xs" :disabled="busy('dup')"
-            @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_a'))">保留 A</button>
-          <button class="btn-xs" :disabled="busy('dup')"
-            @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_b'))">保留 B</button>
-          <button class="btn-xs btn-primary" :disabled="busy('dup')"
-            @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_both'))">都保留</button>
-          <button class="btn-xs btn-danger" :disabled="busy('dup')"
-            @click="run('dup', () => resolveDup(dupCompare.sug, 'delete_both'))">全部删除</button>
-        </div>
-      </div>
       <div class="g2" style="gap:16px;align-items:stretch">
         <div v-for="(m, k) in [dupCompare.a, dupCompare.b]" :key="k" class="cw"
           style="margin:0;display:flex;flex-direction:column;min-height:0">
@@ -1227,10 +1187,8 @@ onActivated(() => selectTab(tab.value))
               <span class="muted">引用 {{ m.access_count || 0 }} 次</span>
             </div>
             <p
-              style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
-              {{ m.summary }}
-
-              {{ m.detail }}</p>
+              style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">{{
+              [m.summary, m.detail].filter(Boolean).join('\n\n') }}</p>
           </template>
           <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">记忆不存在</div>
         </div>
@@ -1238,25 +1196,19 @@ onActivated(() => selectTab(tab.value))
       <div class="fg" style="justify-content:flex-end;margin-top:16px">
         <button @click="dupCompare = null">关闭</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
   <!-- 矛盾记忆：左右对比弹窗 -->
-  <div v-if="conflictCompare" class="overlay" style="z-index:var(--z-modal)" @click.self="conflictCompare = null">
-    <div class="modal modal-xl">
-      <div class="row"
-        style="margin-bottom:14px;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-        <span class="mt" style="margin:0">矛盾记忆对比</span>
-        <div class="fg" style="gap:6px">
-          <button class="btn-xs" :disabled="busy('conf')"
-            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_a'))">保留 A</button>
-          <button class="btn-xs" :disabled="busy('conf')"
-            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_b'))">保留 B</button>
-          <button class="btn-xs btn-primary" :disabled="busy('conf')"
-            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_both'))">都保留</button>
-          <button class="btn-xs btn-danger" :disabled="busy('conf')"
-            @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'delete_both'))">全部删除</button>
-        </div>
-      </div>
+  <BaseModal v-if="conflictCompare" title="矛盾记忆对比" size="xl" @close="conflictCompare = null">
+    <div class="fg" style="gap:6px;justify-content:flex-end;margin-bottom:14px">
+      <button class="btn-xs" :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_a'))">保留 A</button>
+      <button class="btn-xs" :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_b'))">保留 B</button>
+      <button class="btn-xs btn-primary" :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_both'))">都保留</button>
+      <button class="btn-xs btn-danger" :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'delete_both'))">全部删除</button>
+    </div>
       <div v-if="conflictCompare.detectedAt" class="muted" style="font-size:var(--fs-sm);margin-bottom:12px">检测于 {{
         conflictCompare.detectedAt }}</div>
       <div v-if="conflictCompare.loading" class="muted" style="text-align:center;padding:40px 0">加载中…</div>
@@ -1288,10 +1240,8 @@ onActivated(() => selectTab(tab.value))
                 <span class="muted">引用 {{ conflictCompare.detailA.access_count || 0 }} 次</span>
               </div>
               <p
-                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
-                {{ conflictCompare.detailA.summary }}
-
-                {{ conflictCompare.detailA.detail }}</p>
+                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">{{
+                [conflictCompare.detailA.summary, conflictCompare.detailA.detail].filter(Boolean).join('\n\n') }}</p>
             </template>
             <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">{{
               conflictCompare.sourceA?.content || '记忆不存在' }}</div>
@@ -1322,10 +1272,8 @@ onActivated(() => selectTab(tab.value))
                 <span class="muted">引用 {{ conflictCompare.detailB.access_count || 0 }} 次</span>
               </div>
               <p
-                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">
-                {{ conflictCompare.detailB.summary }}
-
-                {{ conflictCompare.detailB.detail }}</p>
+                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">{{
+                [conflictCompare.detailB.summary, conflictCompare.detailB.detail].filter(Boolean).join('\n\n') }}</p>
             </template>
             <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">{{
               conflictCompare.sourceB?.content || '记忆不存在' }}</div>
@@ -1335,23 +1283,19 @@ onActivated(() => selectTab(tab.value))
       <div class="fg" style="justify-content:flex-end;margin-top:12px;gap:8px">
         <button @click="conflictCompare = null">关闭</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
   <!-- 用户画像维度详情弹窗 -->
-  <div v-if="dimDetail" class="overlay" style="z-index:var(--z-modal)" @click.self="dimDetail = null">
-    <div class="modal">
-      <div class="row" style="margin-bottom:14px">
-        <span class="mt" style="margin:0">{{ dimDetail.name }}</span>
-        <span class="badge badge-g">{{ dimStatus(dimDetail.status) }}</span>
-      </div>
-      <div v-for="(it, j) in dimDetail.items" :key="j"
-        style="margin-bottom:10px;color:var(--sec);font-size:var(--fs-md);line-height:1.6">
-        · {{ it.text }} <span v-if="it.inferred" class="muted">[推断]</span>
-      </div>
-      <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:24px 12px">该维度暂无内容</div>
-      <div class="fg" style="justify-content:flex-end;margin-top:16px">
-        <button @click="dimDetail = null">关闭</button>
-      </div>
+  <BaseModal v-if="dimDetail" @close="dimDetail = null">
+    <template #header>
+      {{ dimDetail.name }} <span class="badge badge-g" style="margin-left:8px">{{ dimStatus(dimDetail.status) }}</span>
+    </template>
+    <div v-for="(it, j) in dimDetail.items" :key="j"
+      style="margin-bottom:10px;color:var(--sec);font-size:var(--fs-md);line-height:1.6">
+      · {{ it.text }} <span v-if="it.inferred" class="muted">[推断]</span>
     </div>
-  </div>
+    <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:24px 12px">该维度暂无内容</div>
+    <template #footer>
+      <button @click="dimDetail = null">关闭</button>
+    </template>
+  </BaseModal>
 </template>

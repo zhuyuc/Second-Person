@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
 from typing import Any, Awaitable, Callable
 from infrastructure.timeutil import now_cst
 
@@ -132,8 +131,6 @@ class Distiller:
     async def _write_memory(self, item: dict, attribution: str, source_type: str) -> str | None:
         title = item.get("title", "")[:30]
         summary = item.get("summary", "")[:30]
-        detail = item.get("detail", "")
-        domain = item.get("domain", "general")
         entities, entity_types = normalize_entities(item.get("entities", []))
         item["entities"] = entities
         confidence = item.get("confidence") or ATTRIBUTION_CONFIDENCE.get(

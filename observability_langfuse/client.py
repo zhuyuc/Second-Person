@@ -111,6 +111,7 @@ class IngestionClient:
                 continue
         # 全部重试耗尽
         self._on_failure()
+        logger.warning("Langfuse 上报重试耗尽：%s", last_err)
         # 事件保护：失败时重新放回队列头部（不超过队列上限）
         if len(self._queue) + len(batch) <= _MAX_QUEUE:
             self._queue = batch + self._queue

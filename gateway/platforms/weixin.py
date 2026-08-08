@@ -22,7 +22,7 @@ import os
 
 from .base import BasePlatformAdapter, MAX_MEDIA_MB
 from .ilink_client import (ILinkClient, MSG_FILE, MSG_IMAGE, MSG_TEXT,
-                           MSG_VIDEO, MSG_VOICE, extract_media, extract_text,
+                           MSG_VOICE, extract_media, extract_text,
                            media_aes_key, media_filename, media_url)
 
 logger = logging.getLogger("second_person.weixin")
@@ -85,7 +85,8 @@ class WeixinAdapter(BasePlatformAdapter):
                 seg = text[i:i + _WEIXIN_SEG]
                 if i > 0:
                     seg = f"（续前）\n{seg}"
-                logger.debug("iLink sendmessage → to=%s seg_len=%d", chat_id, len(seg))
+                logger.debug(
+                    "iLink sendmessage → to=%s seg_len=%d", chat_id, len(seg))
                 resp = await self.client.send_message(
                     chat_id, self._context_token,
                     [{"type": MSG_TEXT, "text_item": {"text": seg}}])

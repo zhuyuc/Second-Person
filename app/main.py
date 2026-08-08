@@ -8,7 +8,6 @@ FastAPI 应用入口（开发文档 §基础信息 / §八 错误码）。
 """
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -78,8 +77,8 @@ def create_app(data_dir: str | Path) -> FastAPI:
             "trace_id": tid, "details": None})
 
     # 路由注册
-    from .routes import chat, memory, settings, soul, misc, mood, profile_review
-    for mod in (chat, memory, settings, soul, misc, mood, profile_review):
+    from .routes import chat, memory, settings, soul, misc
+    for mod in (chat, memory, settings, soul, misc):
         app.include_router(mod.router, prefix="/api")
 
     # 对话图片（用户消息携带的图片持久化目录，历史消息回看）

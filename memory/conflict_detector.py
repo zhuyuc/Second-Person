@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+
+from infrastructure.timeutil import now_cst
 from pathlib import Path
 
-import yaml
 
 from .md_file import dump_frontmatter_doc, parse_memory_md, split_frontmatter
 
@@ -62,7 +63,7 @@ class ConflictDetector:
         row_a, doc_a = self._load_doc(mid_a)
         row_b, doc_b = self._load_doc(mid_b)
         fm = {"conflict_id": conflict_id, "status": "pending",
-              "detected_at": datetime.now().strftime("%Y-%m-%d"),
+              "detected_at": now_cst().strftime("%Y-%m-%d"),
               "detected_by": "conflict_detector"}
         body = (f"## 来源 A\n- 记忆：[[{mid_a}]]\n- 内容：{doc_a.summary if doc_a else ''}\n\n"
                 f"## 来源 B\n- 记忆：[[{mid_b}]]\n- 内容：{doc_b.summary if doc_b else ''}\n\n"
@@ -143,7 +144,7 @@ class ConflictDetector:
             raise ValueError(f"未知裁决：{resolution}")
 
         fm["status"] = "resolved"
-        fm["resolved_at"] = datetime.now().strftime("%Y-%m-%d")
+        fm["resolved_at"] = now_cst().strftime("%Y-%m-%d")
         body += f"\n- 裁决：{resolution} @ {fm['resolved_at']}\n"
         f.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
 

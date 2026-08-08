@@ -13,7 +13,6 @@ BasePlatformAdapter：on_message / send_message / health_check / connect / disco
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.adapter")

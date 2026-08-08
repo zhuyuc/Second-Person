@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Request, UploadFile, File
 
@@ -208,27 +208,6 @@ async def embedding_migrate(request: Request):
     return {"code": 200, "data": {"migration_id": mid}}
 
 
-@router.get("/settings/embedding/migration-status")
-async def migration_status():
-    row = _c().db.query_one(
-        "SELECT * FROM embedding_migration ORDER BY id DESC LIMIT 1")
-    return {"code": 200, "data": dict(row) if row else None}
-
-
-@router.post("/settings/embedding/migration-pause")
-async def migration_pause():
-    _c().db.execute(
-        "UPDATE embedding_migration SET status='paused' WHERE status='running'")
-    return {"code": 200, "data": {}}
-
-
-@router.post("/settings/embedding/migration-resume")
-async def migration_resume():
-    _c().db.execute(
-        "UPDATE embedding_migration SET status='running' WHERE status='paused'")
-    return {"code": 200, "data": {}}
-
-
 # ---- 3.4 参数 -------------------------------------------------------------
 @router.get("/settings/params")
 async def get_params():
@@ -301,7 +280,6 @@ async def refresh_tools(cid: str):
 async def test_connector(request: Request):
     """仅测试连接器连通性，不入库。"""
     body = await request.json()
-    c = _c()
     cfg = {
         "name": body.get("name", "test"),
         "transport": body["transport"],
@@ -314,7 +292,6 @@ async def test_connector(request: Request):
             return {"code": 200, "data": {"ok": False, "error": "请先填写启动命令"}}
     elif not (cfg["config"] or {}).get("url"):
         return {"code": 200, "data": {"ok": False, "error": "请先填写端点地址"}}
-    from connectors.manager import ConnectorManager
     try:
         # 临时 MCPClient 测试连接
         from connectors.mcp_client import MCPClient
@@ -497,7 +474,6 @@ async def import_data(file: UploadFile = File(...)):
     # 导入前强制保护性备份 + manifest 校验（复用 restore 的校验路径）
     await c.backup.create(label="pre_import", protective=True)
     import zipfile
-    import json
     with zipfile.ZipFile(tmp) as z:
         names = z.namelist()
         if "config.yaml" not in names:
@@ -1000,33 +976,3 @@ async def run_task(task_id: str):
 @router.get("/settings/tasks/{task_id}/logs")
 async def task_logs(task_id: str):
     return {"code": 200, "data": _c().scheduler.task_logs(task_id)}
-
-
-# ---- 2.12 draft 技能 ------------------------------------------------------
-@router.get("/skills/drafts")
-async def skill_drafts():
-    return {"code": 200, "data": _c().skills.list_drafts()}
-
-
-@router.post("/skills/drafts/activate")
-async def activate_skill(request: Request):
-    body = await request.json()
-    await _c().skills.activate(body["skill_id"].replace("skill_", ""))
-    return {"code": 200, "data": {}}
-
-
-@router.post("/skills/drafts/delete")
-async def delete_skill(request: Request):
-    body = await request.json()
-    await _c().skills.delete(body["skill_id"].replace("skill_", ""))
-    return {"code": 200, "data": {}}
-
-
-@router.post("/skills/create")
-async def create_skill(request: Request):
-    """用户手动创建技能（直接 active）。"""
-    body = await request.json()
-    name = (body.get("name") or "skill").strip().replace(" ", "_")[:40]
-    md = body.get("content") or f"---\nstatus: active\n---\n# {name}\n"
-    await _c().skills.create_skill(name, md)
-    return {"code": 200, "data": {"skill_id": f"skill_{name}"}}

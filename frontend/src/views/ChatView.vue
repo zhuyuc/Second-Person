@@ -8,9 +8,13 @@ import { useToast } from '@/stores/toast'
 import { useSessions } from '@/stores/sessions'
 import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
 import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
+import BaseModal from '@/components/BaseModal.vue'
+import { applyMermaidTheme } from '@/utils/mermaidTheme'
+import { formatRelative as formatTime, formatTimeFull, fmtSize } from '@/utils/format'
+import { confidenceLabel, lifecycleLabel } from '@/utils/enumLabel'
 
-// Mermaid 初始化：暗色主题，禁止自动启动（我们手动触发 run）
-mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' })
+// Mermaid 主题：CSS 变量驱动（与 MermaidChart 同源），自动跟随系统深浅色；手动触发 run
+applyMermaidTheme()
 // 自定义 marked 代码块渲染器：mermaid 语言块输出为 <div class="mermaid">，其余照常
 const originalRenderer = new marked.Renderer()
 const mermaidRenderer = new marked.Renderer()
@@ -92,7 +96,7 @@ function stripToastNotifs(msgs) {
 }
 
 async function openSession(sid) {
-  sessStore.currentSid = sid
+  sessStore.setCurrent(sid)
   const msgs = await api.get('/chat/messages?session_id=' + sid)
   // 历史消息：若用户消息含附件上下文前缀，只展示真实提问 + 附件胶囊
   for (const m of msgs) {
@@ -276,12 +280,6 @@ function downloadAttachFile(file) {
 function attachExt(name) {
   return name && name.includes('.') ? name.split('.').pop().toUpperCase() : '未知'
 }
-function fmtSize(n) {
-  if (n == null) return ''
-  if (n < 1024) return n + ' B'
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
-  return (n / 1024 / 1024).toFixed(1) + ' MB'
-}
 // 文档附件统一存入知识库：发送时后台异步导入，不阻塞对话
 async function ingestToKb(file) {
   try {
@@ -343,7 +341,7 @@ async function send() {
   // 避免消息落进以前的会话记录
   if (!sessStore.currentSid) {
     const d = await api.post('/chat/session/create', {})
-    sessStore.currentSid = d.session_id
+    sessStore.setCurrent(d.session_id)
     messages.value = []
   }
   // 构造发送给后端的消息：把附件解析文本作为上下文前置（不截断，完整交给模型）
@@ -425,6 +423,7 @@ function finishStream(msgId) {
   streamVisuals.value = []
   thinkOpen.value = true
   lastCitations = []
+  degraded.value = false
   generating.value = false
   streamSid.value = null
   sessStore.load()
@@ -531,8 +530,6 @@ function copyText(msg) { navigator.clipboard.writeText(msg.content); toast.push(
 
 // 引用记忆点击查看详情（轻量弹窗，复用 /memory/detail）
 const memDetail = ref(null)
-const CONF_MAP = { strong: '强', medium: '中', low: '弱', disputed: '争议' }
-const LIFE_MAP = { active: '活跃', stable: '稳定', stale: '过期', archived: '已归档', missing: '缺失' }
 async function openMemory(id) {
   try { memDetail.value = await api.get('/memory/detail?id=' + id) } catch { /* api 层已提示 */ }
 }
@@ -625,31 +622,6 @@ function renderUser(text) {
     .replace(/\n/g, '<br>')
 }
 
-function formatTime(iso) {
-  if (!iso) return ''
-  const d = new Date(String(iso).replace(' ', 'T'))
-  if (isNaN(d.getTime())) return iso
-  const now = new Date()
-  const diff = (now - d) / 1000
-  const pad = (n) => String(n).padStart(2, '0')
-  const hm = pad(d.getHours()) + ':' + pad(d.getMinutes())
-  if (diff < 60) return '刚刚'
-  if (diff < 3600) return Math.floor(diff / 60) + ' 分钟前'
-  if (d.toDateString() === now.toDateString()) return '今天 ' + hm
-  const y = new Date(now); y.setDate(now.getDate() - 1)
-  if (d.toDateString() === y.toDateString()) return '昨天 ' + hm
-  if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '/' + d.getDate()
-  return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate()
-}
-// 悬浮时间：精确到秒（默认隐藏，hover 消息时显示）
-function formatTimeFull(iso) {
-  if (!iso) return ''
-  const d = new Date(String(iso).replace(' ', 'T'))
-  if (isNaN(d.getTime())) return iso
-  const pad = (n) => String(n).padStart(2, '0')
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
-    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
-}
 // 本地时间 ISO（秒级）：流式消息在屏上创建时即回填 create_time，
 // 与 DB 落库格式一致，避免消息时间要刷新页面后才显示
 function nowLocalIso() {
@@ -708,7 +680,7 @@ function autoGrow() {
 // 仅断开读者不取消生成：回复继续在后台完成并落库，切回会话可见
 function resetToHome() {
   if (generating.value) sse.abort()
-  sessStore.currentSid = null
+  sessStore.setCurrent(null)
   messages.value = []
   streamText.value = ''
   thinkText.value = ''
@@ -726,18 +698,13 @@ onMounted(() => {
   sessStore.load(); loadProviders()
   window.addEventListener('sp-new-chat', resetToHome)
   window.addEventListener('sp-open-session', onOpenSession)
+  document.addEventListener('click', handleMermaidActions)
   // 直接从其他页面进入或刷新后恢复上次会话（currentSid 已从 localStorage 恢复）
   // → openSession 内部会调 tryReattach 续播进行中的生成，实现刷新不中断
   if (sessStore.currentSid && !messages.value.length) openSession(sessStore.currentSid)
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)
 })
-// currentSid 任何变更（openSession/send/resetToHome）同步持久化，保证刷新后可恢复
-watch(() => sessStore.currentSid, (v) => {
-  if (v) localStorage.setItem('sp_current_sid', v)
-  else localStorage.removeItem('sp_current_sid')
-})
-
 // 浏览器定位（方案 A）：开关开启时获取一次并缓存，发消息时携带城市名
 const geoEnabled = ref(false)
 async function initGeolocation() {
@@ -800,8 +767,6 @@ async function copyMermaidAsImage(wrap) {
     img.src = url
   } catch { toast.push('error', '复制图片失败') }
 }
-document.addEventListener('click', handleMermaidActions)
-
 // Mermaid 图表自动渲染：消息更新或流式结束后触发
 watch(() => messages.value.length, () => {
   nextTick(() => { try { mermaid.run() } catch (e) { /* 忽略语法错误 */ } })
@@ -824,7 +789,7 @@ onUnmounted(() => {
       <!-- 空状态：顶部 spacer 将 hero+composer 推向中间 -->
       <div v-if="!messages.length && !streamText" style="flex:1"></div>
       <div v-if="degraded" class="banner" style="background:var(--warnbg);color:var(--warntx);margin:16px 32px 0">
-        ℹ SSE 不可用，已降级为轮询模式
+        ℹ 服务响应较慢，仍在等待首字输出…
       </div>
       <!-- overflow-anchor:none：禁用浏览器滚动锚定，避免内容高度变化时自动补偿 scrollTop 引发抖动 -->
       <div ref="scroller"
@@ -992,12 +957,11 @@ onUnmounted(() => {
               <i class="ti ti-mood-smile emoji-toggle"
                 style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="表情" @mousedown.prevent
                 @click.stop="emojiOpen = !emojiOpen"></i>
+              <!-- option 不允许子元素：状态色直接作用于选项文字 -->
               <select v-if="providers.length" v-model="chatModelId" @change="switchModel(chatModelId)"
                 style="padding:4px 8px;font-size:var(--fs-sm);max-width:140px">
                 <option v-for="p in providers" :key="p.id" :value="p.id"
                   :style="{ color: p.status === 'healthy' ? 'var(--succtx)' : p.status === 'half_open' ? 'var(--warntx)' : 'var(--muted)' }">
-                  <span class="dot" style="display:inline-block;width:6px;height:6px;border-radius:50%;background:"
-                    :style="{ background: p.status === 'healthy' ? 'var(--succtx)' : p.status === 'unavailable' ? 'var(--dangtx)' : 'var(--warntx)' }"></span>
                   {{ p.display_name }}
                 </option>
               </select>
@@ -1014,87 +978,80 @@ onUnmounted(() => {
     </div>
   </div>
 
-  <!-- 引用记忆详情弹窗（点击对话中的引用打开，z-index 依记忆详情弹窗层级规范） -->
-  <div v-if="memDetail" class="overlay" style="z-index:var(--z-modal-2)" @click.self="memDetail = null">
-    <div class="modal modal-md">
-      <div class="mt">记忆详情</div>
-      <h3 class="modal-subtitle">{{ memDetail.frontmatter?.title || memDetail.id }}</h3>
-      <div class="fg" style="gap:6px;margin-bottom:10px">
-        <span v-if="memDetail.frontmatter?.confidence" class="badge badge-a">{{
-          CONF_MAP[memDetail.frontmatter?.confidence] || memDetail.frontmatter?.confidence }}</span>
-        <span v-if="memDetail.frontmatter?.lifecycle" class="badge">{{
-          LIFE_MAP[memDetail.frontmatter?.lifecycle] || memDetail.frontmatter?.lifecycle }}</span>
-        <span v-if="memDetail.access_count != null" class="muted">被引用 {{ memDetail.access_count }} 次</span>
-      </div>
-      <div class="label">摘要</div>
-      <p style="color:var(--sec);margin-bottom:12px">{{ memDetail.summary }}</p>
-      <div v-if="memDetail.detail" class="label">详情</div>
-      <p v-if="memDetail.detail"
-        style="color:var(--sec);margin-bottom:12px;white-space:pre-wrap;max-height:280px;overflow-y:auto">{{
-          memDetail.detail }}</p>
-      <div class="fg" style="justify-content:flex-end;gap:8px">
-        <button @click="memDetail = null">关闭</button>
-      </div>
+  <!-- 引用记忆详情弹窗（点击对话中的引用打开，二级层叠；SP-UI v4 统一走 BaseModal） -->
+  <BaseModal v-if="memDetail" title="记忆详情" size="md" stacked @close="memDetail = null">
+    <h3 class="modal-subtitle">{{ memDetail.frontmatter?.title || memDetail.id }}</h3>
+    <div class="fg" style="gap:6px;margin-bottom:10px">
+      <span v-if="memDetail.frontmatter?.confidence" class="badge badge-a">{{
+        confidenceLabel(memDetail.frontmatter?.confidence) }}</span>
+      <span v-if="memDetail.frontmatter?.lifecycle" class="badge">{{
+        lifecycleLabel(memDetail.frontmatter?.lifecycle) }}</span>
+      <span v-if="memDetail.access_count != null" class="muted">被引用 {{ memDetail.access_count }} 次</span>
     </div>
-  </div>
+    <div class="label">摘要</div>
+    <p style="color:var(--sec);margin-bottom:12px">{{ memDetail.summary }}</p>
+    <div v-if="memDetail.detail" class="label">详情</div>
+    <p v-if="memDetail.detail"
+      style="color:var(--sec);margin-bottom:12px;white-space:pre-wrap;max-height:280px;overflow-y:auto">{{
+        memDetail.detail }}</p>
+    <template #footer>
+      <button @click="memDetail = null">关闭</button>
+    </template>
+  </BaseModal>
 
-  <!-- 附件查看弹窗：粘贴文本/图片应用内预览，其他格式信息+下载（自研弹窗，z-index 同记忆详情层级） -->
-  <div v-if="attachView" class="overlay" style="z-index:var(--z-modal-2)" @click.self="attachView = null">
-    <div class="modal" :class="attachView.type === 'file' ? 'modal-sm' : 'modal-lg'">
-      <div class="mt">{{ attachView.type === 'text' ? '粘贴的内容' : attachView.type === 'image' ? '图片预览' : '附件详情' }}
+  <!-- 附件查看弹窗：粘贴文本/图片应用内预览，其他格式信息+下载（二级层叠，统一走 BaseModal） -->
+  <BaseModal v-if="attachView"
+    :title="attachView.type === 'text' ? '粘贴的内容' : attachView.type === 'image' ? '图片预览' : '附件详情'"
+    :size="attachView.type === 'file' ? 'sm' : 'lg'" stacked @close="attachView = null">
+    <!-- 粘贴文本：全文预览 -->
+    <div v-if="attachView.type === 'text'">
+      <div class="muted" style="margin-bottom:10px">{{ attachView.chars }} 字 · {{ attachView.lines }} 行</div>
+      <div
+        style="white-space:pre-wrap;word-break:break-all;font-family:var(--mono);font-size:var(--fs-base);line-height:1.6;color:var(--sec);background:var(--surface-2);border:1px solid var(--bd);border-radius:var(--radius-sm);padding:14px;max-height:60vh;overflow-y:auto">
+        {{ attachView.text }}</div>
+    </div>
+    <!-- 图片：应用内大图预览 -->
+    <div v-else-if="attachView.type === 'image'" style="text-align:center">
+      <img :src="attachView.src" style="max-width:100%;max-height:68vh;border-radius:var(--radius-sm)" />
+    </div>
+    <!-- 其他格式：不做内容预览，只展示文件信息 + 下载 -->
+    <div v-else>
+      <div class="fg" style="gap:10px;margin-bottom:14px">
+        <i class="ti ti-paperclip" style="font-size:var(--icon-md);color:var(--muted)"></i>
+        <b style="word-break:break-all">{{ attachView.name }}</b>
       </div>
-      <!-- 粘贴文本：全文预览 -->
-      <div v-if="attachView.type === 'text'">
-        <div class="muted" style="margin-bottom:10px">{{ attachView.chars }} 字 · {{ attachView.lines }} 行</div>
-        <div
-          style="white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,Consolas,monospace;font-size:var(--fs-base);line-height:1.6;color:var(--sec);background:var(--surface-2);border:1px solid var(--bd);border-radius:12px;padding:14px;max-height:60vh;overflow-y:auto">
-          {{ attachView.text }}</div>
+      <div class="muted" style="margin-bottom:6px">格式：{{ attachExt(attachView.name) }}</div>
+      <div v-if="attachView.size != null" class="muted" style="margin-bottom:6px">大小：{{ fmtSize(attachView.size) }}
       </div>
-      <!-- 图片：应用内大图预览 -->
-      <div v-else-if="attachView.type === 'image'" style="text-align:center">
-        <img :src="attachView.src" style="max-width:100%;max-height:68vh;border-radius:12px" />
-      </div>
-      <!-- 其他格式：不做内容预览，只展示文件信息 + 下载 -->
-      <div v-else>
-        <div class="fg" style="gap:10px;margin-bottom:14px">
-          <i class="ti ti-paperclip" style="font-size:var(--icon-md);color:var(--muted)"></i>
-          <b style="word-break:break-all">{{ attachView.name }}</b>
-        </div>
-        <div class="muted" style="margin-bottom:6px">格式：{{ attachExt(attachView.name) }}</div>
-        <div v-if="attachView.size != null" class="muted" style="margin-bottom:6px">大小：{{ fmtSize(attachView.size) }}
-        </div>
-        <div v-if="attachView.chars" class="muted" style="margin-bottom:6px">解析字数：{{ attachView.chars }} 字</div>
-        <div v-if="!attachView.file" class="muted" style="margin-top:10px">
-          <i class="ti ti-database"></i> 原文件已存入知识库，可在 记忆中心 → 知识库 中查看
-        </div>
-      </div>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button v-if="attachView.type === 'file' && attachView.file" class="btn-primary"
-          @click="downloadAttachFile(attachView.file)"><i class="ti ti-download"></i> 下载</button>
-        <button @click="attachView = null">关闭</button>
+      <div v-if="attachView.chars" class="muted" style="margin-bottom:6px">解析字数：{{ attachView.chars }} 字</div>
+      <div v-if="!attachView.file" class="muted" style="margin-top:10px">
+        <i class="ti ti-database"></i> 原文件已存入知识库，可在 记忆中心 → 知识库 中查看
       </div>
     </div>
-  </div>
+    <template #footer>
+      <button v-if="attachView.type === 'file' && attachView.file" class="btn-primary"
+        @click="downloadAttachFile(attachView.file)"><i class="ti ti-download"></i> 下载</button>
+      <button @click="attachView = null">关闭</button>
+    </template>
+  </BaseModal>
 
-  <!-- 反馈原因弹窗（自研对话框，替代原生 prompt） -->
-  <div v-if="fbDialog" class="overlay" style="z-index:var(--z-confirm)" @click.self="fbDialog = null">
-    <div class="modal modal-sm">
-      <div class="mt">{{ fbDialog.fb === 1 ? '哪些地方做得好？' : '哪里出了问题？' }}</div>
-      <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0 18px">
-        <button v-for="opt in (fbDialog.fb === 1 ? goodReasons : badReasons)" :key="opt.value" class="fb-reason"
-          :class="{ active: fbDialog.reason === opt.value }" @click="fbDialog.reason = opt.value">{{ opt.label
-          }}</button>
-        <textarea v-if="fbDialog.reason === 'other'" v-model="fbDialog.custom" rows="3" placeholder="请描述你的反馈…"
-          style="resize:vertical"></textarea>
-      </div>
-      <div class="fg" style="justify-content:flex-end;gap:8px">
-        <button @click="fbDialog = null">取消</button>
-        <button class="btn-primary"
-          :disabled="!fbDialog.reason || (fbDialog.reason === 'other' && !fbDialog.custom.trim())"
-          @click="submitFeedback">提交</button>
-      </div>
+  <!-- 反馈原因弹窗（替代原生 prompt，统一走 BaseModal） -->
+  <BaseModal v-if="fbDialog" :title="fbDialog.fb === 1 ? '哪些地方做得好？' : '哪里出了问题？'" size="sm"
+    @close="fbDialog = null">
+    <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0 18px">
+      <button v-for="opt in (fbDialog.fb === 1 ? goodReasons : badReasons)" :key="opt.value" class="fb-reason"
+        :class="{ active: fbDialog.reason === opt.value }" @click="fbDialog.reason = opt.value">{{ opt.label
+        }}</button>
+      <textarea v-if="fbDialog.reason === 'other'" v-model="fbDialog.custom" rows="3" placeholder="请描述你的反馈…"
+        style="resize:vertical"></textarea>
     </div>
-  </div>
+    <template #footer>
+      <button @click="fbDialog = null">取消</button>
+      <button class="btn-primary"
+        :disabled="!fbDialog.reason || (fbDialog.reason === 'other' && !fbDialog.custom.trim())"
+        @click="submitFeedback">提交</button>
+    </template>
+  </BaseModal>
 
   <!-- HTML 代码预览抽屉 -->
   <transition name="kg-drawer">
@@ -1110,7 +1067,7 @@ onUnmounted(() => {
               class="ti ti-x"></i></button>
         </div>
       </div>
-      <iframe ref="previewFrame" class="html-preview-iframe" :srcdoc="htmlPreview"
+      <iframe class="html-preview-iframe" :srcdoc="htmlPreview"
         sandbox="allow-scripts allow-same-origin"></iframe>
     </div>
   </transition>

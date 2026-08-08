@@ -27,10 +27,8 @@ export const THEME = {
     label: {
         fontSize: 11.5, focusedFontSize: 13.5,
     },
-    animation: {
-        focusTransition: 200, drawerSlide: 300, expandFadeIn: 400,
-        searchHitPulse: 400, cameraTransition: 500, engineSwitch: 300,
-    },
+    // 滚轮缩放步长（SVG 引擎与 usePanZoom 共用同一语义）
+    zoomStep: 1.12,
     // 引擎切换阈值：节点数 > 该值切 Sigma（WebGL）
     engineThreshold: 500,
     // 单视图硬上限

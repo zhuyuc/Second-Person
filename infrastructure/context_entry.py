@@ -167,8 +167,7 @@ class ContextEntryManager:
                 if it.get("type") == ptype and similarity_fn and \
                         similarity_fn(it.get("original_text", ""), original_text) > 0.85:
                     it["original_text"] = original_text
-                    it["created_at"] = datetime.now(
-                    ).isoformat(timespec="seconds")
+                    it["created_at"] = now_cst().isoformat(timespec="seconds")
                     self._write_pending(items)
                     return it["id"]
             pid = make_pending_id()

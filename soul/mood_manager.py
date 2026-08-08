@@ -49,16 +49,16 @@ MOOD_CN = {
 
 # v2 情绪分类常量（传染算法 + 平复事件 + 主动行为判定用）
 NEGATIVE_MOODS = {"angry", "irritated", "frustrated", "indignant", "hurt",
-                   "sad", "melancholy", "anxious", "ashamed", "defensive",
-                   "remorseful", "apologetic", "self_critical", "fearful",
-                   "disgusted", "disdainful", "guilty", "lonely", "bored",
-                   "tired", "confused", "wary"}
+                  "sad", "melancholy", "anxious", "ashamed", "defensive",
+                  "remorseful", "apologetic", "self_critical", "fearful",
+                  "disgusted", "disdainful", "guilty", "lonely", "bored",
+                  "tired", "confused", "wary"}
 
 POSITIVE_MOODS = {"joy", "pleased", "excited", "warm", "grateful", "proud",
-                   "affectionate", "curious", "eager", "relieved", "hopeful",
-                   "determined", "playful", "calm", "composed", "trusting",
-                   "caring", "compassionate", "aspiring", "competitive",
-                   "humble", "peaceful"}
+                  "affectionate", "curious", "eager", "relieved", "hopeful",
+                  "determined", "playful", "calm", "composed", "trusting",
+                  "caring", "compassionate", "aspiring", "competitive",
+                  "humble", "peaceful"}
 
 # 对立面情绪：归因 other 时对方负面不传染（对方觉得是你的问题，
 # 不会让你也同样愤怒），己方独立走防御路径
@@ -97,7 +97,8 @@ class MoodManager:
         if not row:
             return ""
 
-        kwargs: dict[str, object] = {"strength_hint": self._strength_hint(strength)}
+        kwargs: dict[str, object] = {
+            "strength_hint": self._strength_hint(strength)}
         for scope in ("user", "ai"):
             mood = row[f"{scope}_mood"]
             raw_intensity = self._decay(
@@ -114,7 +115,7 @@ class MoodManager:
                 kwargs[f"{scope}_time_hint"] = ""
 
         kwargs["ai_attribution_hint"] = self._attribution_hint(
-            row.get("ai_attribution") or "")
+            row["ai_attribution"] or "")
         return PROMPTS.render("agent/prompts/mood", **kwargs)
 
     @staticmethod
@@ -154,8 +155,10 @@ class MoodManager:
         """v1 兼容入口：委托 v2，归因默认 none，无平复事件。
         现有调用点无需修改，_update_mood v2 直接调用 apply_v2 获得完整能力。"""
         return self.apply_v2(
-            user_res={**user_res, "attribution": user_res.get("attribution", "none")},
-            ai_res={**ai_res, "attribution": ai_res.get("attribution", "none")},
+            user_res={**user_res,
+                      "attribution": user_res.get("attribution", "none")},
+            ai_res={
+                **ai_res, "attribution": ai_res.get("attribution", "none")},
             peace_event="none",
         )
 
@@ -219,7 +222,7 @@ class MoodManager:
                     "INSERT INTO mood_history(scope,mood,intensity,source,"
                     "note,create_time) VALUES(?,?,?,?,?,?)",
                     (scope, nm["mood"], round(nm["intensity"], 4), "analysis",
-                     f"attr={nm['attribution']};peace={peace_event};{nm.get('note','')[:120]}",
+                     f"attr={nm['attribution']};peace={peace_event};{nm.get('note', '')[:120]}",
                      now))
             out[f"{scope}_changed"] = changed
             out[f"{scope}_mood"] = nm["mood"]
@@ -243,7 +246,7 @@ class MoodManager:
             if fd["mood"] in POSITIVE_MOODS:
                 if td["intensity"] < fd["intensity"]:
                     td["intensity"] = min(1.0,
-                        td["intensity"] + (fd["intensity"] - td["intensity"]) * factor)
+                                          td["intensity"] + (fd["intensity"] - td["intensity"]) * factor)
                     if td["mood"] == "neutral":
                         td["mood"] = fd["mood"]
             elif fd["mood"] in NEGATIVE_MOODS and fd["attribution"] in ("self", "shared"):

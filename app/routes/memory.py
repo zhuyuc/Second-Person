@@ -1,7 +1,6 @@
 """记忆中心接口（开发文档 §二）。"""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -309,32 +308,10 @@ async def entity_neighbors(entity_id: str, limit: int = 30, exclude_ids: str = "
         "edges": edges}}
 
 
-@router.get("/memory/graph/search")
-async def graph_search(q: str, limit: int = 20):
-    """实体搜索定位（v3.0 §5.5）：名称 LIKE 匹配，前缀优先，含坐标。"""
-    c = _c()
-    q = (q or "").strip()
-    if not q:
-        return {"code": 200, "data": {"results": []}}
-    limit = min(max(1, limit), 50)
-    like = f"%{q}%"
-    prefix = f"{q}%"
-    rows = c.db.query_all(
-        "SELECT e.entity_id,e.entity_name,e.memory_count,g.x,g.y,"
-        "CASE WHEN e.entity_name LIKE ? THEN 0 ELSE 1 END pri "
-        "FROM memory_entities e LEFT JOIN graph_layout g ON e.entity_id=g.entity_id "
-        "WHERE e.entity_name LIKE ? ORDER BY pri ASC, e.memory_count DESC LIMIT ?",
-        (prefix, like, limit))
-    return {"code": 200, "data": {"results": [
-        {"entity_id": r["entity_id"], "name": r["entity_name"],
-         "memory_count": r["memory_count"], "x": r["x"], "y": r["y"]}
-        for r in rows]}}
-
-
 @router.get("/memory/timeline")
 async def timeline(event_type: str = None, days: int = 7):
     c = _c()
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     cutoff = (now_cst() - timedelta(days=days)
               ).isoformat(timespec="seconds")
     q = ("SELECT t.memory_id, t.event_type, t.event_time, t.detail,"
@@ -459,30 +436,6 @@ async def resolve_duplicate(request: Request):
     c.db.execute("UPDATE lint_suggestions SET status='adopted', resolved_at=? "
                  "WHERE suggestion_id=?", (now_iso(), sid))
     return {"code": 200, "data": {"deleted": to_delete}}
-
-
-@router.post("/memory/orphans/relink")
-async def relink_orphans():
-    """存量孤立记忆批量补链：逐条按语义相似度建 related 引用，
-    成功建链的同步关闭其 open 孤立建议；无达阀候选的保持孤立不强行建链。"""
-    c = _c()
-    orphans = c.palace.orphans()
-    relinked, no_candidate = [], []
-    for mid in orphans:
-        linked_to = await c.linker.suggest_and_link_orphan(mid)
-        if linked_to:
-            relinked.append({"memory_id": mid, "linked_to": linked_to})
-            c.db.execute(
-                "UPDATE lint_suggestions SET status='adopted', resolved_at=? "
-                "WHERE suggestion_type='orphan' AND status='open' AND primary_memory_id=?",
-                (now_iso(), mid,))
-        else:
-            no_candidate.append(mid)
-    await c.fw.drain()  # 等建链写请求落库，响应即可反映最新孤立数
-    c.oplog.log("orphans_relink",
-                f"补链 {len(relinked)}/{len(orphans)}，无候选 {len(no_candidate)}")
-    return {"code": 200, "data": {"total": len(orphans), "relinked": relinked,
-                                  "no_candidate": no_candidate}}
 
 
 @router.get("/memory/conflicts")

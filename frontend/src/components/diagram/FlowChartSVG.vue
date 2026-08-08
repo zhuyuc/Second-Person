@@ -6,6 +6,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import dagre from 'dagre'
 import { useToast } from '@/stores/toast'
+import { usePanZoom } from '@/composables/usePanZoom'
 
 const toast = useToast()
 
@@ -123,15 +124,14 @@ function nodeAnchors(n) {
     }
 }
 
-// ---- 回边识别（dagre rank 判定）----
+// ---- 回边识别（dagre 布局序判定，Map 索引 O(1) 查询）----
 const edgeRanks = computed(() => {
-    const ranks = {}
-    layoutNodes.value.forEach((n, i) => { ranks[n.id] = i })
+    const rank = new Map(layoutNodes.value.map((n, i) => [n.id, i]))
     const result = {}
     props.edges.forEach(e => {
-        const fromRank = layoutNodes.value.findIndex(ln => ln.id === e.from)
-        const toRank = layoutNodes.value.findIndex(ln => ln.id === e.to)
-        result[`${e.from}|${e.to}`] = fromRank >= 0 && toRank >= 0 && toRank <= fromRank
+        const fromRank = rank.get(e.from)
+        const toRank = rank.get(e.to)
+        result[`${e.from}|${e.to}`] = fromRank != null && toRank != null && toRank <= fromRank
     })
     return result
 })
@@ -159,10 +159,7 @@ function backEdgePath(fromNode, toNode) {
     const lx = nextBackLane()
     const sx = from.left.x, sy = from.cy
     const tx = to.left.x, ty = to.cy
-    if (sy <= ty) {
-        return `M${sx},${sy} L${lx + r},${sy} Q${lx},${sy} ${lx},${sy - r} L${lx},${ty + r} Q${lx},${ty} ${lx + r},${ty} L${tx},${ty}`
-    }
-    // source below target: go up via lane
+    // 统一走左侧通道：上拐/下拐路径一致（Q 圆角自适应方向）
     return `M${sx},${sy} L${lx + r},${sy} Q${lx},${sy} ${lx},${sy - r} L${lx},${ty + r} Q${lx},${ty} ${lx + r},${ty} L${tx},${ty}`
 }
 
@@ -243,33 +240,91 @@ function isEdgeFocused(e) {
 }
 
 function onNodeEnter(node) {
-    if (dragging.value) return
+    if (dragging.value || panning.value) return
     hoveredId.value = node.id
 }
 function onNodeLeave() {
-    if (dragging.value) return
+    if (dragging.value || panning.value) return
     hoveredId.value = null
 }
 function onNodeClick(node) {
+    if (dragMoved) return  // 拖动后松手不触发点击
     emit('node-click', node.id)
 }
 
-// ---- 拖拽 ----
+// ---- 平移缩放（视口状态） ----
+const view = usePanZoom()
+const { svgTransform: fcTransform } = view  // 解包为顶层 ref，模板中自动解包
+const svgRef = ref(null)
+const panning = ref(false)
+
+// 屏幕坐标 → SVG 视口用户坐标
+function getSvgPoint(e) {
+    const svg = svgRef.value
+    if (!svg || !svg.getScreenCTM) return { x: 0, y: 0 }
+    const pt = svg.createSVGPoint()
+    pt.x = e.clientX; pt.y = e.clientY
+    const p = pt.matrixTransform(svg.getScreenCTM().inverse())
+    return { x: p.x, y: p.y }
+}
+
+// 滚轮缩放（以光标为中心；passive:false 才能 preventDefault 阻止页面滚动）
+function onWheel(e) {
+    e.preventDefault()
+    const p = getSvgPoint(e)
+    view.zoomAt(p.x, p.y, e.deltaY > 0 ? 1 / view.step : view.step)
+}
+
+// 空白处拖拽平移（节点 mousedown 已 stopPropagation，不会冲突）
+let panStart = null
+function onPanStart(e) {
+    if (e.button !== 0) return
+    panning.value = true
+    panStart = { mx: e.clientX, my: e.clientY, vx: view.x.value, vy: view.y.value }
+    window.addEventListener('mousemove', onPanMove)
+    window.addEventListener('mouseup', onPanUp, { once: true })
+}
+function onPanMove(e) {
+    if (!panning.value || !panStart) return
+    const scale = svgRef.value?.getScreenCTM()?.a || 1  // CSS px → 用户单位
+    view.x.value = panStart.vx + (e.clientX - panStart.mx) * scale
+    view.y.value = panStart.vy + (e.clientY - panStart.my) * scale
+}
+function onPanUp() {
+    panning.value = false
+    panStart = null
+    window.removeEventListener('mousemove', onPanMove)
+}
+
+// 按钮缩放：以视口中心为基准
+function zoomCenter(factor) {
+    view.zoomAt(CANVAS_W / 2, svgHeight.value / 2, factor)
+}
+
+// ---- 节点拖拽（换算到内容坐标系，兼容平移缩放） ----
 const dragging = ref(false)
 const dragNode = ref(null)
 const dragOffset = ref({ x: 0, y: 0 })
+let dragMoved = false
 
 function onDragStart(e, node) {
-    dragging.value = true
-    dragNode.value = node
-    dragOffset.value = { x: e.clientX - node.x, y: e.clientY - node.y }
+    e.stopPropagation()  // 阻止冒泡到 svg 触发平移
     e.preventDefault()
+    dragging.value = true
+    dragMoved = false
+    dragNode.value = node
+    const sp = getSvgPoint(e)
+    const p = view.toContent(sp.x, sp.y)
+    dragOffset.value = { x: p.x - node.x, y: p.y - node.y }
 }
 
 function onDragMove(e) {
     if (!dragging.value || !dragNode.value) return
-    dragNode.value.x = Math.round(e.clientX - dragOffset.value.x)
-    dragNode.value.y = Math.round(e.clientY - dragOffset.value.y)
+    const sp = getSvgPoint(e)
+    const p = view.toContent(sp.x, sp.y)
+    dragMoved = true
+    dragNode.value.x = Math.round(p.x - dragOffset.value.x)
+    dragNode.value.y = Math.round(p.y - dragOffset.value.y)
 }
 
 function onDragEnd() {
@@ -277,17 +332,24 @@ function onDragEnd() {
     dragNode.value = null
 }
 
-onMounted(() => window.addEventListener('mousemove', onDragMove))
-onMounted(() => window.addEventListener('mouseup', onDragEnd))
-onUnmounted(() => window.removeEventListener('mousemove', onDragMove))
-onUnmounted(() => window.removeEventListener('mouseup', onDragEnd))
+onMounted(() => {
+    window.addEventListener('mousemove', onDragMove)
+    window.addEventListener('mouseup', onDragEnd)
+    svgRef.value?.addEventListener('wheel', onWheel, { passive: false })
+})
+onUnmounted(() => {
+    window.removeEventListener('mousemove', onDragMove)
+    window.removeEventListener('mouseup', onDragEnd)
+    svgRef.value?.removeEventListener('wheel', onWheel)
+})
 
 // ---- 导出功能 ----
-const svgRef = ref(null)
-
 function getSvgString() {
     if (!svgRef.value) return ''
-    return new XMLSerializer().serializeToString(svgRef.value)
+    // 克隆并还原视口变换，导出始终是无平移缩放的完整图
+    const clone = svgRef.value.cloneNode(true)
+    clone.querySelector('.fc-viewport')?.removeAttribute('transform')
+    return new XMLSerializer().serializeToString(clone)
 }
 
 function copySvg() {
@@ -312,7 +374,7 @@ function downloadPng() {
     const svg = svgRef.value
     if (!svg) { toast.push('error', 'SVG 不可用'); return }
     try {
-        const svgData = new XMLSerializer().serializeToString(svg)
+        const svgData = getSvgString()
         const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' })
         const url = URL.createObjectURL(svgBlob)
         const img = new Image()
@@ -340,19 +402,23 @@ function downloadPng() {
     <div class="fc-wrap">
         <!-- 操作按钮 -->
         <div class="fc-actions">
+            <button class="fc-btn" title="放大" @click="zoomCenter(view.step)"><i class="ti ti-zoom-in"></i></button>
+            <button class="fc-btn" title="缩小" @click="zoomCenter(1 / view.step)"><i class="ti ti-zoom-out"></i></button>
+            <button class="fc-btn" title="复位视图（也可双击画布）" @click="view.reset()"><i class="ti ti-focus-2"></i></button>
             <button class="fc-btn" title="复制 SVG 源码" @click="copySvg"><i class="ti ti-copy"></i> SVG</button>
             <button class="fc-btn" title="下载 SVG" @click="downloadSvg"><i class="ti ti-download"></i> SVG</button>
             <button class="fc-btn" title="下载 PNG" @click="downloadPng"><i class="ti ti-photo"></i> PNG</button>
         </div>
 
-        <svg ref="svgRef" class="fc-svg" :viewBox="`0 0 ${CANVAS_W} ${svgHeight}`" preserveAspectRatio="xMidYMid meet"
-            xmlns="http://www.w3.org/2000/svg">
+        <svg ref="svgRef" class="fc-svg" :class="{ 'fc-panning': panning }"
+            :viewBox="`0 0 ${CANVAS_W} ${svgHeight}`" preserveAspectRatio="xMidYMid meet"
+            xmlns="http://www.w3.org/2000/svg" @mousedown="onPanStart" @dblclick="view.reset()">
 
             <defs>
-                <!-- 终端渐变 -->
+                <!-- 终端渐变：stop 颜色由 token 驱动（--brand-solid → --brand-2），深浅模式自动跟随 -->
                 <linearGradient id="terminalGrad" x1="0" y1="0" x2="1" y2="0">
-                    <stop offset="0%" stop-color="#3b6ef6" />
-                    <stop offset="100%" stop-color="#7b5cff" />
+                    <stop offset="0%" class="fc-grad-start" />
+                    <stop offset="100%" class="fc-grad-end" />
                 </linearGradient>
                 <!-- 箭头标记 -->
                 <marker id="fcArrow" markerWidth="8" markerHeight="6" refX="7.5" refY="3" orient="auto">
@@ -360,34 +426,37 @@ function downloadPng() {
                 </marker>
             </defs>
 
-            <!-- 连线层 -->
-            <g v-for="e in edges" :key="'e_' + e.from + '_' + e.to">
-                <path :class="['fc-edge', { focused: isEdgeFocused(e), 'fc-back-edge': isBackEdge(e) }]"
-                    :d="getEdgePath(e)" fill="none" stroke="var(--diagram-edge-stroke)" stroke-width="1.6"
-                    marker-end="url(#fcArrow)" />
-                <rect v-if="e.label && edgeLabelPos(e).show" :x="edgeLabelPos(e).x - 14" :y="edgeLabelPos(e).y - 11"
-                    width="28" height="14" rx="4" fill="var(--surface)" opacity="0.85" />
-                <text v-if="e.label && edgeLabelPos(e).show" :x="edgeLabelPos(e).x" :y="edgeLabelPos(e).y"
-                    class="fc-edge-label">{{ e.label }}</text>
-            </g>
+            <!-- 视口层：平移缩放统一作用于此 -->
+            <g class="fc-viewport" :transform="fcTransform">
+                <!-- 连线层 -->
+                <g v-for="e in edges" :key="'e_' + e.from + '_' + e.to">
+                    <path :class="['fc-edge', { focused: isEdgeFocused(e), 'fc-back-edge': isBackEdge(e) }]"
+                        :d="getEdgePath(e)" fill="none" stroke="var(--diagram-edge-stroke)" stroke-width="1.6"
+                        marker-end="url(#fcArrow)" />
+                    <rect v-if="e.label && edgeLabelPos(e).show" :x="edgeLabelPos(e).x - 14" :y="edgeLabelPos(e).y - 11"
+                        width="28" height="14" rx="4" fill="var(--surface)" opacity="0.85" />
+                    <text v-if="e.label && edgeLabelPos(e).show" :x="edgeLabelPos(e).x" :y="edgeLabelPos(e).y"
+                        class="fc-edge-label">{{ e.label }}</text>
+                </g>
 
-            <!-- 节点层 -->
-            <g v-for="n in layoutNodes" :key="'n_' + n.id" class="fc-node" :class="{ focused: hoveredId === n.id }"
-                @mouseenter="onNodeEnter(n)" @mouseleave="onNodeLeave" @click="onNodeClick(n)"
-                @mousedown="onDragStart($event, n)">
+                <!-- 节点层 -->
+                <g v-for="n in layoutNodes" :key="'n_' + n.id" class="fc-node" :class="{ focused: hoveredId === n.id }"
+                    @mouseenter="onNodeEnter(n)" @mouseleave="onNodeLeave" @click="onNodeClick(n)"
+                    @mousedown="onDragStart($event, n)">
 
-                <!-- process / terminal：rect -->
-                <rect v-if="nodeShape(n).rect" :x="nodeShape(n).rect.x" :y="nodeShape(n).rect.y"
-                    :width="nodeShape(n).rect.w" :height="nodeShape(n).rect.h" :rx="nodeShape(n).rect.rx"
-                    :fill="nodeFill(n)" :stroke="nodeStroke(n)" stroke-width="1.5" filter="url(#nodeShadow)" />
+                    <!-- process / terminal：rect（阴影由 CSS drop-shadow 提供，不引用 SVG 滤镜） -->
+                    <rect v-if="nodeShape(n).rect" :x="nodeShape(n).rect.x" :y="nodeShape(n).rect.y"
+                        :width="nodeShape(n).rect.w" :height="nodeShape(n).rect.h" :rx="nodeShape(n).rect.rx"
+                        :fill="nodeFill(n)" :stroke="nodeStroke(n)" stroke-width="1.5" />
 
-                <!-- decision：polygon -->
-                <polygon v-if="nodeShape(n).points" :points="nodeShape(n).points" :fill="nodeFill(n)"
-                    :stroke="nodeStroke(n)" stroke-width="1.5" filter="url(#nodeShadow)" />
+                    <!-- decision：polygon -->
+                    <polygon v-if="nodeShape(n).points" :points="nodeShape(n).points" :fill="nodeFill(n)"
+                        :stroke="nodeStroke(n)" stroke-width="1.5" />
 
-                <!-- 标签 -->
-                <text :x="n.x" :y="nodeShape(n).textY" text-anchor="middle" class="fc-label" :fill="nodeTextFill(n)">{{
-                    n.label }}</text>
+                    <!-- 标签 -->
+                    <text :x="n.x" :y="nodeShape(n).textY" text-anchor="middle" class="fc-label" :fill="nodeTextFill(n)">{{
+                        n.label }}</text>
+                </g>
             </g>
         </svg>
     </div>
@@ -407,42 +476,19 @@ function downloadPng() {
     display: block;
     width: 100%;
     height: auto;
+    cursor: grab;
 }
 
-/* 操作按钮 */
-.fc-actions {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    display: flex;
-    gap: 4px;
-    z-index: 5;
-    opacity: 0;
-    transition: opacity var(--dur-fast);
+.fc-svg.fc-panning {
+    cursor: grabbing;
 }
 
-.fc-wrap:hover .fc-actions {
-    opacity: 1;
+/* 平移中禁用文本选中 */
+.fc-svg.fc-panning * {
+    user-select: none;
 }
 
-.fc-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    padding: 2px 8px;
-    font-size: var(--fs-xs);
-    border: 1px solid var(--bd);
-    border-radius: var(--radius-xs);
-    background: var(--surface);
-    color: var(--sec);
-    cursor: pointer;
-    white-space: nowrap;
-}
-
-.fc-btn:hover {
-    background: var(--surface-2);
-    color: var(--fg);
-}
+/* 操作按钮：公共样式已提升至 style.css .fc-actions/.fc-btn */
 
 /* 节点 */
 .fc-node {
@@ -492,7 +538,16 @@ function downloadPng() {
     user-select: none;
 }
 
-/* 阴影滤镜 */
+/* 终端渐变 stop：token 驱动，禁止硬编码色值 */
+.fc-grad-start {
+    stop-color: var(--brand-solid);
+}
+
+.fc-grad-end {
+    stop-color: var(--brand-2);
+}
+
+/* 节点阴影（CSS drop-shadow；不再引用不存在的 SVG 滤镜） */
 .fc-node>rect,
 .fc-node>polygon {
     filter: drop-shadow(0 1px 2px rgba(0, 0, 0, .08));

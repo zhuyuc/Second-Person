@@ -18,7 +18,6 @@ import logging
 import math
 import random
 import time
-from datetime import datetime
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.graph_layout")

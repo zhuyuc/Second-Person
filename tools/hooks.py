@@ -12,6 +12,7 @@ post_tool（执行后）：
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from soul.injection_scan import scan_injection
 

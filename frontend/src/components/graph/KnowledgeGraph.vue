@@ -8,6 +8,7 @@ import { useGraphFocus } from './composables/useGraphFocus'
 import SvgGraph from './SvgGraph.vue'
 import SigmaGraph from './SigmaGraph.vue'
 import NodeDetailDrawer from './NodeDetailDrawer.vue'
+import BaseModal from '@/components/BaseModal.vue'
 
 const emit = defineEmits(['open-memory'])
 
@@ -119,7 +120,7 @@ watch(() => focus.pinnedId.value, (v) => {
 
 function onEsc(e) {
   if (e.key !== 'Escape') return
-  if (showLegendModal.value) { showLegendModal.value = false; return }
+  // 图例弹窗由 BaseModal 自带 ESC 关闭（stopPropagation 避免双处理）
   if (selectedEntity.value) { selectedEntity.value = null; entityMemories.value = []; focus.clearPinned() }
   else focus.clearPinned()
 }
@@ -160,23 +161,18 @@ defineExpose({ loadGraph })
       </div>
       <span class="kg-legend-more"><i class="ti ti-dots"></i> 全部 {{ domainLegend.length }} 个</span>
     </div>
-    <!-- 图例全量弹窗 -->
-    <teleport to="body">
-      <div v-if="showLegendModal" class="overlay" style="z-index:var(--z-modal)" @click.self="showLegendModal = false">
-        <div class="modal">
-          <div class="mt">领域图例（{{ domainLegend.length }}）</div>
-          <div class="kg-legend-grid">
-            <span v-for="lg in domainLegend" :key="lg.domain" class="kg-legend-item">
-              <span class="kg-legend-dot" :style="{ background: lg.color }"></span>
-              {{ domainLabel(lg.domain) }}（{{ lg.count }}）
-            </span>
-          </div>
-          <div class="fg" style="justify-content:flex-end;margin-top:16px">
-            <button @click="showLegendModal = false">关闭</button>
-          </div>
-        </div>
+    <!-- 图例全量弹窗（统一走 BaseModal） -->
+    <BaseModal v-if="showLegendModal" :title="`领域图例（${domainLegend.length}）`" @close="showLegendModal = false">
+      <div class="kg-legend-grid">
+        <span v-for="lg in domainLegend" :key="lg.domain" class="kg-legend-item">
+          <span class="kg-legend-dot" :style="{ background: lg.color }"></span>
+          {{ domainLabel(lg.domain) }}（{{ lg.count }}）
+        </span>
       </div>
-    </teleport>
+      <template #footer>
+        <button @click="showLegendModal = false">关闭</button>
+      </template>
+    </BaseModal>
     <NodeDetailDrawer :entity="selectedEntity" :memories="entityMemories" @close="focus.clearPinned()"
       @open-memory="id => emit('open-memory', id)" />
   </div>

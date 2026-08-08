@@ -16,7 +16,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -88,7 +88,7 @@ def decide_degradation(
             failed_step=failed_step,
             failure_type=FailureType.CAPABILITY_BOUNDARY,
             skip_causes_misleading=True,
-            message=f"关于这个问题，我需要更多信息才能准确回答",
+            message="关于这个问题，我需要更多信息才能准确回答",
         )
 
 

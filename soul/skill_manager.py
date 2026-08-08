@@ -10,11 +10,9 @@
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 
-import yaml
 
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
 from infrastructure.timeutil import now_cst

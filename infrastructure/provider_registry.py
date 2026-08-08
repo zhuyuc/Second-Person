@@ -10,7 +10,6 @@ Provider 注册表 —— 从 providers / model_assignment / credentials 解析 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from .llm_provider import ProviderSnapshot
 from infrastructure.timeutil import now_cst

@@ -4,6 +4,8 @@ import { api } from '@/api/client'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useBusy } from '@/composables/useBusy'
+import BaseModal from '@/components/BaseModal.vue'
+import { formatTime } from '@/utils/format'
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -33,9 +35,11 @@ const usageLoadError = ref(false)
 // 趋势图 SVG 计算 (bar chart)
 const TREND_H = 140
 const TREND_W = 520
+// 绘图区左起点：Y 轴竖线在 49、刻度标签右对齐到 44，柱子须从轴右侧开始，避免压轴/压标签
+const PLOT_X = 56
 const BAR_W = computed(() => {
   const n = trend.value.length || 1
-  return Math.max(6, Math.min(36, (TREND_W - 60) / n - 8))
+  return Math.max(6, Math.min(36, (TREND_W - PLOT_X - 8) / n - 8))
 })
 const trendMax = computed(() => trend.value.reduce((m, t) => Math.max(m, t.tokens || 0), 0))
 // 模型配色：按全区间总消耗降序给模型分配稳定颜色，同一模型跨柱色一致
@@ -60,7 +64,7 @@ const trendBars = computed(() => {
   const y0 = TREND_H - 20  // bottom baseline (above labels)
   const usable = y0 - 10
   return trend.value.map((t, i) => {
-    const x = 40 + i * (BAR_W.value + 8)
+    const x = PLOT_X + i * (BAR_W.value + 8)
     // 堆叠段：自底向上按模型依次堆叠，段高按 token 占总高比例
     const models = t.models && t.models.length
       ? t.models
@@ -269,10 +273,7 @@ async function testConnector() {
   else toast.push('error', '连接测试失败：' + (r.error || '未知错误'))
 }
 
-// 连接器：保存
-async function saveConnector() {
-  await addConnector()
-}
+// 连接器：保存直接复用 addConnector（单一入口，不再冗余包装）
 
 // 接入渠道配置
 const PLATFORM_MAP = { web: 'Web', feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉', wecom: '企业微信', weixin: '微信' }
@@ -335,7 +336,10 @@ function startWxPoll() {
       wxScan.value.status = r.status || 'pending'
       if (r.status === 'confirmed') {
         stopWxPoll()
-        await api.post('/settings/platforms/weixin_1/enable', {})
+        // 从平台列表取真实 ID（不硬编码 weixin_1）；列表未加载时先拉取
+        if (!platforms.value.length) await loadPlatforms()
+        const wx = platforms.value.find(p => p.platform_type === 'weixin')
+        if (wx) await api.post(`/settings/platforms/${wx.id}/enable`, {})
         showWeixinScan.value = false
         await loadPlatforms()
         toast.push('success', '微信渠道已绑定并启用（已自动禁用其他 IM）')
@@ -428,14 +432,6 @@ function formatNum(n) {
   return String(n)
 }
 const backups = ref([])
-
-function formatTime(iso) {
-  if (!iso) return '-'
-  const d = new Date(String(iso).replace(' ', 'T'))
-  if (isNaN(d.getTime())) return iso
-  const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-}
 
 // 耗时按时分秒可读展示：不足 1 秒显示毫秒，其余省略为 0 的高位单位（如 15分23秒、4秒）
 function formatDuration(ms) {
@@ -664,17 +660,17 @@ onActivated(() => selectTab(tab.value))
         <div class="row" style="margin-bottom:8px"><span class="muted">今日预算</span><span
             :style="{ color: (usage.today_ratio || 0) >= 80 ? 'var(--warntx)' : '' }">{{ usage.today_ratio || 0
             }}%</span></div>
-        <div style="height:6px;border-radius:3px;background:var(--surface-2)">
+        <div class="progress">
           <div
-            :style="{ height: '6px', borderRadius: '3px', background: (usage.today_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.today_ratio || 0) + '%' }">
+            :style="{ background: (usage.today_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.today_ratio || 0) + '%' }">
           </div>
         </div>
         <div class="row" style="margin-top:14px;margin-bottom:8px"><span class="muted">本月预算</span><span
             :style="{ color: (usage.month_ratio || 0) >= 80 ? 'var(--warntx)' : '' }">{{ usage.month_ratio || 0
             }}%</span></div>
-        <div style="height:6px;border-radius:3px;background:var(--surface-2)">
+        <div class="progress">
           <div
-            :style="{ height: '6px', borderRadius: '3px', background: (usage.month_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.month_ratio || 0) + '%' }">
+            :style="{ background: (usage.month_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.month_ratio || 0) + '%' }">
           </div>
         </div>
       </div>
@@ -693,7 +689,7 @@ onActivated(() => selectTab(tab.value))
           <line v-for="y in [0, .25, .5, .75]" :key="y" :x1="50" :y1="TREND_H - 20 - (TREND_H - 30) * y"
             :x2="TREND_W - 8" :y2="TREND_H - 20 - (TREND_H - 30) * y" stroke="var(--bd)" stroke-dasharray="3,3"
             stroke-width=".5" />
-          <line x1="49" y1="10" x2="49" y2="TREND_H-20" stroke="var(--bd)" stroke-width=".5" />
+          <line x1="49" y1="10" x2="49" :y2="TREND_H - 20" stroke="var(--bd)" stroke-width=".5" />
           <!-- Y 轴标签 -->
           <text v-for="y in [0, .25, .5, .75, 1]" :key="'yl' + y" :x="44" :y="TREND_H - 20 - (TREND_H - 30) * y + 3"
             text-anchor="end" font-size="8" fill="var(--muted)">{{ formatNum(Math.round(trendMax * y)) }}</text>
@@ -707,19 +703,19 @@ onActivated(() => selectTab(tab.value))
                 :style="{ opacity: hoveredIdx === i ? .75 : 1 }" />
             </template>
           </g>
-          <!-- hover 即时浮层（跟随柱子，pointer-events 关闭防闪烁，展示多模型明细） -->
+          <!-- hover 即时浮层（跟随柱子，pointer-events 关闭防闪烁，展示多模型明细；颜色全部走 token） -->
           <g v-if="hoverTip" pointer-events="none">
-            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" :height="hoverTip.h" rx="4" fill="#333"
-              opacity=".92" />
-            <text :x="hoverTip.x + 8" :y="hoverTip.y + 14" font-size="10" fill="#fff" font-weight="600">{{
+            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" :height="hoverTip.h" rx="4" fill="var(--surface-3)"
+              opacity=".95" />
+            <text :x="hoverTip.x + 8" :y="hoverTip.y + 14" font-size="10" fill="var(--fg)" font-weight="600">{{
               hoverTip.title }}</text>
             <g v-for="(r, ri) in hoverTip.rows" :key="ri">
               <rect :x="hoverTip.x + 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 2" width="7" height="7" rx="1.5"
                 :fill="r.color" />
-              <text :x="hoverTip.x + 19" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" font-size="9" fill="#eee">{{
+              <text :x="hoverTip.x + 19" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" font-size="9" fill="var(--sec)">{{
                 r.name }}</text>
               <text :x="hoverTip.x + hoverTip.w - 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" text-anchor="end"
-                font-size="9" fill="#fff">{{ r.value }}</text>
+                font-size="9" fill="var(--fg)">{{ r.value }}</text>
             </g>
           </g>
           <!-- 横轴标签：年视图逐月全显，日粒度每 3 个显示一个 -->
@@ -780,17 +776,14 @@ onActivated(() => selectTab(tab.value))
     </div>
     <div class="muted" style="margin-top:12px;font-size:var(--fs-sm)">恢复前会自动保存当前数据作为保底备份（不占 3 份名额）。</div>
     <!-- 备份命名弹窗 -->
-    <div v-if="showBackupLabel" class="overlay" @click.self="showBackupLabel = false">
-      <div class="modal modal-sm">
-        <div class="mt">创建备份</div>
-        <input v-model="backupLabel" placeholder="自定义标签（可选，默认按时间命名）" style="width:100%" @keyup.enter="doCreateBackup" />
-        <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-          <button @click="showBackupLabel = false">取消</button>
-          <button class="btn-primary" :disabled="busy('mkBackup')" @click="run('mkBackup', doCreateBackup)"><i
-              v-if="busy('mkBackup')" class="ti ti-loader-2"></i> 创建</button>
-        </div>
-      </div>
-    </div>
+    <BaseModal v-if="showBackupLabel" title="创建备份" size="sm" @close="showBackupLabel = false">
+      <input v-model="backupLabel" placeholder="自定义标签（可选，默认按时间命名）" style="width:100%" @keyup.enter="doCreateBackup" />
+      <template #footer>
+        <button @click="showBackupLabel = false">取消</button>
+        <button class="btn-primary" :disabled="busy('mkBackup')" @click="run('mkBackup', doCreateBackup)"><i
+            v-if="busy('mkBackup')" class="ti ti-loader-2"></i> 创建</button>
+      </template>
+    </BaseModal>
   </div>
 
   <!-- 状态 -->
@@ -831,9 +824,7 @@ onActivated(() => selectTab(tab.value))
   </div>
 
   <!-- 添加 Provider 弹窗 -->
-  <div v-if="showAddProvider" class="overlay" @click.self="showAddProvider = false">
-    <div class="modal">
-      <div class="mt">添加 LLM Provider</div>
+  <BaseModal v-if="showAddProvider" title="添加 LLM Provider" @close="showAddProvider = false">
       <div class="form-group"><label class="label">显示名称</label><input v-model="newProvider.display_name" /></div>
       <div class="form-group"><label class="label">类型</label>
         <select v-model="newProvider.provider_type">
@@ -863,13 +854,10 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)"><i v-if="busy('addP')"
             class="ti ti-loader-2"></i> 保存</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
   <!-- Embedding 切换预估弹窗 -->
-  <div v-if="embEstimate" class="overlay" @click.self="embEstimate = null">
-    <div class="modal">
-      <div class="mt">Embedding 模型切换</div>
-      <p class="muted" style="margin-bottom:12px">切换后需重新向量化所有记忆（旧向量保留 30 天可回滚）。</p>
+  <BaseModal v-if="embEstimate" title="Embedding 模型切换" @close="embEstimate = null">
+    <p class="muted" style="margin-bottom:12px">切换后需重新向量化所有记忆（旧向量保留 30 天可回滚）。</p>
       <div class="g2">
         <div class="card">
           <div class="label">需重跑</div>
@@ -885,13 +873,10 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-primary" :disabled="busy('migrate')" @click="run('migrate', confirmMigrate)"><i
             v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 
   <!-- 定时任务日志弹窗 -->
-  <div v-if="taskLogs" class="overlay" @click.self="taskLogs = null">
-    <div class="modal modal-lg">
-      <div class="mt">执行日志 · {{ taskLogs.id }}</div>
+  <BaseModal v-if="taskLogs" :title="'执行日志 · ' + taskLogs.id" size="lg" @close="taskLogs = null">
       <div v-if="!taskLogs.logs.length" class="muted">该任务尚未执行过</div>
       <div v-for="(l, i) in taskLogs.logs" :key="i" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
         <div><b>{{ formatTime(l.run_time) }}</b>
@@ -906,13 +891,10 @@ onActivated(() => selectTab(tab.value))
       </div>
       <div class="fg" style="justify-content:flex-end;margin-top:16px"><button @click="taskLogs = null">关闭</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 
   <!-- 添加连接器弹窗 -->
-  <div v-if="showAddConn" class="overlay" @click.self="showAddConn = false">
-    <div class="modal">
-      <div class="mt">添加 MCP 连接器</div>
+  <BaseModal v-if="showAddConn" title="添加 MCP 连接器" @close="showAddConn = false">
       <div class="form-group"><label class="label">名称</label><input v-model="newConn.name" placeholder="如：GitHub" />
       </div>
       <div class="form-group"><label class="label">传输方式</label>
@@ -935,16 +917,13 @@ onActivated(() => selectTab(tab.value))
         <button @click="showAddConn = false">取消</button>
         <button :disabled="busy('testConn')" @click="run('testConn', testConnector)"><i v-if="busy('testConn')"
             class="ti ti-loader-2"></i> 测试连接</button>
-        <button class="btn-primary" :disabled="busy('saveConn')" @click="run('saveConn', saveConnector)"><i
-            v-if="busy('saveConn')" class="ti ti-loader-2"></i> 保存</button>
+        <button class="btn-primary" :disabled="busy('addConn')" @click="run('addConn', addConnector)"><i
+            v-if="busy('addConn')" class="ti ti-loader-2"></i> 保存</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 
   <!-- 接入渠道配置弹窗 -->
-  <div v-if="showChannelCfg" class="overlay" @click.self="showChannelCfg = false">
-    <div class="modal">
-      <div class="mt">配置接入渠道</div>
+  <BaseModal v-if="showChannelCfg" title="配置接入渠道" @close="showChannelCfg = false">
       <div class="form-group"><label class="label">平台</label>
         <select v-model="newChannel.platform_type">
           <option value="feishu">飞书</option>
@@ -968,15 +947,14 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)"><i v-if="busy('addCh')"
             class="ti ti-loader-2"></i> 启用</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 
-  <!-- 微信扫码绑定弹窗 -->
-  <div v-if="showWeixinScan" class="overlay" @click.self="stopWxPoll(); showWeixinScan = false">
-    <div class="modal" style="text-align:center">
-      <div class="mt">微信渠道扫码绑定</div>
+  <!-- 微信扫码绑定弹窗（关闭需同步停轮询） -->
+  <BaseModal v-if="showWeixinScan" title="微信渠道扫码绑定" @close="stopWxPoll(); showWeixinScan = false">
+    <div style="text-align:center">
       <div class="muted" style="margin:8px 0">使用微信「我 → 设置 → 插件 → ClawBot」扫描下方二维码（需微信 8.0.70+ 且账号已开放 ClawBot 灰度）</div>
-      <div v-if="wxImgSrc()" style="margin:16px auto;width:220px;height:220px;background:#fff;padding:8px;border-radius:8px">
+      <!-- 二维码背景强制白底：扫码识别对比度需求（例外登记 UI_UX_SPEC） -->
+      <div v-if="wxImgSrc()" style="margin:16px auto;width:220px;height:220px;background:#fff;padding:8px;border-radius:var(--radius-sm)">
         <img :src="wxImgSrc()" style="width:100%;height:100%;object-fit:contain" alt="微信扫码" />
       </div>
       <div v-else-if="wxScan.busy" class="muted">正在获取二维码…</div>
@@ -990,12 +968,10 @@ onActivated(() => selectTab(tab.value))
         <button @click="stopWxPoll(); showWeixinScan = false">关闭</button>
       </div>
     </div>
-  </div>
+  </BaseModal>
 
   <!-- 编辑接入渠道弹窗 -->
-  <div v-if="showChannelEdit" class="overlay" @click.self="showChannelEdit = false">
-    <div class="modal">
-      <div class="mt">编辑接入渠道</div>
+  <BaseModal v-if="showChannelEdit" title="编辑接入渠道" @close="showChannelEdit = false">
       <div class="form-group"><label class="label">平台</label>
         <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled />
       </div>
@@ -1023,13 +999,10 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-primary" :disabled="busy('saveChE')" @click="run('saveChE', saveChannelEdit)"><i
             v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 
   <!-- 编辑 Provider 弹窗 -->
-  <div v-if="showEdit" class="overlay" @click.self="showEdit = false">
-    <div class="modal">
-      <div class="mt">编辑 LLM Provider</div>
+  <BaseModal v-if="showEdit" title="编辑 LLM Provider" @close="showEdit = false">
       <div class="form-group"><label class="label">显示名称</label><input v-model="editData.display_name" /></div>
       <div class="form-group"><label class="label">类型</label>
         <select v-model="editData.provider_type">
@@ -1061,6 +1034,5 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)"><i
             v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存</button>
       </div>
-    </div>
-  </div>
+  </BaseModal>
 </template>

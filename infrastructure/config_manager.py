@@ -199,6 +199,9 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
     {"key": "output_style_auto_evolve_enabled", "type": "bool", "default": True,
      "effect": "next_turn", "group": "other", "order": 5, "label": "输出画像自动演化",
      "desc": "是否允许系统根据反馈自动更新回复风格；关闭后只能在画像页手动提炼。"},
+    {"key": "response_depth_enabled", "type": "bool", "default": True,
+     "effect": "next_turn", "group": "other", "order": 8, "label": "场景化回复篇幅",
+     "desc": "根据消息场景自动判定回复篇幅：寒暄简短、方案/分析详细；关闭后所有场景按输出画像默认篇幅回复。"},
     # -- 位置 --
     {"key": "geolocation_enabled", "type": "bool", "default": False,
      "effect": "immediate", "group": "other", "order": 7,

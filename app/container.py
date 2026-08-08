@@ -476,7 +476,7 @@ class AppContainer:
 
     def _purge_old_signals(self) -> int:
         """清理超 output_style_signal_retention_days（默认 90）天的 response_signals。"""
-        from datetime import datetime, timedelta
+        from datetime import timedelta
         days = self.config.get("output_style_signal_retention_days", 90)
         cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")

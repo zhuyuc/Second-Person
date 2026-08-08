@@ -38,3 +38,7 @@ cryptography>=42.0.0
 
 # 微信扫码二维码生成（依赖 Pillow）
 qrcode[pil]>=7.4.2
+
+# 测试/静态门禁（tests/test_static_health.py 依赖 pyflakes）
+pytest>=8.0.0
+pyflakes>=3.2.0
