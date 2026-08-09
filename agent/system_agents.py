@@ -10,6 +10,8 @@ Agent 失败隔离：单个 Agent 失败不影响主流程（调度器包裹异�
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from datetime import datetime, timedelta
 
@@ -418,15 +420,27 @@ class OutputStyleBuilder:
         window = self.config.get("output_style_signal_window_days", 30)
         cutoff = (now_cst() - timedelta(days=window)
                   ).isoformat(timespec="seconds")
+        # 双块归因数据源（v3 §反馈闭环）：response_signals JOIN 策略快照；
+        # next_user_time 用于归因侧计算追问间隔（弱信号窗口过滤），不改采集逻辑
         rows = self.db.query_all(
-            "SELECT context_label,char_count,bullet_count,table_count,"
-            "conclusion_position,explicit_reaction,explicit_keywords "
-            "FROM response_signals WHERE create_time>=?", (cutoff,))
+            "SELECT rs.context_label,rs.char_count,rs.bullet_count,rs.table_count,"
+            "rs.conclusion_position,rs.explicit_reaction,rs.explicit_keywords,"
+            "rs.implicit_reaction,rs.message_id,rs.create_time AS signal_time,"
+            "c.response_strategy_json,c.session_id,"
+            "(SELECT MIN(c2.create_time) FROM conversations c2 "
+            " WHERE c2.session_id=c.session_id AND c2.id>c.id AND c2.role='user')"
+            " AS next_user_time "
+            "FROM response_signals rs "
+            "JOIN conversations c ON c.id=rs.message_id "
+            "WHERE rs.create_time>=?", (cutoff,))
         if not rows:
             return False
+        followup_window = self.config.get(
+            "strategy_followup_window_seconds", 60)
         # 分场景统计（context_label：chat/opinion/fact_query/tech_help/other）：
         # 避免把不同场景混在一起得出“点赞平均字数”式的一刀切结论
         scenes: dict[str, dict] = {}
+        strategy_rows: list[str] = []  # 策略维度归因素材（含弱信号标注）
         for r in rows:
             label = r["context_label"] or "other"
             s = scenes.setdefault(
@@ -440,6 +454,25 @@ class OutputStyleBuilder:
                 s["dislike"] += 1
             if r["explicit_keywords"]:
                 s["keywords"].append(r["explicit_keywords"])
+            # 策略归因素材：仅收有策略快照的消息；追问弱信号按窗口过滤
+            snap_txt = r["response_strategy_json"]
+            if snap_txt:
+                weak = ""
+                if (r["explicit_keywords"] or r["implicit_reaction"] == "follow_up_clarify") \
+                        and r["next_user_time"]:
+                    try:
+                        gap = (datetime.fromisoformat(r["next_user_time"])
+                               - datetime.fromisoformat(r["signal_time"]))
+                        if gap.total_seconds() <= followup_window:
+                            weak = f"追问弱信号[{r['explicit_keywords'] or '追问'}]"
+                    except ValueError:
+                        pass
+                reaction = {1: "like", 2: "dislike"}.get(
+                    r["explicit_reaction"], "none")
+                strategy_rows.append(
+                    f"- message_id={r['message_id']} 场景={label} "
+                    f"反应={reaction}{' ' + weak if weak else ''} "
+                    f"策略={snap_txt}")
         scene_names = {"chat": "闲聊寒暄", "opinion": "观点征询",
                        "fact_query": "事实/知识查询",
                        "tech_help": "计算/文件/技术任务", "other": "其他"}
@@ -455,33 +488,112 @@ class OutputStyleBuilder:
                 f"点赞 {s['like']} 踩 {s['dislike']}，"
                 f"点赞平均字数 {avg_like:.0f}，偏好关键词：{kws}")
         stat = "\n".join(scene_lines)
+        # 双块输入组装：形态维度统计 + 策略决策维度记录（v3，两类归因独立）
+        user_content = f"## 输出形态维度统计\n{stat}"
+        if strategy_rows:
+            user_content += ("\n\n## 策略决策维度记录（供策略偏好归因）\n"
+                             + "\n".join(strategy_rows[:60]))
+        else:
+            user_content += ("\n\n## 策略决策维度记录\n无（仅做输出样式归因，"
+                             "strategy_preference_candidates 输出空数组）")
         try:
             resp = await self.llm.chat(
                 snap, [{"role": "system", "content": OUTPUT_STYLE_PROMPT},
-                       {"role": "user", "content": stat}], source="system_agent",
+                       {"role": "user", "content": user_content}],
+                source="system_agent",
                 session_id=session_id)
         except Exception as e:  # noqa: BLE001
             logger.warning("输出画像提炼失败：%s", e)
             return False
-        new_text = resp["content"].strip()
-        # 演化频率控制：与上一版 diff 相似度 > 0.95 不占新版号（difflib 真实 diff）
-        cur = self.soul.read_style().get("输出样式", "")
-        create_version = _similarity(cur, new_text) <= 0.95
-        await self.fw.submit("soul_style", {
-            "section": "auto", "content": new_text, "create_version": create_version,
-            "diff_summary": "输出画像自动更新"})
+        # 双块解析：JSON 两键；解析失败兼容回退旧行为（整体作为样式文本）
+        data = repair_json(resp["content"])
+        strategy_count = 0
+        if isinstance(data, dict) and (
+                "output_style_text" in data
+                or "strategy_preference_candidates" in data):
+            new_text = str(data.get("output_style_text") or "").strip()
+            strategy_count = self._enqueue_strategy_candidates(
+                data.get("strategy_preference_candidates") or [])
+        else:
+            new_text = resp["content"].strip()
+        if new_text:
+            # 演化频率控制：与上一版 diff 相似度 > 0.95 不占新版号（difflib 真实 diff）
+            cur = self.soul.read_style().get("输出样式", "")
+            create_version = _similarity(cur, new_text) <= 0.95
+            await self.fw.submit("soul_style", {
+                "section": "auto", "content": new_text, "create_version": create_version,
+                "diff_summary": "输出画像自动更新"})
         self._mark_built()
         # 发布 output_style.updated 事件
         from app.main import get_container
         try:
             c = get_container()
             if c and getattr(c, "bus", None):
-                from infrastructure.event_bus import EVT_OUTPUT_STYLE_UPDATED
-                await c.bus.publish(EVT_OUTPUT_STYLE_UPDATED,
-                                    {"section": "auto"})
+                from infrastructure.event_bus import (
+                    EVT_OUTPUT_STYLE_UPDATED, EVT_STRATEGY_REFLECTED)
+                if new_text:
+                    await c.bus.publish(EVT_OUTPUT_STYLE_UPDATED,
+                                        {"section": "auto"})
+                # 策略反思完成事件（v3 §事件总线）：无论候选是否产出均广播
+                await c.bus.publish(EVT_STRATEGY_REFLECTED,
+                                    {"candidates_enqueued": strategy_count,
+                                     "signal_count": len(rows)})
         except Exception:  # noqa: BLE001
             pass
         return True
+
+    # ---- 策略偏好候选入队（v3 §反馈闭环） ----------------------------------
+
+    _STRATEGY_SCENES = {"chat", "opinion", "fact_query", "tech_help", "other"}
+    _STRATEGY_PARAMS = {"depth", "form", "tone", "angle"}
+
+    def _enqueue_strategy_candidates(self, candidates) -> int:
+        """策略偏好候选入 profile_review_queue（review_type=strategy_preference）。
+
+        双保险门槛：样本 < 3 或缺关键字段不入队（prompt 约束之外的代码兜底）；
+        拒绝保护期内不重提同方向候选。
+        """
+        count = 0
+        now_str = now_cst().isoformat(timespec="seconds")
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                continue
+            scene = cand.get("scene") if cand.get(
+                "scene") in self._STRATEGY_SCENES else "other"
+            param = cand.get("param") if cand.get(
+                "param") in self._STRATEGY_PARAMS else ""
+            proposed = str(cand.get("proposed_content") or "").strip()
+            title = str(cand.get("title") or "").strip()
+            evidence = cand.get("evidence") or []
+            if not proposed or not title or len(evidence) < 3:
+                continue
+            change_key = hashlib.md5(
+                f"strategy:{scene}:{param}:{str(cand.get('direction', ''))[:80]}"
+                .encode()).hexdigest()[:16]
+            prot = self.db.query_one(
+                "SELECT 1 FROM profile_review_rejections "
+                "WHERE change_key=? AND protected_until>?", (change_key, now_str))
+            if prot:
+                continue
+            dup = self.db.query_one(
+                "SELECT 1 FROM profile_review_queue "
+                "WHERE change_key=? AND status='pending'", (change_key,))
+            if dup:
+                continue
+            self.db.execute(
+                "INSERT INTO profile_review_queue"
+                "(review_type,change_key,title,proposed_content,evidence,priority,"
+                "status,created_at) "
+                "VALUES('strategy_preference',?,?,?,?,3,'pending',?)",
+                (change_key, title[:200], proposed[:2000],
+                 json.dumps({"scene": scene, "param": param,
+                             "direction": str(cand.get("direction", ""))[:80],
+                             "items": evidence}, ensure_ascii=False)[:2000],
+                 now_str))
+            count += 1
+        if count:
+            logger.info("策略偏好候选入队 %d 条", count)
+        return count
 
 
 def _similarity(a: str, b: str) -> float:

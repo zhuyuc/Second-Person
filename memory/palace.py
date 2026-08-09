@@ -91,7 +91,10 @@ class Palace:
                       links: list[dict[str, str]]) -> None:
         conn.execute(
             "DELETE FROM memory_links WHERE source_id=?", (source_id,))
-        for lk in links:
+        for lk in links or []:
+            # 防御脏数据：历史残留/LLM 产出可能含非 dict 元素，跳过而非崩溃
+            if not isinstance(lk, dict):
+                continue
             target, ltype = lk.get("target"), lk.get("type", "related")
             if target:
                 conn.execute(

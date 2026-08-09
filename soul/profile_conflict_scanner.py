@@ -326,10 +326,10 @@ class ProfileConflictScanner:
         return expired_count, cleaned_count
 
     def pending_count(self, review_type: str | None = None) -> dict[str, int]:
-        """返回各轨道 pending 计数。"""
+        """返回各轨道 pending 计数（含策略偏好轨道，v3 §画像扩展）。"""
         counts: dict[str, int] = {}
         types = [review_type] if review_type else [
-            "persona", "user_profile", "output_style"]
+            "persona", "user_profile", "output_style", "strategy_preference"]
         for t in types:
             r = self.db.query_one(
                 "SELECT count(*) c FROM profile_review_queue "

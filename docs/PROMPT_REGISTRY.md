@@ -61,6 +61,10 @@
 | 32 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1） | agent/intent_parser.py | 惰性 | - | A |
 | 33 | agent/prompts/honest_clarify.md | 诚实澄清输出模板（§5.2 态二） | agent/core.py | 惰性 | gap_description | A |
 | 34 | agent/prompts/response_depth.md | 场景化回复篇幅档位指令（按场景注入） | agent/response_synthesizer.py | 惰性 | - | A |
+| 35 | agent/prompts/strategy_decide.md | 响应策略决策 system（v3 §四） | agent/strategy_engine.py | 惰性 | - | A |
+| 36 | agent/prompts/default_strategy_priors.md | 策略先验冷启动默认模板（行业通用启发，v3 §八） | agent/strategy_engine.py | 惰性 | - | B |
+| 37 | agent/prompts/meta_cognitive.md | 元认知五步协议 system（v3 §六） | agent/meta_cognitive.py | 惰性 | examples | A |
+| 38 | agent/prompts/meta_cognitive_examples.md | 五种典型答案形态 few-shot 共享片段 | agent/meta_cognitive.py | 惰性 | - | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -97,6 +101,8 @@
 | 22 | agent/intent_parser.py::detect | chat | gap_detect | agent/prompts/gap_detect.md | 缺口检测（§4.1） |
 | 23 | agent/core.py::_emit_honest_clarify | chat | honest_clarify | agent/prompts/honest_clarify.md | 诚实澄清输出（§5.2 态二） |
 | 24 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像双版对比冲突识别 |
+| 25 | agent/strategy_engine.py::_llm_decide | chat | strategy_decide | agent/prompts/strategy_decide.md + agent/prompts/default_strategy_priors.md（先验动态拼装） | 响应策略决策（v3 §四） |
+| 26 | agent/meta_cognitive.py::_extract | chat | meta_cognitive | agent/prompts/meta_cognitive.md + agent/prompts/meta_cognitive_examples.md | 元认知思考骨架提取（v3 §六） |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

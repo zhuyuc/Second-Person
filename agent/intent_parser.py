@@ -88,6 +88,8 @@ class QuickIntentResult:
     intent_hypothesis: str         # 初步意图假设
     needs_convergence: bool        # 是否需要深度收敛
     complexity_reason: str         # 复杂度判断理由
+    complexity_hint: int = 3       # 复杂度先验 0-10（策略引擎强先验，v3 §四）
+    consistency_corrected: bool = False  # 代码侧一致性校正标记（v3 §S2，进 Langfuse）
 
 
 @dataclass
@@ -215,6 +217,27 @@ class GapDetector:
             return GapResult(gaps=[], has_gaps=False, retarget_tasks=[])
 
 
+# ---- 复杂度先验护栏（v3 §S2） ----------------------------------------------
+
+# complexity_hint ≥ 7 时必须进收敛环：高复杂度却跳过收敛，策略引擎只能基于
+# 粗糙假设决策，属 prompt 违背——代码强制校正并记 WARNING
+def enforce_hint_consistency(result: QuickIntentResult) -> QuickIntentResult:
+    if result.complexity_hint >= 7 and not result.needs_convergence:
+        logger.warning(
+            "quick_intent 一致性校正：complexity_hint=%d 但 needs_convergence=False，"
+            "强制进入收敛环", result.complexity_hint)
+        result.needs_convergence = True
+        result.consistency_corrected = True
+    return result
+
+
+def _clamp_hint(v) -> int:
+    try:
+        return max(0, min(10, int(v)))
+    except (TypeError, ValueError):
+        return 3
+
+
 class DegradationError(Exception):
     """三态降级异常：携带 DegradationDecision，由调用方路由到对应态。"""
 
@@ -254,12 +277,14 @@ class IntentParser:
                 session_id=session_id,
             )
             data = repair_json(resp["content"]) or {}
-            return QuickIntentResult(
+            result = QuickIntentResult(
                 intent_hypothesis=data.get(
                     "intent_hypothesis", user_message[:50]),
                 needs_convergence=data.get("needs_convergence", False),
                 complexity_reason=data.get("complexity_reason", ""),
+                complexity_hint=_clamp_hint(data.get("complexity_hint")),
             )
+            return enforce_hint_consistency(result)
         except Exception:
             logger.warning("快速预判失败，默认快速通道", exc_info=True)
             return QuickIntentResult(

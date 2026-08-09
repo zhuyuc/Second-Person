@@ -134,9 +134,32 @@ async function loadProfile() {
         soulHistory.value = await api.get('/soul/style/history?source=' + soulSource.value)
       })(),
       api.get('/soul/pending').then(p => { pendings.value = p }).catch(() => { }),
+      loadRespStrategy(),
     ])
     profile.value = p; soul.value = s; outputStyle.value = o
   } catch { /* 任一 API 失败时保留旧数据显示 */ }
+}
+
+// 区四：响应策略偏好（v3：RESPONSE_STRATEGY.md + 待确认候选）
+const respStrategy = ref({ content: '', candidates: [] })
+async function loadRespStrategy() {
+  try {
+    const [r, q] = await Promise.all([
+      api.get('/response-strategy'),
+      api.get('/profile-review/pending?review_type=strategy_preference'),
+    ])
+    respStrategy.value = { content: r.content || '', candidates: q.list || [] }
+  } catch { /* 失败保留旧数据 */ }
+}
+async function confirmStrategyCand(id) {
+  await api.post('/profile-review/confirm', { id })
+  toast.push('success', '已确认，下一轮对话生效')
+  await loadRespStrategy()
+}
+async function rejectStrategyCand(id) {
+  await api.post('/profile-review/reject', { id })
+  toast.push('success', '已拒绝，60 天内不再重提同方向建议')
+  await loadRespStrategy()
 }
 
 // 区三：暂停输出画像自动演化开关
@@ -731,6 +754,27 @@ onActivated(() => selectTab(tab.value))
         <template v-if="!outputStyle.auto_evolve_enabled"> · <span
             style="color:var(--warntx)">自动演化已暂停（仍在采集信号）</span></template>
       </div>
+    </div>
+    <div class="sep"></div>
+    <div class="section-sub">区四 · 响应策略偏好</div>
+    <div v-if="respStrategy.candidates.length" class="cw"
+      style="border:1px solid var(--warntx);background:var(--warnbg)">
+      <b style="color:var(--warntx)">待确认策略偏好</b>
+      <div v-for="p in respStrategy.candidates" :key="p.id" style="margin-top:8px">
+        <div style="font-size:var(--fs-base);font-weight:500">{{ p.title }}</div>
+        <div class="muted" style="margin-top:2px">建议：{{ p.proposed_content }}</div>
+        <div class="fg" style="gap:6px;margin-top:6px">
+          <button class="btn-xs" :disabled="busy('sc' + p.id)"
+            @click="run('sc' + p.id, () => confirmStrategyCand(p.id))">确认</button>
+          <button class="btn-xs" :disabled="busy('sc' + p.id)"
+            @click="run('sc' + p.id, () => rejectStrategyCand(p.id))">拒绝</button>
+        </div>
+      </div>
+    </div>
+    <div class="cw">
+      <div class="row"><b>已确认的策略偏好</b></div>
+      <pre v-if="respStrategy.content" style="white-space:pre-wrap;margin-top:8px">{{ respStrategy.content }}</pre>
+      <div v-else class="muted" style="margin-top:8px">暂无已确认偏好，系统正从你的赞踩反馈中积累（期间以行业通用默认策略兜底）</div>
     </div>
   </div>
 

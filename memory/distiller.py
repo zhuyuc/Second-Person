@@ -238,12 +238,14 @@ class Distiller:
     async def _create(self, item, confidence, source_type, embedding, entities,
                       entity_types: dict | None = None, wait: bool = False) -> str:
         seq = self.palace.next_memory_seq()
-        from .naming import memory_id as mk_mid
+        from .naming import memory_id as mk_mid, normalize_domain
         mid = mk_mid(seq)
         now = now_cst()
         fm = {
             "id": mid, "title": item.get("title", "")[:30],
-            "domain": item.get("domain", "general"), "confidence": confidence,
+            # 源头净化：LLM 蒸馏可能产出含反斜杠/多段式的脏 domain（v3 修复）
+            "domain": normalize_domain(item.get("domain", "general")),
+            "confidence": confidence,
             "lifecycle": "active", "source_type": source_type,
             "access_count": 0, "created_at": now.strftime("%Y-%m-%d"),
             "updated_at": now.strftime("%Y-%m-%d"),

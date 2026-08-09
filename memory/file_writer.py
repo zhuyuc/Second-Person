@@ -25,14 +25,15 @@ from infrastructure.event_bus import (EVT_MEMORY_CREATED, EVT_MEMORY_UPDATED,
                                       EVT_PROFILE_REBUILT, EVT_SOUL_STYLE_UPDATED)
 
 from .md_file import MemoryDoc, parse_memory_md, serialize_memory_md
-from .naming import memory_filename
+from .naming import memory_filename, normalize_domain
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.file_writer")
 
-PERSISTENT_TYPES = {"memory", "profile", "soul_style", "skill"}
+PERSISTENT_TYPES = {"memory", "profile",
+                    "soul_style", "skill", "response_strategy"}
 MEMORY_TYPES = {"memory", "profile", "soul_style",
-                "context_entry", "skill", "index"}
+                "context_entry", "skill", "index", "response_strategy"}
 QUEUE_MAX = 10000
 MAX_RETRY = 3
 
@@ -244,6 +245,7 @@ class FileWriter:
             "context_entry": self._h_context_entry,
             "skill": self._h_skill,
             "index": self._h_index,
+            "response_strategy": self._h_response_strategy,
         }[req.write_type]
         if req.batch:
             for item in req.payload.get("items", []):
@@ -274,7 +276,10 @@ class FileWriter:
             from .naming import memory_id as mk_mid
             fm["id"] = mk_mid(seq)
         mid = fm["id"]
-        domain = fm.get("domain", "general")
+        # 写层兜底净化（v3 修复）：历史残留/外部导入的脏 domain（含反斜杠等）
+        # 在拼路径前规范化，避免 Windows mkdir 失败导致写请求永久重试
+        fm["domain"] = normalize_domain(fm.get("domain", "general"))
+        domain = fm["domain"]
         summary = p.get("summary", "")
         detail = p.get("detail", "")
 
@@ -476,7 +481,7 @@ class FileWriter:
         if not row:
             return
         cur = self.data_dir / row["md_path"]
-        domain = row["domain"]
+        domain = normalize_domain(row["domain"])
         if to_archived:
             dst_dir = self.data_dir / "memories" / "_archived" / domain
             new_life = "archived"
@@ -538,6 +543,33 @@ class FileWriter:
         path.write_text(p["content"], encoding="utf-8")
         if self.bus:
             self.bus.publish_nowait(EVT_PROFILE_REBUILT, {})
+
+    # ---- response_strategy 处理器（v3 §画像扩展） -------------------------
+    def _h_response_strategy(self, p: dict[str, Any]) -> None:
+        """写入 RESPONSE_STRATEGY.md：按 context_label 场景分区 upsert。
+
+        payload: {"scene": "opinion", "entry": "已确认偏好内容"}；
+        同场景旧条目被新条目替换（用户偏好逐场景覆盖，v3 §八）。
+        """
+        scene = str(p.get("scene") or "other").strip()[:20]
+        entry = str(p.get("entry") or "").strip()
+        if not entry:
+            return
+        path = self.data_dir / "profile" / "RESPONSE_STRATEGY.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        header = f"## {scene}"
+        block = f"{header}\n{entry}\n"
+        if header in text:
+            # 替换既有场景段：截取到下一个 "## " 之前
+            start = text.index(header)
+            nxt = text.find("\n## ", start)
+            end = len(text) if nxt == -1 else nxt
+            text = text[:start] + block + text[end:]
+        else:
+            text = (text.rstrip() + "\n\n" + block) if text.strip() else block
+        self.mark_internal(path)  # 防 watcher 误判为外部修改
+        path.write_text(text.rstrip() + "\n", encoding="utf-8")
 
     # ---- soul_style 处理器 ------------------------------------------------
     def _h_soul_style(self, p: dict[str, Any]) -> None:

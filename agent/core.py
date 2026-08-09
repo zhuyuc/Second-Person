@@ -41,6 +41,12 @@ from .intent_parser import (
     QuickIntentResult,
     Understanding,
 )
+from .strategy_engine import (
+    ResponseStrategy,
+    StrategyEngine,
+    StrategyInputs,
+)
+from .meta_cognitive import CognitiveSkeleton, MetaCognitiveProtocol
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
@@ -187,6 +193,14 @@ class AgentCore:
             llm_client, lambda: self.providers.snapshot_for("convergence"))
         self.gap_detector = GapDetector(
             llm_client, lambda: self.providers.snapshot_for("convergence"))
+        # 响应策略引擎（v3 §四）：回答形态/角度/深度/语气的集中决策中枢；
+        # 输入不含 memories（策略与记忆内容正交），先验全文注入自行匹配场景
+        self.strategy_engine = StrategyEngine(
+            llm_client, lambda: self.providers.snapshot_for("agent"),
+            config, session_store.data_dir)
+        # 元认知协议（v3 §六）：高复杂度问题的思考骨架，失败跳过不阻塞
+        self.metacog = MetaCognitiveProtocol(
+            llm_client, lambda: self.providers.snapshot_for("agent"))
         self.compressor = Compressor(
             llm_client, lambda: self.providers.snapshot_for("agent"),
             lambda: self.providers.snapshot_for("chat"))
@@ -381,6 +395,7 @@ class AgentCore:
         # ---- 收敛式理解：快速预判（§3.1） ----
         quick_result: QuickIntentResult | None = None
         understanding: Understanding | None = None
+        strategy: ResponseStrategy | None = None  # 响应策略快照（v3，引导期/关闭时 None）
         if not onboarding and chat_configured:
             _sp = tracer.span_start("quick_intent", input={
                 "message": message})
@@ -392,6 +407,8 @@ class AgentCore:
                     "needs_convergence": quick_result.needs_convergence,
                     "hypothesis": quick_result.intent_hypothesis,
                     "reason": quick_result.complexity_reason,
+                    "complexity_hint": quick_result.complexity_hint,
+                    "consistency_corrected": quick_result.consistency_corrected,
                 })
                 # 思考过程外露：快速预判结论
                 await emit("thinking_delta", {
@@ -402,15 +419,29 @@ class AgentCore:
                 _sp.end(level="ERROR")
                 raise
 
+        # ---- 策略决策任务（v3 §二）：输入不含 memories/Understanding（正交性） ----
+        # 快速通道：与检索/意图三路并行；收敛通道：与收敛环并行。
+        # 耗时均被掩盖，零净增；若等收敛环结束再决策，实测被超时吞掉 100% fallback
+        async def _run_strategy():
+            if not self.config.get("strategy_engine_enabled", True):
+                return None
+            return await self._run_strategy_decision(
+                sid, message, quick_result, tracer, emit,
+                emotion=self._read_current_emotion())
+
         # ---- 收敛环（§3.5）仅在 LLM 可用 + 需深度收敛时进入 ----
         max_rounds = self.config.get("convergence_max_rounds", 2)
         _convergence_done = False
+        _conv_strategy_task = None
         if (not onboarding and quick_result and quick_result.needs_convergence
                 and llm_available):
+            # 策略决策与收敛环同时启动：策略不依赖理解包，收敛环耗时完全掩盖决策耗时
+            _conv_strategy_task = asyncio.create_task(_run_strategy())
             understanding, conv_memories = await self._convergence_loop(
                 sid, message, quick_result, history, tracer, emit,
                 max_rounds=max_rounds)
             if understanding is None:
+                _conv_strategy_task.cancel()
                 return  # 收敛失败（已 emit error），中止
             # 从理解包提取 intents 给下游，跳过原有检索+意图流程
             intents = [understanding.rich_intent]
@@ -419,6 +450,11 @@ class AgentCore:
             _convergence_done = True
             # 思考过程外露：收敛后的丰满意图
             await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
+            # 收敛通道策略结果：并行任务此时通常已完成，零等待取回
+            try:
+                strategy = await _conv_strategy_task
+            except Exception:  # noqa: BLE001 - 决策失败不阻塞主链
+                strategy = None
         else:
             # 快速通道或引导模式
             memories = []
@@ -505,10 +541,12 @@ class AgentCore:
                 _sp.end(level="ERROR")
                 raise
 
+        # ---- 快速通道策略决策任务已在上方定义：与检索/意图三路并行 ----
         if not _convergence_done and not onboarding and llm_available:
-            # 记忆检索与意图识别互不依赖（分别产出 memories/intents），并行执行：
-            # 第 2 层精筛 LLM 的耗时隐藏在意图识别耗时内，主链路净省数秒
+            # 记忆检索/意图识别/策略决策三者互不依赖，并行执行：
+            # 第 2 层精筛 LLM 与策略决策的耗时均被掩盖，主链路零净增
             _results = await asyncio.gather(_run_retrieval(), _run_intent(),
+                                            _run_strategy(),
                                             return_exceptions=True)
             # 意图解析失败（DegradationError）→ 路由到三态降级
             for _r in _results:
@@ -529,6 +567,10 @@ class AgentCore:
                 intents = []
             else:
                 intents = _intent_r
+            # 策略结果：_run_strategy 内部已全异常兜底，此处仅防御性提取
+            _strategy_r = _results[2]
+            strategy = _strategy_r if isinstance(
+                _strategy_r, ResponseStrategy) else None
         elif not _convergence_done:
             if not onboarding:
                 # 态三：LLM 不可用（熔断/未配置），不再降级硬答
@@ -547,6 +589,17 @@ class AgentCore:
         # 思考过程外露：意图理解与任务拆解以 thinking_delta 流式推送给前端
         if not onboarding and not _convergence_done:
             await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
+
+        # ---- 元认知协议（v3 §六）：高复杂度且非排除意图才触发 ----
+        # 触发唯一条件：complexity_score≥7 且 intent_type∉排除集 且开关开启；
+        # fallback 策略不触发（避免低质量决策叠加高成本环节）
+        skeleton: CognitiveSkeleton | None = None
+        if (not onboarding and strategy is not None and intents
+                and StrategyEngine.should_trigger_meta(
+                    strategy, getattr(intents[0], "intent_type", "chat"),
+                    self.config.get("meta_cognitive_enabled", True))):
+            skeleton = await self._run_meta_cognitive(
+                sid, message, strategy, memories, tracer, emit)
 
         # mimo 内置联网搜索：query_external 意图且 chat 模型为 mimo 且开关开启时，
         # 由模型端执行搜索（博查源，带结构化引用），跳过自研 web_search；
@@ -677,6 +730,13 @@ class AgentCore:
                                 content_type="tool_result")}
                 for r in (tool_results or [])[:10]
             ],
+            # 策略快照全量（含可解释性字段，v3 §十）：与业务注入 prompt 一致
+            "strategy": (mark_preview(strategy.span_snapshot(),
+                                      content_type="strategy_snapshot")
+                         if strategy else None),
+            "skeleton": (mark_preview(skeleton.to_dict(),
+                                      content_type="cognitive_skeleton")
+                         if skeleton else None),
         })
         try:
             if not chat_configured and not onboarding:
@@ -703,7 +763,9 @@ class AgentCore:
                 prompt = self._build_final_prompt(system_prompt, history, message,
                                                   tool_results, memories, onboarding,
                                                   skill_text, preload_text,
-                                                  depth_level=depth_level)
+                                                  depth_level=depth_level,
+                                                  strategy=strategy,
+                                                  skeleton=skeleton)
                 valid_ids = {m["id"] for m in memories}
 
                 # 推理模型（DeepSeek 等）的原生思考过程同样以 thinking_delta 外露
@@ -900,7 +962,13 @@ class AgentCore:
                                                              for c in cited_ids],
                                                   thinking="".join(
                                                       think_parts) or None,
-                                                  visuals=_visuals or None)
+                                                  visuals=_visuals or None,
+                                                  strategy_snapshot=(
+                                                      strategy.db_snapshot()
+                                                      if strategy else None),
+                                                  skeleton_snapshot=(
+                                                      skeleton.to_dict()
+                                                      if skeleton else None))
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
                                                      message, onboarding, user_msg_id=user_msg_id, intents=intents)
             _sp.end(output={"message_id": msg_id, "cited": cited_ids,
@@ -908,6 +976,15 @@ class AgentCore:
         except Exception:
             _sp.end(level="ERROR")
             raise
+        # 策略执行完成事件（v3 §事件总线）：反馈归因/观测订阅，零阻塞
+        if strategy is not None and self.bus:
+            try:
+                from infrastructure.event_bus import EVT_STRATEGY_EXECUTED
+                self.bus.publish_nowait(EVT_STRATEGY_EXECUTED, {
+                    "session_id": sid, "message_id": msg_id,
+                    "strategy": strategy.db_snapshot()})
+            except Exception:  # noqa: BLE001
+                pass
         trace.update(output=assistant_text,
                      metadata={"internal_trace_id": get_trace_id(),
                                "images": len(images) if images else 0,
@@ -1015,6 +1092,129 @@ class AgentCore:
         if kb:
             parts.append(f"命中知识库 {len(kb)} 条：{'、'.join(kb)}")
         return "【记忆检索】" + "；".join(parts) + "\n"
+
+    def _read_current_emotion(self) -> EmotionState | None:
+        """读 MoodManager 当前衰减后的用户情绪（零 LLM，v3 策略引擎输入）。"""
+        if not self.mood:
+            return None
+        try:
+            row = self.mood.db.query_one("SELECT * FROM mood_state WHERE id=1")
+            if row:
+                rd = dict(row)
+                em = rd.get("user_mood", "neutral") or "neutral"
+                ei = self.mood._decay(
+                    rd.get("user_intensity", 0) or 0, rd.get("user_updated_at"))
+                return EmotionState(valence=em, intensity=round(ei, 2))
+        except Exception:  # noqa: BLE001 - 静默降级
+            logger.warning("情绪状态读取失败", exc_info=True)
+        return None
+
+    async def _run_strategy_decision(self, sid, message, quick_result, tracer,
+                                     emit, rich_intent=None, emotion=None,
+                                     focus=None) -> ResponseStrategy | None:
+        """策略决策编排（v3 §十）：span 埋点 + narrative 外露 + 事件广播。
+
+        失败时 span 强制携带三元 metadata（fallback_used/failure_reason/
+        fallback_strategy_snapshot），支撑 Langfuse fallback 比例分析。
+        引导期/开关关闭/预判缺失时返回 None，调用方照常继续。
+        """
+        if quick_result is None:
+            return None
+        _sp = tracer.span_start("strategy_decision", input={
+            "message": mark_preview(message, content_type="user_message"),
+            "complexity_hint": getattr(quick_result, "complexity_hint", None),
+            "needs_convergence": getattr(quick_result, "needs_convergence", None),
+            "consistency_corrected": getattr(
+                quick_result, "consistency_corrected", False),
+            "emotion": (f"{emotion.valence}({emotion.intensity})"
+                        if emotion else None),
+            "channel": "convergence" if rich_intent is not None else "fast",
+        })
+        try:
+            priors = self.strategy_engine.load_priors()
+            inputs = StrategyInputs(
+                message=message, quick_result=quick_result, emotion=emotion,
+                priors=priors, rich_intent=rich_intent, focus=focus)
+            result = await self.strategy_engine.decide(inputs, session_id=sid)
+        except Exception as e:  # noqa: BLE001 - 零阻塞铁律：静默降级不影响主链
+            logger.warning("策略决策编排异常：%s", e, exc_info=True)
+            result = self.strategy_engine._fallback("llm_error")
+        if result.fallback_used:
+            # span 失败三元 metadata（v3 R7）：_Span.end 不收 metadata，先 update 再 end
+            _sp.update(metadata={"fallback_used": True,
+                                 "failure_reason": result.failure_reason,
+                                 "fallback_strategy_snapshot": result.db_snapshot()})
+            _sp.end(level="ERROR",
+                    status_message=result.failure_reason[:500],
+                    output=result.span_snapshot())
+        else:
+            _sp.end(output=result.span_snapshot())
+        # 思考过程外露：自然语言 narrative（非字段值，v3 R4）
+        try:
+            await emit("thinking_delta",
+                       {"text": f"【策略决策】{result.strategy_narrative}\n"})
+        except Exception:  # noqa: BLE001
+            pass
+        # 事件广播（观测/日志订阅，零阻塞）
+        if self.bus:
+            try:
+                from infrastructure.event_bus import EVT_STRATEGY_DECIDED
+                self.bus.publish_nowait(EVT_STRATEGY_DECIDED, {
+                    "session_id": sid, "strategy": result.db_snapshot(),
+                    "fallback_used": result.fallback_used})
+            except Exception:  # noqa: BLE001
+                pass
+        return result
+
+    async def _run_meta_cognitive(self, sid, message, strategy, memories,
+                                  tracer, emit) -> CognitiveSkeleton | None:
+        """元认知骨架提取编排（v3 §十）：span + narrative 外露 + 事件。
+
+        失败（超时/LLM 不可用/解析失败）返回 None，态一跳过骨架直接生成。
+        """
+        _sp = tracer.span_start("skeleton_extraction", input={
+            "message": mark_preview(message, content_type="user_message"),
+            "complexity_score": strategy.complexity_score,
+            "insight_hooks": strategy.insight_hooks,
+            "memory_titles": [m["title"] for m in (memories or [])[:10]],
+        })
+        try:
+            memories_text = "\n".join(
+                f"[{m['id']}] {m['title']}：{m.get('detail', m.get('summary', ''))}"
+                for m in (memories or [])[:15])
+            skeleton = await self.metacog.extract(
+                message, strategy, memories_text=memories_text, session_id=sid)
+        except Exception as e:  # noqa: BLE001 - 零阻塞铁律
+            logger.warning("元认知编排异常：%s", e, exc_info=True)
+            skeleton = None
+        if skeleton is None:
+            _sp.update(metadata={"fallback_used": True,
+                                 "failure_reason": "extract_failed_or_timeout"})
+            _sp.end(level="ERROR",
+                    status_message="骨架提取失败或超时，跳过骨架直接生成（态一）")
+            return None
+        _sp.end(output=skeleton.to_dict())
+        # 思考过程外露：骨架摘要（自然语言，非 JSON）
+        try:
+            _el = skeleton.expert_lens
+            _summary = "已构建思考骨架"
+            if skeleton.reframe.get("needed") and skeleton.reframe.get("real_question"):
+                _summary += f"：真正的问题是「{skeleton.reframe['real_question'][:40]}」"
+            if _el.get("non_obvious_insight"):
+                _summary += "，将带出一个关键洞察"
+            await emit("thinking_delta", {"text": f"【思考骨架】{_summary}\n"})
+        except Exception:  # noqa: BLE001
+            pass
+        if self.bus:
+            try:
+                from infrastructure.event_bus import EVT_SKELETON_EXTRACTED
+                self.bus.publish_nowait(EVT_SKELETON_EXTRACTED,
+                                        {"session_id": sid,
+                                         "has_insight": bool(
+                                             skeleton.expert_lens.get("non_obvious_insight"))})
+            except Exception:  # noqa: BLE001
+                pass
+        return skeleton
 
     # ---- 工具执行子流程（直接用 emit，工具状态中途可推思考流） --------
     @staticmethod
@@ -2002,7 +2202,9 @@ class AgentCore:
 
     def _build_final_prompt(self, system_prompt, history, message, tool_results,
                             memories, onboarding, skill_text="", preload_text="",
-                            depth_level: str = "normal"):
+                            depth_level: str = "normal",
+                            strategy: ResponseStrategy | None = None,
+                            skeleton: CognitiveSkeleton | None = None):
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
@@ -2015,6 +2217,25 @@ class AgentCore:
             message, tool_results, memories, depth_level=depth_level)
         # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能
         merged_system = system_prompt + "\n\n" + synth[0]["content"]
+        # 响应策略硬约束注入（v3 §六）：策略是逐轮决策，优先于长期风格基线
+        if strategy is not None:
+            hooks = "、".join(
+                strategy.insight_hooks) if strategy.insight_hooks else "无"
+            merged_system += (
+                "\n\n## 响应策略（本轮硬约束）\n"
+                f"- 回答角度：{strategy.angle}\n"
+                f"- 思考深度：{strategy.depth}（0 最浅，3 最深）\n"
+                f"- 表达形态：{strategy.form}\n"
+                f"- 语气：{strategy.tone}\n"
+                f"- 洞察触发点：{hooks}\n"
+                "优先级：人格底线（诚实、不伪装身份）高于一切；本轮策略优先于"
+                "输出风格基线；两者冲突时以本轮策略为准，但不得突破人格底线。")
+        # 思考骨架注入（v3 §六）：有则遵循，无则跳过
+        if skeleton is not None:
+            merged_system += (
+                "\n\n## 思考骨架（有则遵循）\n" + skeleton.to_prompt_text()
+                + "\n遵循规则：opening_move 与 closing_move 必须遵循；关键洞察"
+                "必须在回答中以某种形式呈现，不可稀释。")
         if skill_text:
             merged_system += "\n\n可参考的技能内容：" + skill_text
         if preload_text:

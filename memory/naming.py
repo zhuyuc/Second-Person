@@ -30,9 +30,15 @@ def normalize_entity_name(name: str) -> str:
 
 
 def normalize_domain(domain: str) -> str:
-    """domain：小写英文或中文，长度 1-32，不含路径分隔符与空格（空格转下划线）。"""
-    d = unicodedata.normalize("NFKC", domain).strip()
+    """domain：小写英文或中文，长度 1-32，不含路径分隔符与空格（空格转下划线）。
+
+    写盘前的最后一道防线：LLM 蒸馏可能产出含反斜杠/多段式的脏 domain
+    （如"组织行为学 \\ 人力资源管理"），Windows 下 mkdir 会失败并造成
+    写请求永久重试，必须规范化后才能拼入路径。
+    """
+    d = unicodedata.normalize("NFKC", str(domain)).strip() if domain else ""
     d = _ILLEGAL_FS.sub("_", d).replace(" ", "_")
+    d = re.sub("_+", "_", d).strip("_")  # 压缩连续下划线并去两端
     d = d.lower() if d.isascii() else d
     if not d:
         d = "general"

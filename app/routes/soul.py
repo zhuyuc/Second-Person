@@ -184,3 +184,86 @@ async def put_output_style(request: Request):
 async def build_now():
     await _c().output_style_builder.build(force=True)
     return {"code": 200, "data": {}}
+
+
+# ---- 画像审核队列（v3 §反馈闭环：策略偏好候选的消费端） ------------------
+
+@router.get("/profile-review/pending")
+async def profile_review_pending(review_type: str = ""):
+    """待确认候选列表（可按轨道过滤）+ 各轨道计数。"""
+    c = _c()
+    sql = ("SELECT id,review_type,change_key,title,proposed_content,evidence,"
+           "priority,created_at FROM profile_review_queue WHERE status='pending'")
+    params: tuple = ()
+    if review_type:
+        sql += " AND review_type=?"
+        params = (review_type,)
+    sql += " ORDER BY priority, created_at"
+    rows = c.db.query_all(sql, params)
+    return {"code": 200, "data": {
+        "list": [dict(r) for r in rows],
+        "counts": c.conflict_scanner.pending_count()}}
+
+
+@router.post("/profile-review/confirm")
+async def profile_review_confirm(request: Request):
+    """确认候选：strategy_preference 轨道写入 RESPONSE_STRATEGY.md 对应场景段。"""
+    import json as _json
+    body = await request.json()
+    c = _c()
+    row = c.db.query_one(
+        "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
+        (body.get("id"),))
+    if not row:
+        return {"code": 404, "message": "候选不存在或已处理"}
+    if row["review_type"] != "strategy_preference":
+        return {"code": 400, "message": "该轨道暂不支持在线确认"}
+    scene = "other"
+    try:
+        ev = _json.loads(row["evidence"] or "{}")
+        scene = ev.get("scene") or "other"
+    except ValueError:
+        pass
+    try:
+        await c.fw.submit("response_strategy", {
+            "scene": scene, "entry": row["proposed_content"]}, wait=True)
+    except Exception as e:  # noqa: BLE001
+        return {"code": 500, "message": f"策略偏好写入失败：{e}"}
+    from infrastructure.timeutil import now_cst
+    c.db.execute(
+        "UPDATE profile_review_queue SET status='confirmed', reviewed_at=?, "
+        "reviewed_by='user' WHERE id=?",
+        (now_cst().isoformat(timespec="seconds"), row["id"]))
+    if c.oplog:
+        c.oplog.log("strategy_preference_confirm", row["title"])
+    return {"code": 200, "data": {}}
+
+
+@router.post("/profile-review/reject")
+async def profile_review_reject(request: Request):
+    """拒绝候选：进入 60 天拒绝保护期，同方向不再重提。"""
+    body = await request.json()
+    c = _c()
+    row = c.db.query_one(
+        "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
+        (body.get("id"),))
+    if not row:
+        return {"code": 404, "message": "候选不存在或已处理"}
+    c.conflict_scanner.reject_and_protect(
+        row["review_type"], row["change_key"], row["proposed_content"][:200])
+    from infrastructure.timeutil import now_cst
+    c.db.execute(
+        "UPDATE profile_review_queue SET status='rejected', reviewed_at=?, "
+        "reviewed_by='user' WHERE id=?",
+        (now_cst().isoformat(timespec="seconds"), row["id"]))
+    return {"code": 200, "data": {}}
+
+
+@router.get("/response-strategy")
+async def get_response_strategy():
+    """读 RESPONSE_STRATEGY.md 全文（不存在时为空，策略引擎用默认模板兜底）。"""
+    from pathlib import Path
+    c = _c()
+    p = Path(c.sessions.data_dir) / "profile" / "RESPONSE_STRATEGY.md"
+    text = p.read_text(encoding="utf-8") if p.exists() else ""
+    return {"code": 200, "data": {"content": text}}

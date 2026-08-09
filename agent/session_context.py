@@ -119,16 +119,22 @@ class SessionStore:
                        notification_type: str = None,
                        thinking: str | None = None,
                        images: list[str] | None = None,
-                       visuals: list | None = None) -> int:
+                       visuals: list | None = None,
+                       strategy_snapshot: dict | None = None,
+                       skeleton_snapshot: dict | None = None) -> int:
         cur = self.db.execute(
             "INSERT INTO conversations(session_id,role,message_type,notification_type,"
-            "content,citations,feedback,create_time,thinking,images,visuals) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?,?)",
+            "content,citations,feedback,create_time,thinking,images,visuals,"
+            "response_strategy_json,cognitive_skeleton_json) "
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
              json.dumps(images) if images else None,
-             json.dumps(visuals, ensure_ascii=False) if visuals else None))
+             json.dumps(visuals, ensure_ascii=False) if visuals else None,
+             json.dumps(strategy_snapshot,
+                        ensure_ascii=False) if strategy_snapshot else None,
+             json.dumps(skeleton_snapshot, ensure_ascii=False) if skeleton_snapshot else None))
         self.db.execute(
             "UPDATE sessions SET last_active=?, message_count=message_count+1 "
             "WHERE session_id=?", (_now(), sid))
