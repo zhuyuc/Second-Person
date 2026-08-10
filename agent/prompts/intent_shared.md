@@ -22,8 +22,10 @@ remember_confirm— 用户表达某信息很重要但未明确下达记忆指令
 soul_feedback   — 用户对AI说话方式/风格/语气表达不满或偏好调整
                   （实时链路仅将反馈记入记忆层；说话风格的演化由后台提炼的
                     soul_feedback 归属统一驱动，不要在回复中承诺风格立即改变）
-output_preference_feedback — 用户要求调整回复格式/长度/结构
+output_preference_feedback — 用户要求调整回复格式/长度/结构，或要求把上传的文档作为某类输出的格式模板
                   （记入记忆层；输出样式偏好另由后台基于交互信号演化，两者互补）
+                  ⚠ 含附件且要求"以后按这个格式/记住这个格式"时，
+                     tools_needed 用 ["format_template_save"]（提取格式骨架存模板记忆）
 meta            — 询问系统状态
 chat            — 闲聊或直接回复（不含上述任何意图特征时选此项）
 
@@ -46,6 +48,7 @@ remember_intent 与 remember_confirm 的边界（重要）：
 
 - 用户明确要求"导出/下载/生成文档/生成报告/做成 Word/做成 PPT/做成 Excel"
 - 用户明确要求把内容"保存为文件"且指定了文档格式（docx/pptx/xlsx/md）
+- 用户要求把【前面讨论的内容/之前说的/上面的方案】导出为文档（含跨轮指代，如"把上面的方案导出""整理成文档""前面说的那个整理导出"）
 ❌ 绝不能用于：分析/解释/写文章/写代码 等不涉及文件导出的请求。（画流程图请用 render_flowchart 或 render_mermaid）
 
 ### file_write（写入工作区文件）
@@ -83,7 +86,9 @@ remember_intent 与 remember_confirm 的边界（重要）：
   intent_type 用 query_external，且 tools_needed 必须包含 "web_search"（若工具列表中有）。
 - 用户给了具体网址要求阅读，则用 web_fetch。
 - soul_feedback（语气/行为反馈）：识别后 tools_needed 用 ["memory_save"]，将用户反馈存入记忆层。
-- output_preference_feedback（输出格式偏好）：识别后 tools_needed 用 ["memory_save"]，记录输出偏好。
+- output_preference_feedback（输出格式偏好）：识别后 tools_needed 用 ["memory_save"]，记录输出偏好；
+  若消息含【附件：且用户要求"以后写 XX 按这个格式/记住这个格式"，
+  则 tools_needed 改用 ["format_template_save"]（提取附件格式骨架存为模板记忆）。
 - generate_document / file_write：仅在上方边界规则允许时使用，禁止在无导出/无文件操作意图时使用。
 - shell_exec：仅当用户明确要求执行系统命令或运行脚本时使用，不用于普通编程问答。
 - 不要凭空回答实时数据；需要外部信息时必须选工具。

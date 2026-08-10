@@ -320,11 +320,11 @@ async def oauth_callback(state: str = "", code: str = ""):
                          (state,))
     if not row:
         return {"code": 400, "message": "state 无效或已过期", "trace_id": None, "details": None}
-    # 校验 5 分钟有效期
+    # 校验 5 分钟有效期（created_at 与 now_cst 同为 naive CST，直接相减安全）
     from datetime import datetime as _dt
     try:
         issued = _dt.fromisoformat(row["created_at"])
-        if (_dt.now() - issued).total_seconds() > 300:
+        if (now_cst() - issued).total_seconds() > 300:
             c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
             return {"code": 400, "message": "授权已过期，请重试", "trace_id": None, "details": None}
     except (TypeError, ValueError):

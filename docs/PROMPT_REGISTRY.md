@@ -65,6 +65,10 @@
 | 36 | agent/prompts/default_strategy_priors.md | 策略先验冷启动默认模板（行业通用启发，v3 §八） | agent/strategy_engine.py | 惰性 | - | B |
 | 37 | agent/prompts/meta_cognitive.md | 元认知五步协议 system（v3 §六） | agent/meta_cognitive.py | 惰性 | examples | A |
 | 38 | agent/prompts/meta_cognitive_examples.md | 五种典型答案形态 few-shot 共享片段 | agent/meta_cognitive.py | 惰性 | - | A |
+| 39 | agent/prompts/handoff_summary.md | handoff 摘要生成 system | memory/handoff_summary.py | 惰性 | from_session_id | A |
+| 40 | agent/prompts/handoff_converge.md | 摘要二次收敛 system | memory/handoff_summary.py | 惰性 | - | A |
+| 41 | app/prompts/format_skeleton.md | 文档格式骨架提取 system（格式绑定） | tools/builtin.py | 惰性 | - | A |
+| 42 | agent/prompts/format_scenario.md | 格式绑定适用场景提取 system | agent/core.py | 惰性 | - | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -103,6 +107,10 @@
 | 24 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像双版对比冲突识别 |
 | 25 | agent/strategy_engine.py::_llm_decide | chat | strategy_decide | agent/prompts/strategy_decide.md + agent/prompts/default_strategy_priors.md（先验动态拼装） | 响应策略决策（v3 §四） |
 | 26 | agent/meta_cognitive.py::_extract | chat | meta_cognitive | agent/prompts/meta_cognitive.md + agent/prompts/meta_cognitive_examples.md | 元认知思考骨架提取（v3 §六） |
+| 27 | memory/handoff_summary.py::_llm_generate | chat | handoff_summary | agent/prompts/handoff_summary.md | handoff 摘要生成 |
+| 28 | memory/handoff_summary.py::_llm_converge | chat | handoff_summary | agent/prompts/handoff_converge.md | 摘要二次收敛 |
+| 29 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取（格式绑定） |
+| 30 | agent/core.py::_format_template_save_params | chat | intent | agent/prompts/format_scenario.md | 格式绑定适用场景提取 |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

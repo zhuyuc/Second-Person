@@ -222,7 +222,7 @@ class SkillManager:
 
     def archive_unused(self, days: int = 90) -> list[str]:
         """90 天未使用的 active 技能归档（Lint 第七项调用）。返回归档技能名。"""
-        cutoff = datetime.now().timestamp() - days * 86400
+        cutoff = now_cst().timestamp() - days * 86400
         archived = []
         for r in self.db.query_all(
                 "SELECT skill_name,last_used FROM skill_usage WHERE status='active'"):

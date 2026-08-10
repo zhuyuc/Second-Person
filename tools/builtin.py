@@ -2,10 +2,12 @@
 内置工具 Path A（开发文档 §6.2 内置工具入参 schema）。
 
 memory_save / memory_search / memory_get / file_read / file_write /
-shell_exec / web_fetch / calculator / datetime_now / generate_document
+shell_exec / web_fetch / calculator / datetime_now / generate_document /
+format_template_save
 - memory_search 只走第 1 层 Hybrid 预筛（不 LLM 精筛、不加载 detail）
 - file_write / shell_exec 直接执行（无确认环节，错了通过重新生成纠正）
 - generate_document 生成 Word/MD 文件供下载（落地 temp/exports，夜间链清理）
+- format_template_save 提取附件文档格式骨架并存为高优先级记忆（场景级格式绑定）
 - 所有工具通过 register_builtins() 注入依赖后注册到 ToolRegistry
 """
 from __future__ import annotations
@@ -22,6 +24,7 @@ from .base import ToolRegistry, ToolSpec
 from .sandbox import Sandbox
 from .web_fetch import web_fetch as _web_fetch
 from .web_search import web_search as _web_search
+from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
 
 # ---- 安全计算器（只允许算术表达式） --------------------------------------
@@ -57,7 +60,8 @@ def datetime_now(tz: str = "Asia/Shanghai") -> str:
 
 
 def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
-                      sandbox: Sandbox, data_dir, config) -> None:
+                      sandbox: Sandbox, data_dir, config,
+                      llm=None, providers=None) -> None:
     data_dir = Path(data_dir)
 
     # ---- memory_save（主动记忆，created_by=user_explicit，跳过归属判定） ----
@@ -194,6 +198,65 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         return {"filename": fname, "download_url": url, "size_bytes": size,
                 "note": f"文件已生成。必须在回复中原样保留此 Markdown 下载链接："
                 f"[{fname}]({url})"}
+
+    # ---- format_template_save（格式绑定：附件骨架提取 + 场景级记忆存储） ----
+    async def format_template_save(scenario: str,
+                                   attachment_text: str = "") -> dict:
+        """从附件正文提取格式骨架，存为高优先级记忆（is_important）。
+        后续同场景写作时由语义检索自动召回并注入。"""
+        from infrastructure.json_repair import repair_json
+        if not (attachment_text or "").strip():
+            return {"ok": False,
+                    "error": "未找到附件正文，请重新上传文档后再试"}
+        if not (scenario or "").strip():
+            return {"ok": False, "error": "缺少适用场景描述"}
+        scenario = scenario.strip()[:30]
+        # 截断过长附件（骨架提取只需主干结构，前 30000 字符足够）
+        text = attachment_text[:30000]
+        if len(attachment_text) > 30000:
+            text += "\n\n…（文档过长，已截断）"
+        # LLM 提取格式骨架
+        snap = providers.snapshot_for("agent") if providers else None
+        if snap is None or llm is None:
+            return {"ok": False, "error": "LLM 不可用，无法提取格式骨架"}
+        prompt = PROMPTS.load_raw("app/prompts/format_skeleton")
+        resp = await llm.chat(
+            snap, [{"role": "system", "content": prompt},
+                   {"role": "user", "content": text}],
+            source="system_agent")
+        data = repair_json(resp["content"])
+        skeleton = (data.get("skeleton") or "").strip()
+        if not skeleton:
+            return {"ok": False, "error": "格式骨架提取失败，请检查附件内容"}
+        # 存为高优先级记忆：domain=output_format，is_important 防生命周期降级；
+        # 一次性 create 直接带 is_important（避免先建后改的异步读回竞态），
+        # wait=True 确保落库后才向用户确认（失败由工具执行层捕获报错）
+        from memory.naming import memory_id as mk_mid
+        seq = palace.next_memory_seq()
+        mid = mk_mid(seq)
+        now = now_cst()
+        fm = {"id": mid, "title": f"{scenario}输出格式模板"[:30],
+              "domain": "output_format",
+              "confidence": "strong", "lifecycle": "active",
+              "source_type": "memory",
+              "access_count": 0, "created_at": now.strftime("%Y-%m-%d"),
+              "updated_at": now.strftime("%Y-%m-%d"),
+              "links": [], "entities": [scenario, "输出格式"],
+              "is_important": True, "created_by": "user_explicit"}
+        detail = (f"适用场景：{scenario}\n\n"
+                  f"以下为从用户提供的范例文档中提取的格式骨架，"
+                  f"生成{scenario}时必须遵循此结构与风格：\n\n{skeleton}")
+        await file_writer.submit("memory", {
+            "op": "create", "frontmatter": fm,
+            "summary": f"用户指定的{scenario}输出格式约束，写同类文档时必须遵循"[:30],
+            "detail": detail,
+            "change_log": f"[{now:%Y-%m-%d}] 用户指定输出格式模板",
+            "entities": [scenario, "输出格式"],
+            "entity_types": {scenario: "concept", "输出格式": "concept"},
+            "source": "user", "reason": "格式绑定"}, wait=True)
+        return {"ok": True, "memory_id": mid, "scenario": scenario,
+                "note": f"已记住「{scenario}」的输出格式模板，"
+                        f"后续写{scenario}时将自动遵循此格式"}
 
     # ---- 注册 -------------------------------------------------------------
     registry.register_function(ToolSpec(
@@ -403,3 +466,15 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
          # content 不强制必填：长文档正文由主回复延迟填充（与 file_write 一致），
          # 避免 tool_infer 阶段因填不出长正文而被 validate_params 硬拒
          "required": ["title"]}), generate_document)
+
+    registry.register_function(ToolSpec(
+        "format_template_save",
+        "提取附件文档的格式骨架并存为格式模板记忆。当用户上传范例文档并要求"
+        "'以后写 XX 按这个格式/记住这个格式'时调用；scenario 为适用场景"
+        "（如'产品文档'），attachment_text 由系统自动注入无需手动填写",
+        {"type": "object", "properties": {
+            "scenario": {"type": "string",
+                         "description": "格式适用的场景名称，如'产品文档''技术方案''周报'"},
+            "attachment_text": {"type": "string",
+                                "description": "附件正文（系统自动注入，无需手动填写）"}},
+         "required": ["scenario"]}, destructive=True), format_template_save)

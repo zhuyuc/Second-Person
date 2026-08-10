@@ -110,6 +110,27 @@ def _strip_attachment_context(text: str) -> str:
     return text
 
 
+# 附件块解析：与前端 ChatView.extractAttachments 的分块规则对齐
+_ATT_BLOCK_RE = re.compile(r"【附件：([^】]+?)(?:（内容已截断）)?】\n?")
+
+
+def _extract_attachment_blocks(text: str) -> list[tuple[str, str]]:
+    """解析消息中的【附件：文件名】块，返回 [(文件名, 正文), ...]。
+    无附件时返回空列表；与前端拼装格式（块间以空行分隔，末尾 \\n---\\n 接真实提问）对齐。"""
+    if not text or "【附件：" not in text:
+        return []
+    head = text.rsplit("\n---\n", 1)[0] if "\n---\n" in text else text
+    matches = list(_ATT_BLOCK_RE.finditer(head))
+    out: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(head)
+        body = head[start:end].strip()
+        if body:
+            out.append((m.group(1).strip(), body))
+    return out
+
+
 def _strip_mood_section(system_prompt: str) -> str:
     """剥离 system prompt 中的情绪注入段与主动行为段（纯导出等结构化输出场景用）。
     以 mood.md 的段首标记定位，删到下一段或结尾；同步剥离主动行为段。"""
@@ -626,13 +647,20 @@ class AgentCore:
             asyncio.create_task(self._image_kb_task(images))
 
         # 特殊意图隐式工具补全：soul_feedback / output_preference_feedback
-        # 识别后若未指定工具，自动注入 memory_save 将用户反馈存入记忆层
+        # 识别后若未指定工具，自动注入 memory_save 将用户反馈存入记忆层；
+        # 输出偏好含附件时改注入 format_template_save（提取格式骨架存模板记忆），
+        # 即使意图模型已选 memory_save 也强制纠正（附件 + 输出偏好 = 格式绑定）
         if not onboarding:
             for it in intents:
                 if it.intent_type == "soul_feedback" and not it.tools_needed:
                     it.tools_needed = ["memory_save"]
-                if it.intent_type == "output_preference_feedback" and not it.tools_needed:
-                    it.tools_needed = ["memory_save"]
+                if it.intent_type == "output_preference_feedback":
+                    if _extract_attachment_blocks(message) and (
+                            not it.tools_needed
+                            or it.tools_needed == ["memory_save"]):
+                        it.tools_needed = ["format_template_save"]
+                    elif not it.tools_needed:
+                        it.tools_needed = ["memory_save"]
 
         # 第 5 步 流程编排
         shared = SharedState()
@@ -1263,7 +1291,10 @@ class AgentCore:
             # 工具调用状态并入思考过程流，不再依赖外部独立展示
             await emit("thinking_delta",
                        {"text": f"【工具调用】正在调用 {tool_name}…\n"})
-            params = (await self._memory_save_params(message, sid)
+            params = (await self._format_template_save_params(
+                          message, sid, intent.intent_summary)
+                      if tool_name == "format_template_save"
+                      else await self._memory_save_params(message, sid)
                       if tool_name == "memory_save"
                       else await self._infer_params(tool_name, message, deps, sid))
             # file_write 延迟写入：content 由主回复填充，此时跳过执行
@@ -1748,6 +1779,42 @@ class AgentCore:
             logger.warning("主动记忆标题/摘要提炼失败，回退截断策略", exc_info=True)
         return await self._infer_params("memory_save", message, sid=sid)
 
+    async def _format_template_save_params(self, message: str,
+                                           sid: str | None = None,
+                                           intent_summary: str = "") -> dict:
+        """格式绑定工具参数：附件正文从当轮消息解析（无则回溯近 3 轮），
+        适用场景由轻量 LLM 调用从用户真实提问中提取（失败回退意图摘要）。"""
+        atts = _extract_attachment_blocks(message)
+        if not atts and sid:
+            # 回溯：用户可能先上传附件、隔一轮才说"按这个格式"；
+            # 当轮消息已提前落库，LIMIT 4 跳过自身取更早三轮
+            rows = self.db.query_all(
+                "SELECT content FROM conversations "
+                "WHERE session_id=? AND role='user' "
+                "ORDER BY id DESC LIMIT 4", (sid,))
+            for r in rows[1:]:
+                atts = _extract_attachment_blocks(r["content"] or "")
+                if atts:
+                    break
+        attachment_text = "\n\n".join(body for _n, body in atts)
+        # 适用场景提取：intent 槽位（轻量分析），失败/不可用时回退意图摘要
+        scenario = ""
+        question = _strip_attachment_context(message)
+        snap = self.providers.snapshot_for("intent")
+        if snap is not None and attachment_text:
+            try:
+                resp = await self.llm.chat(
+                    snap, [{"role": "system", "content":
+                            PROMPTS.load_raw("agent/prompts/format_scenario")},
+                           {"role": "user", "content": question}],
+                    source="intent", session_id=sid)
+                scenario = (resp.get("content") or "").strip().strip('"\'`')[:12]
+            except Exception:  # noqa: BLE001
+                logger.warning("格式绑定场景提取失败，回退意图摘要", exc_info=True)
+        if not scenario:
+            scenario = (intent_summary or "").strip()[:12]
+        return {"scenario": scenario, "attachment_text": attachment_text}
+
     async def _infer_params(self, tool_name: str, message: str,
                             deps: dict | None = None, sid: str | None = None) -> dict:
         """LLM 驱动工具参数推断（ReAct 模式）。利用 function_call + 依赖结果 feed。
@@ -1806,8 +1873,7 @@ class AgentCore:
             params = {}
         # 兜底：LLM 未给出 path（弱模型/空返回）→ 默认文件名，绝不让流程卡死
         if not params.get("path"):
-            from datetime import datetime as _dt
-            params["path"] = f"回复整理_{_dt.now():%Y%m%d_%H%M%S}.md"
+            params["path"] = f"回复整理_{now_cst():%Y%m%d_%H%M%S}.md"
         # LLM 未返回 content → 标记延迟写入，等主回复生成后填充
         if not params.get("content"):
             params["content"] = "__FROM_RESPONSE__"
@@ -2470,11 +2536,10 @@ class AgentCore:
             return  # 已走主动记忆路径
         if not any(re.search(p, message or "") for p in _FACT_PATTERNS):
             return
-        from datetime import datetime as _dt
         self.db.execute(
             "INSERT OR IGNORE INTO review_candidates"
             "(message_id,session_id,created_at,priority) VALUES(?,?,?,?)",
-            (user_msg_id, sid, _dt.now().isoformat(timespec="seconds"), priority))
+            (user_msg_id, sid, now_cst().isoformat(timespec="seconds"), priority))
 
     def _check_budget_alert(self) -> None:
         """成本控制（产品文档 §预算告警 / 超预算策略）。

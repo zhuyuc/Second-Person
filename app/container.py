@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 from agent.core import AgentCore
@@ -281,12 +282,11 @@ class AppContainer:
 
         async def skill_draft_fn(item: dict) -> None:
             # 同类任务出现 skill_draft_threshold（默认 3）次以上才生成 draft
-            from datetime import datetime as _dt
             title = item.get("title", "skill")
             key = title.strip().lower()[:40]
             if not key:
                 return
-            now = _dt.now().isoformat(timespec="seconds")
+            now = now_cst().isoformat(timespec="seconds")
             row = self.db.query_one(
                 "SELECT occurrences, drafted FROM skill_patterns WHERE pattern_key=?",
                 (key,))
@@ -398,7 +398,7 @@ class AppContainer:
                                self.config.get_raw("workspace_whitelist", []))
         register_builtins(self.registry, palace=self.palace, retriever=self.retriever,
                           file_writer=self.fw, sandbox=self.sandbox, data_dir=d,
-                          config=self.config)
+                          config=self.config, llm=self.llm, providers=self.providers)
         self.connectors = ConnectorManager(self.db, self.creds, self.registry)
 
         # ---- Agent Core ----
@@ -444,7 +444,6 @@ class AppContainer:
         async def image_kb_fn(images) -> None:
             import base64
             import re
-            from datetime import datetime as _dt
             for idx, url in enumerate(images or []):
                 m = re.match(
                     r"data:(image/[\w.+-]+);base64,(.+)", url or "", re.S)
@@ -455,7 +454,7 @@ class AppContainer:
                     content = base64.b64decode(m.group(2))
                 except Exception:  # noqa: BLE001
                     continue
-                fn = f"chat-image-{_dt.now():%Y%m%d%H%M%S}-{idx+1}.{ext}"
+                fn = f"chat-image-{now_cst():%Y%m%d%H%M%S}-{idx+1}.{ext}"
                 await self.ingest.ingest_file(fn, content, source="chat_image")
         self.core.image_kb_fn = image_kb_fn
         from scheduler.embedding_migration import MigrationRunner
@@ -476,7 +475,6 @@ class AppContainer:
 
     def _purge_old_signals(self) -> int:
         """清理超 output_style_signal_retention_days（默认 90）天的 response_signals。"""
-        from datetime import timedelta
         days = self.config.get("output_style_signal_retention_days", 90)
         cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
@@ -513,8 +511,9 @@ class AppContainer:
                         "每天 02:00")
         s.register_task("dedup_cleanup", "去重表清理",
                         lambda: self.db.execute(
-                            "DELETE FROM message_dedup WHERE processed_at < "
-                            "datetime('now','-1 day')"))
+                            "DELETE FROM message_dedup WHERE processed_at < ?",
+                            ((now_cst() - timedelta(days=1))
+                             .isoformat(timespec="seconds"),)))
         s.register_task("temp_cleanup", "接收文件缓存清理",
                         lambda: (self.ingest.cleanup_temp_attachments(7),
                                  self._cleanup_exports(7)))
@@ -525,7 +524,7 @@ class AppContainer:
             self.db.execute(
                 "DELETE FROM pending_writes WHERE status='done' "
                 "AND created_at < ?",
-                ((now_cst() - __import__("datetime").timedelta(days=7)
+                ((now_cst() - timedelta(days=7)
                   ).isoformat(timespec="seconds"),))))
         s.register_task("conflict_cleanup", "已解决矛盾清理",
                         lambda: self.conflict.purge_resolved(30))
