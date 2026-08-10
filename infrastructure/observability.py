@@ -14,9 +14,9 @@ import logging
 import time
 import uuid
 from contextvars import ContextVar
-from datetime import datetime
+from datetime import timedelta
 from typing import Any
-from infrastructure.timeutil import from_ts, now_cst
+from infrastructure.timeutil import now_cst
 
 # 当前请求的 trace_id（跨 await 传播）
 _trace_id_var: ContextVar[str | None] = ContextVar("trace_id", default=None)
@@ -78,8 +78,8 @@ class OperationLogger:
 
     def purge_expired(self, retention_days: int = 90) -> int:
         """清理超期操作日志，返回删除条数。"""
-        cutoff = datetime.now().timestamp() - retention_days * 86400
-        cutoff_iso = from_ts(cutoff).isoformat(timespec="seconds")
+        cutoff_iso = (now_cst() - timedelta(days=retention_days)).isoformat(
+            timespec="seconds")
         cur = self._db.execute(
             "DELETE FROM operation_logs WHERE create_time < ?", (cutoff_iso,)
         )

@@ -26,13 +26,17 @@ from .degradation import (
     FailureType,
     decide_degradation,
 )
+from .context_signals import (
+    needs_convergence_rule,
+    correct_tools_rule,
+)
 
 logger = logging.getLogger("second_person.intent")
 
 INTENT_TYPES = [
     "query_memory", "query_knowledge", "query_external", "compute", "file_op",
     "remember_intent", "remember_confirm", "soul_feedback",
-    "output_preference_feedback", "meta", "chat",
+    "output_preference_feedback", "meta", "chat", "unknown",
 ]
 
 
@@ -44,6 +48,7 @@ INTENT_TYPE_LABELS = {
     "remember_confirm": "重要信息待确认",
     "soul_feedback": "风格反馈", "output_preference_feedback": "输出偏好反馈",
     "meta": "系统相关", "chat": "日常对话",
+    "unknown": "意图不明",
 }
 
 
@@ -284,14 +289,33 @@ class IntentParser:
                 complexity_reason=data.get("complexity_reason", ""),
                 complexity_hint=_clamp_hint(data.get("complexity_hint")),
             )
-            return enforce_hint_consistency(result)
+            result = enforce_hint_consistency(result)
+            # 规则校正：LLM 判为简单但含强指代/导出+指代信号 → 强制收敛
+            if not result.needs_convergence:
+                force, reason = needs_convergence_rule(user_message)
+                if force:
+                    logger.warning("quick_intent 规则强制收敛：%s", reason)
+                    result.needs_convergence = True
+                    result.consistency_corrected = True
+                    result.complexity_reason = f"规则强制收敛：{reason}"
+                    result.complexity_hint = max(result.complexity_hint, 5)
+            return result
         except Exception:
-            logger.warning("快速预判失败，默认快速通道", exc_info=True)
-            return QuickIntentResult(
+            logger.error("快速预判 LLM 调用失败，降级走规则判断", exc_info=True)
+            # LLM 失败时也走规则判断，不直接默认快速通道
+            result = QuickIntentResult(
                 intent_hypothesis=user_message[:50],
                 needs_convergence=False,
-                complexity_reason="快速预判 LLM 调用失败，默认快速通道",
+                complexity_reason="快速预判 LLM 调用失败",
+                complexity_hint=3,
             )
+            force, _reason = needs_convergence_rule(user_message)
+            if force:
+                result.needs_convergence = True
+                result.consistency_corrected = True
+                result.complexity_reason = "LLM 失败 + 规则强制收敛"
+                result.complexity_hint = max(result.complexity_hint, 5)
+            return result
 
     # ---- 意图收敛（§3.3） --------------------------------------------------
     async def converge_intent(
@@ -410,6 +434,9 @@ class IntentParser:
                 data = repair_json(raw_content)
                 result = self._to_intents(data)
 
+                # 规则校正：chat 意图但含明确工具信号 → 修正意图类型和工具
+                result = self._correct_tools_by_rule(result, user_message)
+
                 # 软失败检测：全部降级为 chat 且用户消息有明显检索/工具意图时重试
                 if (all(r.intent_type == "chat" for r in result)
                         and self._has_tool_intent(user_message)):
@@ -457,6 +484,27 @@ class IntentParser:
     def _has_tool_intent(cls, message: str) -> bool:
         return any(re.search(p, message) for p in cls._TOOL_INTENT_SIGNALS)
 
+    def _correct_tools_by_rule(self, intents: list[Intent],
+                               message: str) -> list[Intent]:
+        """规则校正：chat 意图但含明确工具信号时修正意图类型和 tools_needed。
+
+        仅在 LLM 返回的意图全部为 chat 时执行校正，避免覆盖已正确识别的意图。
+        """
+        if not all(it.intent_type == "chat" for it in intents):
+            return intents
+        tool, itype = correct_tools_rule(message)
+        if tool and itype:
+            for it in intents:
+                if it.intent_type == "chat":
+                    it.intent_type = itype
+                    if tool not in (it.tools_needed or []):
+                        it.tools_needed = list(
+                            set((it.tools_needed or []) + [tool]))
+                    logger.warning(
+                        "规则校正意图：chat→%s，追加工具 %s，消息片段=%s",
+                        itype, tool, message[:60])
+        return intents
+
     def _to_intents(self, data: dict) -> list[Intent]:
         raw = data.get("intents", []) if isinstance(data, dict) else []
         out = []
@@ -473,4 +521,4 @@ class IntentParser:
                 intent_type=itype,
                 tools_needed=it.get("tools_needed", []) or [],
                 depends_on=it.get("depends_on", []) or []))
-        return out or [Intent("i1", "", "chat")]
+        return out or [Intent("i1", "意图识别失败", "unknown")]

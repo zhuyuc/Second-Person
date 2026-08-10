@@ -390,7 +390,7 @@ class FileWriter:
             logger.warning("add_link 跳过：%s md 文件缺失", mid)
             return
         doc = parse_memory_md(f.read_text(encoding="utf-8"))
-        links = doc.links
+        links = [l for l in doc.links if isinstance(l, dict)]
         if any(l.get("target") == target for l in links):
             return  # 幂等：重试/重放不重复追加
         links.append({"target": target, "type": link_type})
@@ -464,7 +464,7 @@ class FileWriter:
         before = doc.frontmatter.pop("confidence_before_dispute", "medium")
         doc.frontmatter["confidence"] = before or "medium"
         doc.frontmatter["links"] = [
-            l for l in doc.links if l.get("type") != "contradicts"]
+            l for l in doc.links if isinstance(l, dict) and l.get("type") != "contradicts"]
         doc.links = doc.frontmatter["links"]
         doc.change_history.insert(
             0, f"[{now_cst():%Y-%m-%d}] 对立记忆已删除，恢复 confidence={doc.frontmatter['confidence']}")
@@ -531,7 +531,7 @@ class FileWriter:
         if not f.exists():
             return
         doc = parse_memory_md(f.read_text(encoding="utf-8"))
-        links = [lk for lk in doc.links if lk.get("target") != target_mid]
+        links = [lk for lk in doc.links if isinstance(lk, dict) and lk.get("target") != target_mid]
         doc.frontmatter["links"] = links
         self._mark_internal(f)
         f.write_text(serialize_memory_md(doc), encoding="utf-8")

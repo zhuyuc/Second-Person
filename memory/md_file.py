@@ -50,7 +50,9 @@ class MemoryDoc:
 
     @property
     def links(self) -> list[dict[str, str]]:
-        return self.frontmatter.get("links", []) or []
+        raw = self.frontmatter.get("links", []) or []
+        # 防御脏数据：历史残留/LLM 产出可能含非 dict 元素（纯字符串），过滤而非崩溃
+        return [l for l in raw if isinstance(l, dict)]
 
     @property
     def entities(self) -> list[str]:

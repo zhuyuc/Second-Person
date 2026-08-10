@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
@@ -136,16 +136,20 @@ class MoodManager:
 
     def _baseline_flavor(self, scope: str) -> str:
         """根据历史情绪记录给出有温度的基线描述。"""
+        warm_since = (now_cst() - timedelta(days=7)
+                      ).isoformat(timespec="seconds")
         warm_count = self.db.query_one(
             "SELECT count(*) c FROM mood_history "
             "WHERE scope=? AND mood IN ('warm','affectionate','trusting','grateful') "
-            "AND create_time > datetime('now', '-7 days')", (scope,))["c"]
+            "AND create_time > ?", (scope, warm_since))["c"]
         if warm_count >= self.config.get("mood_baseline_warm_threshold", 5):
             return "平静但有暖意"
+        curious_since = (now_cst() - timedelta(days=1)
+                         ).isoformat(timespec="seconds")
         curious_count = self.db.query_one(
             "SELECT count(*) c FROM mood_history "
             "WHERE scope=? AND mood IN ('curious','eager','aspiring') "
-            "AND create_time > datetime('now', '-1 days')", (scope,))["c"]
+            "AND create_time > ?", (scope, curious_since))["c"]
         if curious_count >= self.config.get("mood_baseline_curious_threshold", 2):
             return "平静而好奇"
         return "平静"
@@ -257,7 +261,7 @@ class MoodManager:
 
     def _apply_peace_event(self, new_moods: dict, event: str) -> dict:
         """平复事件触发快速衰减 + 情绪方向转换。"""
-        decay = self.config.get("peace_event_decay_factor", 0.3)
+        decay = self.config.get("mood_peace_event_decay_factor", 0.3)
         for scope in ("user", "ai"):
             data = new_moods[scope]
             if data["mood"] in NEGATIVE_MOODS:
@@ -281,13 +285,16 @@ class MoodManager:
             "WHERE session_id=? AND message_id > "
             "(SELECT COALESCE(MAX(id)-6, 0) FROM conversations WHERE session_id=?)",
             (sid, sid))["c"]
+        recent_since = (now_cst() - timedelta(minutes=30)).isoformat(
+            timespec="seconds")
         recent_moods = self.db.query_all(
             "SELECT scope, mood FROM mood_history "
-            "WHERE create_time > datetime('now', '-30 minutes') "
-            "ORDER BY id DESC LIMIT 6")
+            "WHERE create_time > ? "
+            "ORDER BY id DESC LIMIT 6", (recent_since,))
         all_neutral = all(m["mood"] == "neutral" for m in recent_moods)
-        min_turns = self.config.get("natural_decline_min_neutral_turns", 3)
-        factor = self.config.get("natural_decline_factor", 0.7)
+        min_turns = self.config.get(
+            "mood_natural_decline_min_neutral_turns", 3)
+        factor = self.config.get("mood_natural_decline_factor", 0.7)
         if recent_triggers == 0 and all_neutral and len(recent_moods) >= min_turns:
             row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
             for scope in ("user", "ai"):

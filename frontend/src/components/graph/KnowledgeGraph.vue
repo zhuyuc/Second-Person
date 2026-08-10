@@ -9,6 +9,7 @@ import SvgGraph from './SvgGraph.vue'
 import SigmaGraph from './SigmaGraph.vue'
 import NodeDetailDrawer from './NodeDetailDrawer.vue'
 import BaseModal from '@/components/BaseModal.vue'
+import { withQuery } from '@/utils/query'
 
 const emit = defineEmits(['open-memory'])
 
@@ -101,7 +102,7 @@ async function expand(entityId) {
     return
   }
   const exclude = nodes.value.map(n => n.entity_id).join(',')
-  const d = await api.get(`/memory/graph/entity/${entityId}/neighbors?limit=30&exclude_ids=${encodeURIComponent(exclude)}`)
+  const d = await api.get(withQuery(`/memory/graph/entity/${entityId}/neighbors`, { limit: 30, exclude_ids: exclude }))
   if (d && d.center) mergeGraph(d.center, d.neighbors || [], d.edges || [])
 }
 

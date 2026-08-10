@@ -461,20 +461,6 @@ class TestRejectionProtection:
 
 
 # ====================================================================
-# TC10: 自动学习开关
-# ====================================================================
-class TestAutoLearningSwitch:
-    """TC10：开关关闭时 feedback 不应触发任何操作。"""
-
-    def test_switch_off_skips_all(self, config):
-        """开关关闭时，调用方应检查 config 并跳过整个流程。"""
-        # 此测试验证开关逻辑在调用方（container.soul_feedback_fn）中正确：
-        # 当 profile_auto_learning_enabled=False 时应直接 return。
-        # 具体实现见 container.py soul_feedback_fn 调用方。
-        pass  # 逻辑正确性由 container.py 集成测试覆盖
-
-
-# ====================================================================
 # 辅助：模拟容器方法
 # ====================================================================
 class TestContainerIntegration:

@@ -256,7 +256,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             "source": "user", "reason": "格式绑定"}, wait=True)
         return {"ok": True, "memory_id": mid, "scenario": scenario,
                 "note": f"已记住「{scenario}」的输出格式模板，"
-                        f"后续写{scenario}时将自动遵循此格式"}
+                f"后续写{scenario}时将自动遵循此格式"}
 
     # ---- 注册 -------------------------------------------------------------
     registry.register_function(ToolSpec(

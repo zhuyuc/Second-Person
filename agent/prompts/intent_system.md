@@ -69,6 +69,17 @@ ${intent_shared}
 用户："画一个项目开发甘特图"
 → {"intents":[{"id":"i1","intent_summary":"绘制项目开发甘特图","intent_type":"chat","tools_needed":["render_mermaid"],"depends_on":[]}]}
 
+### 示例 12 — 跨轮导出（file_op + generate_document，含上下文指代）
+
+最近对话：用户与AI详细讨论了一个微服务拆分方案
+用户："把前面沟通的方案内容直接用word导出"
+→ {"intents":[{"id":"i1","intent_summary":"将前面讨论的方案内容导出为Word文档","intent_type":"file_op","tools_needed":["generate_document"],"depends_on":[]}]}
+
+### 示例 13 — 跨轮回顾后导出
+
+用户："总结一下我们之前讨论的数据库迁移方案，然后导出为文档"
+→ {"intents":[{"id":"i1","intent_summary":"总结数据库迁移方案并导出为文档","intent_type":"file_op","tools_needed":["generate_document"],"depends_on":[]}]}
+
 ---
 只输出 JSON，不要解释。
 ${recent_history}

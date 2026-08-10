@@ -6,6 +6,8 @@ import { useConfirm } from '@/stores/confirm'
 import { useBusy } from '@/composables/useBusy'
 import BaseModal from '@/components/BaseModal.vue'
 import { formatTime } from '@/utils/format'
+import { withQuery } from '@/utils/query'
+import { PLATFORM_MAP, SOURCE_NAMES } from '@/utils/enumLabel'
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -138,8 +140,8 @@ async function addProvider() {
   showAddProvider.value = false
   await loadProviders(); toast.push('success', '已添加')
 }
-async function delProvider(id) { if (!await confirm.ask({ message: '删除该模型？', danger: true })) return; await api.del('/settings/providers/' + id); await loadProviders() }
-async function setAssign(task, pid) { await api.put('/settings/model-assignment', { [task + '_model']: pid }); toast.push('success', '已保存') }
+async function delProvider(id) { return run('delP' + id, async () => { if (!await confirm.ask({ message: '删除该模型？', danger: true })) return; await api.del('/settings/providers/' + id); await loadProviders() }) }
+async function setAssign(task, pid) { return run('assign' + task, async () => { await api.put('/settings/model-assignment', { [task + '_model']: pid }); toast.push('success', '已保存') }) }
 
 // 编辑 Provider
 const showEdit = ref(false)
@@ -172,14 +174,14 @@ async function testConn(cfg) {
 }
 
 async function loadConnectors() { connectors.value = await api.get('/settings/connectors') }
-async function toggleConn(c) { await api.post(`/settings/connectors/${c.id}/toggle`, { enabled: c.status !== 'connected' }); await loadConnectors() }
-async function delConn(id) { if (!await confirm.ask({ message: '删除连接器？', danger: true })) return; await api.del('/settings/connectors/' + id); await loadConnectors() }
-async function refreshConn(id) { await api.post(`/settings/connectors/${id}/refresh-tools`, {}); await loadConnectors(); toast.push('success', '工具已刷新') }
+async function toggleConn(c) { return run('togC' + c.id, async () => { await api.post(`/settings/connectors/${c.id}/toggle`, { enabled: c.status !== 'connected' }); await loadConnectors() }) }
+async function delConn(id) { return run('delC' + id, async () => { if (!await confirm.ask({ message: '删除连接器？', danger: true })) return; await api.del('/settings/connectors/' + id); await loadConnectors() }) }
+async function refreshConn(id) { return run('refC' + id, async () => { await api.post(`/settings/connectors/${id}/refresh-tools`, {}); await loadConnectors(); toast.push('success', '工具已刷新') }) }
 
 async function loadPlatforms() { platforms.value = await api.get('/settings/platforms') }
-async function enablePlatform(id) { await api.post(`/settings/platforms/${id}/enable`, {}); await loadPlatforms() }
-async function disablePlatform(id) { await api.post(`/settings/platforms/${id}/disable`, {}); await loadPlatforms() }
-async function resumePlatform(id) { await api.post(`/settings/platforms/${id}/resume`, {}); await loadPlatforms(); toast.push('success', '已恢复') }
+async function enablePlatform(id) { return run('enP' + id, async () => { await api.post(`/settings/platforms/${id}/enable`, {}); await loadPlatforms() }) }
+async function disablePlatform(id) { return run('disP' + id, async () => { await api.post(`/settings/platforms/${id}/disable`, {}); await loadPlatforms() }) }
+async function resumePlatform(id) { return run('resP' + id, async () => { await api.post(`/settings/platforms/${id}/resume`, {}); await loadPlatforms(); toast.push('success', '已恢复') }) }
 
 async function loadParams() { const d = await api.get('/settings/params'); params.value = d.params; schema.value = d.schema }
 async function saveParams() { await api.put('/settings/params', params.value); toast.push('success', '设置已保存，部分参数将在下一轮对话生效') }
@@ -187,10 +189,10 @@ async function resetParams() { if (!await confirm.ask('恢复全部参数默认�
 
 async function loadUsage() {
   try {
-    const f = '&source=' + encodeURIComponent(usageSource.value) + '&model=' + encodeURIComponent(usageModel.value)
-    usage.value = await api.get('/settings/usage/summary?' + f.slice(1));
-    distribution.value = await api.get('/settings/usage/distribution?' + f.slice(1));
-    trend.value = await api.get('/settings/usage/trend?period=' + trendPeriod.value + f);
+    const filters = { source: usageSource.value || undefined, model: usageModel.value || undefined }
+    usage.value = await api.get(withQuery('/settings/usage/summary', filters));
+    distribution.value = await api.get(withQuery('/settings/usage/distribution', filters));
+    trend.value = await api.get(withQuery('/settings/usage/trend', { period: trendPeriod.value, ...filters }));
     monthCost.value = await api.get('/settings/usage/month-cost');
     // 无筛选时刷新下拉选项，避免筛选后选项被过滤到只剩当前项
     if (!usageSource.value && !usageModel.value) {
@@ -210,13 +212,17 @@ async function createBackup() {
   showBackupLabel.value = true
 }
 async function doCreateBackup() {
-  await api.post('/settings/backups/create', { label: backupLabel.value || undefined })
-  showBackupLabel.value = false
-  await loadBackups(); toast.push('success', '备份完成')
+  return run('createBackup', async () => {
+    await api.post('/settings/backups/create', { label: backupLabel.value || undefined })
+    showBackupLabel.value = false
+    await loadBackups(); toast.push('success', '备份完成')
+  })
 }
 async function exportData() {
-  const r = await api.post('/settings/backups/export', {})
-  toast.push('success', '已导出：' + (r.path || ''))
+  return run('exportData', async () => {
+    const r = await api.post('/settings/backups/export', {})
+    toast.push('success', '已导出：' + (r.path || ''))
+  })
 }
 const importFileInput = ref(null)
 async function importData(e) {
@@ -229,14 +235,14 @@ async function importData(e) {
     await loadBackups()
   } catch { } finally { e.target.value = '' }
 }
-async function restoreBackup(id) { if (!await confirm.ask('恢复该备份？将先自动保护性备份当前数据。')) return; await api.post('/settings/backups/restore', { backup_id: id }); toast.push('success', '恢复完成') }
+async function restoreBackup(id) { return run('restoreB' + id, async () => { if (!await confirm.ask('恢复该备份？将先自动保护性备份当前数据。')) return; await api.post('/settings/backups/restore', { backup_id: id }); toast.push('success', '恢复完成') }) }
 async function loadStatus() { status.value = await api.get('/settings/status'); tasks.value = await api.get('/settings/tasks') }
 
 // 定时任务 + 日志
 const tasks = ref([])
 const taskLogs = ref(null)
-async function runTask(tid) { await api.post(`/settings/tasks/${tid}/run`, {}); toast.push('success', '已执行'); await loadStatus() }
-async function showTaskLogs(tid) { taskLogs.value = { id: tid, logs: await api.get(`/settings/tasks/${tid}/logs`) } }
+async function runTask(tid) { return run('task' + tid, async () => { await api.post(`/settings/tasks/${tid}/run`, {}); toast.push('success', '已执行'); await loadStatus() }) }
+async function showTaskLogs(tid) { return run('logs' + tid, async () => { taskLogs.value = { id: tid, logs: await api.get(`/settings/tasks/${tid}/logs`) } }) }
 
 // Embedding 切换预估
 const embEstimate = ref(null)
@@ -276,7 +282,6 @@ async function testConnector() {
 // 连接器：保存直接复用 addConnector（单一入口，不再冗余包装）
 
 // 接入渠道配置
-const PLATFORM_MAP = { web: 'Web', feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉', wecom: '企业微信', weixin: '微信' }
 const showChannelCfg = ref(false)
 const newChannel = ref({ platform_type: 'feishu', bot_token: '', app_secret: '', whitelist_user_id: '', callback_url: '' })
 async function addChannel() {
@@ -332,7 +337,7 @@ function startWxPoll() {
     if (polling) return
     polling = true
     try {
-      const r = await api.get(`/settings/platforms/weixin/qrcode/status?qrcode=${encodeURIComponent(wxScan.value.qrcode)}`)
+      const r = await api.get(withQuery('/settings/platforms/weixin/qrcode/status', { qrcode: wxScan.value.qrcode }))
       wxScan.value.status = r.status || 'pending'
       if (r.status === 'confirmed') {
         stopWxPoll()
@@ -402,24 +407,6 @@ async function testEditChannel() {
 const groups = ['memory', 'conversation', 'cost', 'retrieval', 'visualization', 'other']
 const groupNames = { memory: '记忆参数', conversation: '对话参数', cost: '成本控制', retrieval: '检索与去重', visualization: '可视化', other: '其他' }
 // 用量来源中文映射（未知值兜底显示原文）
-const SOURCE_NAMES = {
-  main_chat: 'AI对话',
-  agent: '工具prompt',
-  system_agent: '系统prompt',
-  title_gen: '标题生成',
-  embedding: '向量分析',
-  vision: '图片解析',
-  intent_parse: '意图解析',
-  tool_infer: '工具推断',
-  attention_focus: '注意力聚焦',
-  converge_intent: '意图收敛',
-  gap_detect: '缺口检测',
-  honest_clarify: '诚实澄清',
-  mood: '情绪分析',
-  quick_intent: '快速意图',
-  replan: '重规划',
-  profile_conflict: '画像冲突扫描'
-}
 function sourceName(s) { return SOURCE_NAMES[s] || s }
 const effectNames = { immediate: '立即生效', next_turn: '下一轮对话生效', next_session: '下次会话生效' }
 const enumLabels = { remind_only: '仅提醒（不阻断）' }

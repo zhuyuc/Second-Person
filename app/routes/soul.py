@@ -1,9 +1,36 @@
 """SOUL / 用户画像 / 输出样式接口（开发文档 §2.7-2.9）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
+from pydantic import BaseModel
 
 router = APIRouter()
+
+
+class SoulCoreRequest(BaseModel):
+    content: str
+
+
+class SoulStyleRollbackRequest(BaseModel):
+    source: str
+    version: int
+
+
+class PendingConfirmRequest(BaseModel):
+    pending_id: str
+    approved: bool = True
+
+
+class OutputStyleToggleRequest(BaseModel):
+    enabled: bool
+
+
+class OutputStyleRequest(BaseModel):
+    content: str = ""
+
+
+class ProfileReviewActionRequest(BaseModel):
+    id: int
 
 
 def _c():
@@ -33,9 +60,8 @@ async def get_soul():
 
 
 @router.put("/soul/core")
-async def put_core(request: Request):
-    body = await request.json()
-    _c().soul.write_core(body["content"])
+async def put_core(body: SoulCoreRequest):
+    _c().soul.write_core(body.content)
     return {"code": 200, "data": {}}
 
 
@@ -60,9 +86,8 @@ async def style_diff(source: str, from_: int = 0, to: int = 0):
 
 
 @router.post("/soul/style/rollback")
-async def style_rollback(request: Request):
-    body = await request.json()
-    await _c().soul.rollback(body["source"], body["version"])
+async def style_rollback(body: SoulStyleRollbackRequest):
+    await _c().soul.rollback(body.source, body.version)
     return {"code": 200, "data": {}}
 
 
@@ -72,11 +97,10 @@ async def get_pending():
 
 
 @router.post("/soul/pending/confirm")
-async def confirm_pending(request: Request):
-    body = await request.json()
+async def confirm_pending(body: PendingConfirmRequest):
     c = _c()
-    pid = body["pending_id"]
-    approved = body.get("approved", True)
+    pid = body.pending_id
+    approved = body.approved
     # 先读取待确认项（不立即移除）
     item = next((p for p in c.ctx_entry.list_pending()
                  if p.get("id") == pid), None)
@@ -155,19 +179,17 @@ async def output_style():
 
 
 @router.post("/output-style/toggle-auto")
-async def toggle_auto(request: Request):
-    body = await request.json()
+async def toggle_auto(body: OutputStyleToggleRequest):
     _c().config.update_params(
-        {"output_style_auto_evolve_enabled": bool(body.get("enabled"))})
+        {"output_style_auto_evolve_enabled": body.enabled})
     return {"code": 200, "data": {}}
 
 
 @router.put("/output-style")
-async def put_output_style(request: Request):
+async def put_output_style(body: OutputStyleRequest):
     """用户手动编辑输出样式画像。走 FileWriter soul_style(auto) 落盘，
     带版本历史（可回滚）；wait=True 等待真正生效。"""
-    body = await request.json()
-    content = str(body.get("content") or "").strip()
+    content = body.content.strip()
     c = _c()
     try:
         await c.fw.submit("soul_style", {
@@ -206,14 +228,13 @@ async def profile_review_pending(review_type: str = ""):
 
 
 @router.post("/profile-review/confirm")
-async def profile_review_confirm(request: Request):
+async def profile_review_confirm(body: ProfileReviewActionRequest):
     """确认候选：strategy_preference 轨道写入 RESPONSE_STRATEGY.md 对应场景段。"""
     import json as _json
-    body = await request.json()
     c = _c()
     row = c.db.query_one(
         "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
-        (body.get("id"),))
+        (body.id,))
     if not row:
         return {"code": 404, "message": "候选不存在或已处理"}
     if row["review_type"] != "strategy_preference":
@@ -240,13 +261,12 @@ async def profile_review_confirm(request: Request):
 
 
 @router.post("/profile-review/reject")
-async def profile_review_reject(request: Request):
+async def profile_review_reject(body: ProfileReviewActionRequest):
     """拒绝候选：进入 60 天拒绝保护期，同方向不再重提。"""
-    body = await request.json()
     c = _c()
     row = c.db.query_one(
         "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
-        (body.get("id"),))
+        (body.id,))
     if not row:
         return {"code": 404, "message": "候选不存在或已处理"}
     c.conflict_scanner.reject_and_protect(

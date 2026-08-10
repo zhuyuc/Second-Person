@@ -60,9 +60,9 @@ def run_md_migrations(data_dir: Path, md_migrations_dir: Path) -> list[int]:
 
     # 升级前完整备份 data/
     import shutil
-    from datetime import datetime as _dt
+    from infrastructure.timeutil import now_cst
     backup_path = data_dir.parent / \
-        f"data_md_migration_backup_{_dt.now():%Y%m%d_%H%M%S}"
+        f"data_md_migration_backup_{now_cst():%Y%m%d_%H%M%S}"
     shutil.copytree(data_dir, backup_path, dirs_exist_ok=True)
     logger.info("md 迁移前备份：%s", backup_path)
 

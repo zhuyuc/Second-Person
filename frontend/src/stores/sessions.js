@@ -18,5 +18,13 @@ export const useSessions = defineStore('sessions', {
             if (sid) localStorage.setItem('sp_current_sid', sid)
             else localStorage.removeItem('sp_current_sid')
         },
+        // 查询会话 handoff 状态（会话上下文管理方案 v2）
+        async handoffStatus(sid) {
+            if (!sid) return null
+            try {
+                const d = await api.get(`/chat/session/${sid}/handoff-status`)
+                return d.status
+            } catch { return null }
+        },
     },
 })

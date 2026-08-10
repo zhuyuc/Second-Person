@@ -1,9 +1,12 @@
 // useSSE：连接 /api/chat/send，处理 keepalive/断线重连/轮询降级/多标签接管
 // （开发文档 §断线重连与缓冲区规则 / §6.21）
+// 支持 handoff_ready 事件（会话上下文管理方案 v2）
+import { postJsonStream } from '@/api/streamClient'
+
 export function useSSE() {
     let controller = null
 
-    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, location, onEvent, onError }) {
+    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, location, onEvent, onError, handoffPath }) {
         const crid = clientRequestId || genId()
         sessionStorage.setItem('sp_active_crid', crid)
         // 首次发送携带 message；断线重连时同 crid 重推（服务端缓冲区断点续推）
@@ -17,16 +20,15 @@ export function useSSE() {
                 if (!gotFirst) onEvent && onEvent('degrade', { mode: 'polling' })
             }, 10000)
             try {
-                const resp = await fetch('/api/chat/send', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        session_id: sessionId, message, images, client_request_id: crid,
-                        regenerate_message_id: regenerateMessageId,
-                        location: location || undefined,
-                    }),
-                    signal: controller.signal,
-                })
+                const resp = await postJsonStream('/chat/send', {
+                    session_id: sessionId,
+                    message,
+                    images,
+                    client_request_id: crid,
+                    regenerate_message_id: regenerateMessageId,
+                    location: location || undefined,
+                    handoff_path: handoffPath || undefined,
+                }, { signal: controller.signal })
                 const reader = resp.body.getReader()
                 const decoder = new TextDecoder()
                 let buffer = ''

@@ -14,7 +14,7 @@ ConflictDetector —— 矛盾检测与裁决（产品文档 §矛盾陈述 / §
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from infrastructure.timeutil import now_cst
 from pathlib import Path
@@ -174,7 +174,7 @@ class ConflictDetector:
         """清理 status=resolved 且超 30 天的矛盾文件（定时任务调用）。"""
         if not self.conflicts_dir.exists():
             return 0
-        cutoff = datetime.now().timestamp() - days * 86400
+        cutoff = (now_cst() - timedelta(days=days)).timestamp()
         removed = 0
         for f in self.conflicts_dir.glob("conflict_*.md"):
             fm, _ = split_frontmatter(f.read_text(encoding="utf-8"))

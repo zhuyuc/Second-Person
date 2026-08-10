@@ -12,7 +12,8 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -55,6 +56,18 @@ def create_app(data_dir: str | Path) -> FastAPI:
             "code": 400, "message": str(exc), "trace_id": get_trace_id(),
             "details": {"field": exc.field, "received": exc.received,
                         "expected": exc.expected}})
+
+    @app.exception_handler(HTTPException)
+    async def _http_err(request: Request, exc: HTTPException):
+        return JSONResponse(status_code=exc.status_code, content={
+            "code": exc.status_code, "message": str(exc.detail),
+            "trace_id": get_trace_id(), "details": None})
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_err(request: Request, exc: RequestValidationError):
+        return JSONResponse(status_code=422, content={
+            "code": 422, "message": "请求参数校验失败",
+            "trace_id": get_trace_id(), "details": exc.errors()})
 
     @app.exception_handler(KeyError)
     async def _key_err(request: Request, exc: KeyError):

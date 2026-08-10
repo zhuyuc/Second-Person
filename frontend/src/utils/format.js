@@ -9,6 +9,18 @@ function toDate(iso) {
 
 const pad = (n) => String(n).padStart(2, '0')
 
+export function nowLocalIso() {
+    const d = new Date()
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+        'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
+}
+
+export function dateKey(iso) {
+    const d = toDate(iso)
+    if (!d) return (iso || '').slice(0, 10)
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+}
+
 // 相对时间（对话消息列表用）：刚刚 / N 分钟前 / 今天 HH:MM / 昨天 HH:MM / M/D / Y/M/D
 export function formatRelative(iso) {
     const d = toDate(iso)

@@ -80,6 +80,18 @@ async function deleteSession(sid) {
   await sess.load()
 }
 
+// 从此会话开启新会话（会话上下文管理方案 v2）
+async function startHandoffFrom(sid) {
+  menuId.value = null
+  try {
+    const d = await api.post('/chat/session/handoff', { from_session_id: sid })
+    sess.setCurrent(d.new_session_id)
+    if (route.path !== '/chat') router.push('/chat')
+    window.dispatchEvent(new CustomEvent('sp-open-session', { detail: d.new_session_id }))
+    await sess.load()
+  } catch { /* api 层已提示 */ }
+}
+
 onMounted(() => sess.load())
 </script>
 
@@ -132,11 +144,14 @@ onMounted(() => sess.load())
                       s.title }}</div>
                   <span v-if="s.channel && editingId !== s.session_id" class="sess-channel-badge">{{
                     channelName(s.channel) }}</span>
+                  <span v-if="s.readonly && editingId !== s.session_id" class="sess-readonly-badge">已结束</span>
                 </div>
               </div>
               <i class="ti ti-dots sess-dots" @click.stop="toggleMenu(s.session_id)"></i>
             </div>
             <div v-if="menuId === s.session_id" class="sess-menu" @click.stop>
+              <!-- 从此会话开启新会话（会话上下文管理方案 v2） -->
+              <div v-if="!s.readonly" @click="startHandoffFrom(s.session_id)"><i class="ti ti-arrow-forward"></i> 从此会话开启新会话</div>
               <div @click="togglePin(s)"><i class="ti ti-pin"></i> {{ s.pinned ? '取消置顶' : '置顶' }}</div>
               <div @click="startRename(s)"><i class="ti ti-edit"></i> 重命名</div>
               <div class="dang" @click="deleteSession(s.session_id)"><i class="ti ti-trash"></i> 删除</div>

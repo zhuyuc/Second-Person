@@ -38,8 +38,8 @@ class LintEngine:
             "SELECT count(*) c FROM memories WHERE lifecycle='stale'")["c"]
         missing = db.query_one(
             "SELECT count(*) c FROM memories WHERE lifecycle='missing'")["c"]
-        # 健康扣分口径：零连接 且 未被用户采纳确认。采纳（adopted）= 用户已
-        # 确认保留该独立记忆，不再视为质量问题，与孤立建议列表口径一致；
+        # 健康扣分口径：零连接 且 未被用户处理。adopted = 用户确认保留；
+        # dismissed = 用户主动忽略。两者均不再视为质量问题，与建议列表口径一致；
         # palace.orphans()（建议生成/批量补链用）仍为全量零连接口径，不受此影响。
         orphan = db.query_one(
             "SELECT count(*) c FROM memories m "
@@ -48,7 +48,7 @@ class LintEngine:
             "WHERE l.target_id=m.id OR l.source_id=m.id) "
             "AND NOT EXISTS (SELECT 1 FROM lint_suggestions s "
             "WHERE s.primary_memory_id=m.id AND s.suggestion_type='orphan' "
-            "AND s.status='adopted')")["c"]
+            "AND s.status IN ('adopted','dismissed'))")["c"]
         duplicate = db.query_one(
             "SELECT count(*) c FROM lint_suggestions "
             "WHERE status='open' AND suggestion_type='duplicate'")["c"]
@@ -100,7 +100,7 @@ class LintEngine:
             # 仍孤立的也跳过，不重复打扰；后续建链由提炼/补链路径自动完成。
             exists = self.db.query_one(
                 "SELECT 1 FROM lint_suggestions WHERE primary_memory_id=? "
-                "AND suggestion_type='orphan' AND status IN ('open','adopted')", (mid,))
+                "AND suggestion_type='orphan' AND status IN ('open','adopted','dismissed')", (mid,))
             if exists:
                 continue
             sid = make_sug_id()

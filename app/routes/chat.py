@@ -14,11 +14,37 @@ import json
 import time
 
 from fastapi import APIRouter, Request, UploadFile, File
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from infrastructure.prompt_loader import PROMPTS
 
 router = APIRouter()
+
+
+class ChatCancelRequest(BaseModel):
+    client_request_id: str = ""
+
+
+class ChatFeedbackRequest(BaseModel):
+    message_id: int
+    feedback: int = Field(ge=0, le=2)
+    reason: str | None = None
+
+
+class SessionRenameRequest(BaseModel):
+    session_id: str
+    title: str
+
+
+class SessionHandoffRequest(BaseModel):
+    from_session_id: str
+
+
+class SessionPinRequest(BaseModel):
+    session_id: str
+    pinned: bool = False
+
 
 # client_request_id -> {events, dropped, done, started, finished, size, sid, task}
 _BUFFERS: dict[str, dict] = {}
@@ -87,6 +113,8 @@ async def chat_send(request: Request):
     regen_id = body.get("regenerate_message_id")
     # 浏览器定位（可选）：前端 Geolocation + 逆地理编码后随消息携带
     location = (body.get("location") or "").strip()[:60] or None
+    # handoff 摘要附件路径（会话上下文管理方案 v2）
+    handoff_path = (body.get("handoff_path") or "").strip() or None
     c = _c()
 
     _gc_buffers()
@@ -123,7 +151,8 @@ async def chat_send(request: Request):
             async for evt in c.core.run(sid, message, crid, images=images,
                                         regenerate=bool(regen_id),
                                         regenerate_message_id=regen_id,
-                                        location=location):
+                                        location=location,
+                                        handoff_path=handoff_path):
                 buf["events"].append(evt)
                 buf["size"] += len(json.dumps(evt.get("data", {})))
                 if buf["size"] > BUFFER_MAX:
@@ -146,11 +175,10 @@ async def chat_send(request: Request):
 
 
 @router.post("/chat/cancel")
-async def chat_cancel(request: Request):
+async def chat_cancel(body: ChatCancelRequest):
     """用户手动停止生成：取消后台生成任务（已产出部分由中断补救落库）。
     除此接口外，任何连接层动作（刷新/断网/关页）都不中断生成。"""
-    body = await request.json()
-    buf = _BUFFERS.get(body.get("client_request_id") or "")
+    buf = _BUFFERS.get(body.client_request_id or "")
     task = buf.get("task") if buf else None
     if task and not task.done():
         task.cancel()
@@ -158,12 +186,36 @@ async def chat_cancel(request: Request):
     return {"code": 200, "data": {"cancelled": False}}
 
 
+async def _generate_handoff(c, from_sid: str, to_sid: str) -> None:
+    """后台异步生成 handoff 摘要（会话上下文管理方案 v2）。
+
+    不阻塞路由返回，失败静默降级为 status=failed 的占位文件。
+    """
+    from memory.handoff_summary import HandoffSummaryGenerator
+    from observability_langfuse import get_tracer
+    tracer = get_tracer()
+    trace = tracer.trace_start(
+        "handoff.summary", session_id=to_sid,
+        input={"from_session_id": from_sid, "to_session_id": to_sid})
+    try:
+        gen = HandoffSummaryGenerator(
+            llm=c.llm, db=c.db, data_dir=c.data_dir,
+            config=c.config, bus=c.bus, tracer=tracer)
+        await gen.generate(from_sid, to_sid)
+        trace.end(output={"status": "completed"})
+    except Exception as e:  # noqa: BLE001
+        trace.end(level="ERROR", status_message=str(e))
+        pass  # _generate_handoff 内部已兜底
+
+
 async def _gen_title(c, sid: str, message: str):
     """首条消息异步生成 10 字标题；3 秒超时退化为取前 15 字符。
     超时后 LLM 调用仍继续完成（shielding），晚到时覆盖已退化标题。
-    在独立 Langfuse span 内执行，确保 generation 挂在 trace 下。"""
+    使用独立 Langfuse trace，确保 generation 可被观测。"""
     from observability_langfuse import get_tracer
     tracer = get_tracer()
+    trace = tracer.trace_start("title_generation", session_id=sid, input={
+        "session_id": sid, "message": message})
     span = tracer.span_start("title_generation", input={
                              "session_id": sid, "message": message})
     try:
@@ -184,20 +236,36 @@ async def _gen_title(c, sid: str, message: str):
                     return resp["content"].strip()[:15]
                 except Exception:  # noqa: BLE001
                     return None
+
+            task = asyncio.create_task(_call_llm())
+
+            def _apply_late_title(done: asyncio.Task) -> None:
+                try:
+                    late_title = done.result()
+                except Exception:  # noqa: BLE001
+                    return
+                if late_title:
+                    c.sessions.set_auto_title(sid, late_title)
+
+            task.add_done_callback(_apply_late_title)
             try:
-                result = await asyncio.wait_for(asyncio.shield(
-                    asyncio.create_task(_call_llm())), timeout=3)
+                result = await asyncio.wait_for(asyncio.shield(task), timeout=3)
             except asyncio.TimeoutError:
                 span.end(output={"title": title,
                          "fallback": True, "timeout": True})
-                return  # 已设兜底 title，LLM 任务继续后台完成
+                trace.end(output={"title": title,
+                          "fallback": True, "timeout": True})
+                return
             if result:
                 c.sessions.set_auto_title(sid, result)
                 span.end(output={"title": result})
+                trace.end(output={"title": result})
                 return
         span.end(output={"title": title, "fallback": True})
-    except Exception:  # noqa: BLE001
-        span.end()
+        trace.end(output={"title": title, "fallback": True})
+    except Exception as e:  # noqa: BLE001
+        span.end(level="ERROR", status_message=str(e))
+        trace.end(level="ERROR", status_message=str(e))
 
 
 @router.get("/chat/session/{session_id}/active-request")
@@ -221,12 +289,11 @@ async def messages(session_id: str, before_id: int = None, limit: int = 50):
 
 
 @router.post("/chat/feedback")
-async def feedback(request: Request):
-    body = await request.json()
+async def feedback(body: ChatFeedbackRequest):
     c = _c()
-    mid = body["message_id"]
-    fb = body["feedback"]
-    reason = body.get("reason")
+    mid = body.message_id
+    fb = body.feedback
+    reason = body.reason
     from observability_langfuse import get_tracer
     tr = get_tracer().trace_start("user_feedback", input={
         "message_id": mid, "feedback": fb, "reason": reason,
@@ -297,9 +364,8 @@ async def _handle_downvote(c, message_id: int, reason: str):
 
 
 @router.post("/chat/session/rename")
-async def rename(request: Request):
-    body = await request.json()
-    _c().sessions.rename(body["session_id"], body["title"])
+async def rename(body: SessionRenameRequest):
+    _c().sessions.rename(body.session_id, body.title)
     return {"code": 200, "data": {}}
 
 
@@ -308,10 +374,60 @@ async def create():
     return {"code": 200, "data": {"session_id": _c().sessions.create_session()}}
 
 
+@router.post("/chat/session/handoff")
+async def session_handoff(body: SessionHandoffRequest):
+    """开启新会话并触发 handoff 摘要生成（会话上下文管理方案 v2）。
+
+    body: { from_session_id: str }
+    返回: { new_session_id, from_session_id }
+    """
+    from fastapi import HTTPException
+    from infrastructure.timeutil import now_cst
+    from_sid = body.from_session_id.strip()
+    if not from_sid:
+        raise HTTPException(400, "缺少 from_session_id")
+    c = _c()
+    # 校验旧会话存在且未 readonly
+    row = c.db.query_one(
+        "SELECT readonly FROM sessions WHERE session_id=?", (from_sid,))
+    if not row:
+        raise HTTPException(404, "会话不存在")
+    if row["readonly"]:
+        raise HTTPException(409, "会话已结束，不可重复切换")
+    # 创建新会话
+    new_sid = c.sessions.create_session(from_session=from_sid)
+    # 标记旧会话
+    now = now_cst().isoformat(timespec="seconds")
+    c.db.execute(
+        "UPDATE sessions SET readonly=1, ended_at=?, succeeded_by=?"
+        " WHERE session_id=?", (now, new_sid, from_sid))
+    # 异步生成摘要
+    if c.config.get("handoff_summary_enabled", True):
+        asyncio.create_task(_generate_handoff(c, from_sid, new_sid))
+    return {"code": 200, "data": {
+        "new_session_id": new_sid,
+        "from_session_id": from_sid,
+    }}
+
+
+@router.get("/chat/session/{session_id}/handoff-status")
+async def handoff_status(session_id: str):
+    """查询 handoff 摘要状态（会话上下文管理方案 v2）。
+
+    返回: { status: "generating" | "ready" | "failed" | null }
+    """
+    row = _c().db.query_one(
+        "SELECT handoff_summary_path FROM sessions WHERE session_id=?",
+        (session_id,))
+    if not row:
+        return {"code": 200, "data": {"status": None}}
+    from agent.session_context import _handoff_status_from_row
+    return {"code": 200, "data": {"status": _handoff_status_from_row(row)}}
+
+
 @router.post("/chat/session/pin")
-async def pin(request: Request):
-    body = await request.json()
-    _c().sessions.set_pinned(body["session_id"], bool(body.get("pinned")))
+async def pin(body: SessionPinRequest):
+    _c().sessions.set_pinned(body.session_id, body.pinned)
     return {"code": 200, "data": {}}
 
 

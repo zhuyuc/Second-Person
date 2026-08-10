@@ -9,9 +9,12 @@ import { useSessions } from '@/stores/sessions'
 import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
 import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 import BaseModal from '@/components/BaseModal.vue'
+import HandoffAttachment from '@/components/HandoffAttachment.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
-import { formatRelative as formatTime, formatTimeFull, fmtSize } from '@/utils/format'
-import { confidenceLabel, lifecycleLabel } from '@/utils/enumLabel'
+import { formatRelative as formatTime, formatTimeFull, fmtSize, nowLocalIso } from '@/utils/format'
+import { confidenceLabel, lifecycleLabel, TOAST_ONLY_NOTIF } from '@/utils/enumLabel'
+import { withQuery } from '@/utils/query'
+import { sanitizeHtml } from '@/utils/sanitize'
 
 // Mermaid 主题：CSS 变量驱动（与 MermaidChart 同源），自动跟随系统深浅色；手动触发 run
 applyMermaidTheme()
@@ -68,6 +71,36 @@ const degraded = ref(false)
 const scroller = ref(null)
 const ta = ref(null)          // 输入框，用于自适应高度
 
+// 阈值状态（会话上下文管理方案 v2）
+const thresholdBreached = ref(null)  // null / 'soft' / 'hard'
+const softToastShown = ref(false)
+// handoff 附件状态
+const handoffStatus = ref(null)      // null / 'generating' / 'ready' / 'failed'
+const handoffData = ref(null)        // { summary_tokens, original_turns }
+const handoffPreview = ref(null)
+const pendingMessage = ref(null)     // 摘要生成中暂存的消息
+
+// ---- handoff 操作 ----
+async function startHandoff() {
+    if (!sessStore.currentSid) return
+    try {
+        const d = await api.post('/chat/session/handoff', {
+            from_session_id: sessStore.currentSid
+        })
+        sessStore.setCurrent(d.new_session_id)
+        messages.value = []
+        handoffStatus.value = 'generating'
+        handoffData.value = null
+        thresholdBreached.value = null
+    } catch { toast.push('error', '创建新会话失败') }
+}
+
+function removeHandoff() {
+    handoffStatus.value = null
+    handoffData.value = null
+    pendingMessage.value = null
+}
+
 // 模型选择器
 const providers = ref([])
 const chatModelId = ref(null)
@@ -89,7 +122,6 @@ async function switchModel(pid) {
 }
 
 // 仅提示类系统通知：Web 端已在导入时用 toast 实时反馈，无需在对话流中留存横幅（含历史）
-const TOAST_ONLY_NOTIF = ['doc_imported']
 function stripToastNotifs(msgs) {
   return msgs.filter(m => !(m.message_type === 'system_notification'
     && TOAST_ONLY_NOTIF.includes(m.notification_type)))
@@ -97,7 +129,7 @@ function stripToastNotifs(msgs) {
 
 async function openSession(sid) {
   sessStore.setCurrent(sid)
-  const msgs = await api.get('/chat/messages?session_id=' + sid)
+  const msgs = await api.get(withQuery('/chat/messages', { session_id: sid }))
   // 历史消息：若用户消息含附件上下文前缀，只展示真实提问 + 附件胶囊
   for (const m of msgs) {
     if (m.role === 'user' && typeof m.content === 'string'
@@ -285,7 +317,12 @@ async function ingestToKb(file) {
   try {
     const fd = new FormData(); fd.append('file', file)
     const r = await api.upload('/import/document', fd)
-    toast.push('success', `「${file.name}」已存入知识库，提炼 ${r.extracted} 条记忆`)
+    if (r.duplicate) {
+      // 文档已在知识库中：跳过重复导入，不影响当前对话的文档解析
+      toast.push('info', `「${file.name}」已在知识库中，跳过重复导入（已有 ${r.extracted} 条记忆）`)
+    } else {
+      toast.push('success', `「${file.name}」已存入知识库，提炼 ${r.extracted} 条记忆`)
+    }
   } catch { /* api 层已提示错误 */ }
 }
 // 超长文本粘贴自动收纳为附件的阈值（低于阈值维持直接进输入框）
@@ -337,12 +374,22 @@ async function send() {
   const imgs = attachments.value.filter(a => a.isImage && a.dataUrl).map(a => a.dataUrl)
   const kbFiles = attachments.value.filter(a => a.file && !a.isImage).map(a => a.file)
   if ((!text && !atts.length && !imgs.length) || generating.value) return
+  // handoff 摘要生成中：消息暂存（会话上下文管理方案 v2）
+  if (handoffStatus.value === 'generating') {
+    pendingMessage.value = { text, atts: attachments.value }
+    return
+  }
   // 无当前会话（新对话/欢迎页）：新建一条全新会话，不复用旧空会话，
   // 避免消息落进以前的会话记录
   if (!sessStore.currentSid) {
     const d = await api.post('/chat/session/create', {})
     sessStore.setCurrent(d.session_id)
     messages.value = []
+  }
+  // handoff 附件路径：新会话首条消息携带
+  let hPath = null
+  if (handoffStatus.value === 'ready' && messages.value.length === 0) {
+    hPath = `artifacts/handoffs/${sessStore.currentSid}.md`
   }
   // 构造发送给后端的消息：把附件解析文本作为上下文前置（不截断，完整交给模型）
   let backendMsg = text
@@ -378,9 +425,12 @@ async function send() {
     sessionId: sessStore.currentSid, message: backendMsg,
     images: imgs.length ? imgs : undefined,
     location: geoEnabled.value ? cachedLocation() : undefined,
+    handoffPath: hPath,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: () => { toast.push('error', '生成失败'); finishStream() },
   })
+  // 发送后清除 handoff 附件状态
+  if (hPath) { handoffStatus.value = null; handoffData.value = null }
 }
 
 function handleEvent(ev, data) {
@@ -395,8 +445,37 @@ function handleEvent(ev, data) {
   else if (ev === 'queued') toast.push('info', '正在处理上一条消息')
   else if (ev === 'degrade') { degraded.value = true }
   else if (ev === 'tool_visual') { streamVisuals.value.push(data); maybeScroll() }
-  else if (ev === 'turn_completed') finishStream(data.message_id)
+  else if (ev === 'turn_completed') {
+    finishStream(data.message_id)
+    if (data.threshold) handleThreshold(data.threshold)
+  }
   else if (ev === 'error') { toast.push('error', data.message || '出错'); finishStream() }
+  // handoff 摘要就绪（会话上下文管理方案 v2）
+  else if (ev === 'handoff_ready') {
+    handoffStatus.value = data.status
+    handoffData.value = data
+    if (pendingMessage.value) {
+      const m = pendingMessage.value
+      pendingMessage.value = null
+      input.value = m.text
+      attachments.value = m.atts
+      nextTick(() => { autoGrow(); send() })
+    }
+  }
+}
+
+function handleThreshold(threshold) {
+  const { session_total_tokens, soft_threshold, hard_threshold, breached } = threshold
+  if (breached === 'hard' || session_total_tokens >= hard_threshold) {
+    thresholdBreached.value = 'hard'
+  } else if (breached === 'soft' || session_total_tokens >= soft_threshold) {
+    if (!softToastShown.value) {
+      toast.push('warning', '此会话已接近容量，建议尽快收尾或开启新会话')
+      softToastShown.value = true
+      sessionStorage.setItem(`sp_soft_toast_shown_${sessStore.currentSid}`, '1')
+    }
+    thresholdBreached.value = 'soft'
+  }
 }
 
 let lastCitations = []
@@ -452,7 +531,7 @@ async function abort() {
 // 仅重拉消息（不触发 tryReattach）：用于停止后以落库版本覆盖内存部分回复
 async function reloadMessages(sid) {
   try {
-    const msgs = await api.get('/chat/messages?session_id=' + sid)
+    const msgs = await api.get(withQuery('/chat/messages', { session_id: sid }))
     for (const m of msgs) {
       if (m.role === 'user' && typeof m.content === 'string'
         && m.content.includes('\n---\n') && m.content.includes('【附件：')) {
@@ -531,7 +610,7 @@ function copyText(msg) { navigator.clipboard.writeText(msg.content); toast.push(
 // 引用记忆点击查看详情（轻量弹窗，复用 /memory/detail）
 const memDetail = ref(null)
 async function openMemory(id) {
-  try { memDetail.value = await api.get('/memory/detail?id=' + id) } catch { /* api 层已提示 */ }
+  try { memDetail.value = await api.get(withQuery('/memory/detail', { id })) } catch { /* api 层已提示 */ }
 }
 function stripTail(t, visuals) {
   // 剔除模型在正文末尾泄漏的 {"citations":[...]} / {"memory_confirm":...} JSON 声明
@@ -557,7 +636,7 @@ function render(md, visuals) {
   // 对话内容里的链接统一新标签打开，不在当前界面跳转
   const html = marked.parse(stripTail(md, visuals))
     .replace(/<a\s/gi, '<a target="_blank" rel="noopener noreferrer" ')
-  return groupSections(html)
+  return sanitizeHtml(groupSections(html))
 }
 
 // 层级分组：Markdown 渲染为平铺兄弟节点，把每个 h2/h3/h4 之后、下一个
@@ -616,20 +695,13 @@ function renderUser(text) {
   // 用户消息：转义 HTML 防注入 → 换行保留 → URL 转为新标签打开的链接
   const esc = (text || '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  return esc
+  return sanitizeHtml(esc
     .replace(/(https?:\/\/[^\s<]+)/g,
       '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/\n/g, '<br>')
+    .replace(/\n/g, '<br>'))
 }
 
-// 本地时间 ISO（秒级）：流式消息在屏上创建时即回填 create_time，
-// 与 DB 落库格式一致，避免消息时间要刷新页面后才显示
-function nowLocalIso() {
-  const d = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
-    'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds())
-}
+// 本地时间 ISO（秒级）由 utils/format.js 统一提供，避免各视图重复实现
 function scrollBottom() { nextTick(() => { if (scroller.value) { scroller.value.scrollTop = scroller.value.scrollHeight; atBottom.value = true } }) }
 // 智能跟随：仅当用户已在底部附近时自动吸底；上翻后不强制拉回
 const atBottom = ref(true)
@@ -914,6 +986,21 @@ onUnmounted(() => {
 
       <!-- 输入区 -->
       <div style="padding:16px 32px 0">
+        <!-- 95% 硬阈值提示条（会话上下文管理方案 v2） -->
+        <div v-if="thresholdBreached === 'hard'" class="handoff-bar" style="max-width:820px;margin:0 auto 10px">
+          <i class="ti ti-alert-triangle"></i>
+          <span style="flex:1">此会话已达容量上限</span>
+          <button class="btn-primary" @click="startHandoff" style="font-size:var(--fs-sm);padding:4px 12px">
+            <i class="ti ti-arrow-forward"></i> 开启新会话
+          </button>
+        </div>
+        <!-- handoff 摘要附件（会话上下文管理方案 v2） -->
+        <HandoffAttachment v-if="handoffStatus"
+          :status="handoffStatus"
+          :data="handoffData"
+          class="chat-handoff-attach"
+          @remove="removeHandoff"
+          @preview="handoffPreview = handoffData || { status: handoffStatus }" />
         <div class="composer" :class="{ dragover: dragOver }" style="max-width:820px;margin:0 auto;position:relative"
           @dragenter.prevent="dragOver = true" @dragover.prevent="dragOver = true" @dragleave.prevent="onDragLeave"
           @drop.prevent.stop="onDrop">
@@ -936,9 +1023,9 @@ onUnmounted(() => {
               <i class="ti ti-x" style="cursor:pointer" @click.stop="removeAttachment(ai)"></i>
             </span>
           </div>
-          <textarea ref="ta" v-model="input" placeholder="发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件）" rows="1"
+          <textarea ref="ta" v-model="input" :placeholder="thresholdBreached === 'hard' ? '已达容量上限，请开启新会话' : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件）'" rows="1"
             @input="autoGrow" @keydown.enter.exact.prevent="send" @paste="onPaste" @dragenter.prevent="dragOver = true"
-            @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop"></textarea>
+            @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop" :disabled="thresholdBreached === 'hard'"></textarea>
           <!-- 表情选择面板（absolute 定位在 composer 上方，选择后保持打开可连续插入） -->
           <div v-if="emojiOpen" class="emoji-panel" @click.stop>
             <div v-for="g in EMOJI_GROUPS" :key="g.name" class="emoji-group">
@@ -977,6 +1064,19 @@ onUnmounted(() => {
       <div class="ai-disclaim" style="max-width:820px;margin:0 auto;padding:8px 0 4px">内容由 AI 生成，仅供参考</div>
     </div>
   </div>
+
+  <!-- handoff 摘要预览：摘要正文由后端注入下一轮上下文，前端展示可用元信息 -->
+  <BaseModal v-if="handoffPreview" title="上一会话摘要" size="sm" stacked @close="handoffPreview = null">
+    <dl class="kv">
+      <dt>状态</dt><dd>{{ handoffPreview.status === 'failed' ? '生成失败' : '已就绪' }}</dd>
+      <dt v-if="handoffPreview.original_turns != null">原会话轮次</dt><dd v-if="handoffPreview.original_turns != null">{{ handoffPreview.original_turns }}</dd>
+      <dt v-if="handoffPreview.summary_tokens != null">摘要长度</dt><dd v-if="handoffPreview.summary_tokens != null">约 {{ handoffPreview.summary_tokens }} token</dd>
+    </dl>
+    <p class="modal-subtitle">发送下一条消息时，系统会自动把该摘要注入新会话上下文。</p>
+    <template #footer>
+      <button type="button" @click="handoffPreview = null">关闭</button>
+    </template>
+  </BaseModal>
 
   <!-- 引用记忆详情弹窗（点击对话中的引用打开，二级层叠；SP-UI v4 统一走 BaseModal） -->
   <BaseModal v-if="memDetail" title="记忆详情" size="md" stacked @close="memDetail = null">

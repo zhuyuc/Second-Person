@@ -64,6 +64,9 @@ class TaskScheduler:
                 logger.warning("任务 %s 失败(第 %d 次)：%s", task_id, attempt + 1, e)
                 if attempt >= TASK_RETRY:
                     self._log(task_id, start, "failed", str(e), trigger_source)
+                    self.db.execute(
+                        "UPDATE scheduled_tasks SET status='failed', last_run=? WHERE task_id=?",
+                        (start.isoformat(timespec="seconds"), task_id))
                     self.notify("task_failed", f"定时任务 {task['name']} 失败：{e}")
                     return False
                 await asyncio.sleep(1)

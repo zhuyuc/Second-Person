@@ -19,6 +19,21 @@ IMPLICIT_KEYWORDS = [
 ]
 
 
+def _truncate_at_boundary(text: str, max_chars: int) -> str:
+    """在语义边界截断：优先 ## 标题边界，其次 \n\n 段落边界。"""
+    if len(text) <= max_chars:
+        return text
+    headings = list(re.finditer(r'^##\s+', text, re.MULTILINE))
+    for h in reversed(headings):
+        if h.start() < max_chars:
+            return text[:h.start()].rstrip() + "\n\n…（后续内容已省略）"
+    paras = list(re.finditer(r'\n\n', text))
+    for p in reversed(paras):
+        if p.start() < max_chars:
+            return text[:p.start()].rstrip() + "\n\n…（后续内容已省略）"
+    return text[:max_chars] + "…"
+
+
 # 单轮工具输出截断上限（字符）：工具结果不入 L2 历史，超大输出在合成层截断兑底。
 # 30000 对齐 Langfuse _trim 兜底：绝大多数工具结果完整进入主 prompt，
 # 仅极端超大输出（>30K 字符）截断并标注原始长度，保证 Langfuse 记录与业务输入一致
@@ -27,9 +42,11 @@ TOOL_RESULT_MAX_CHARS = 30000
 
 def build_response_prompt(user_message: str, tool_results: list[dict],
                           memories: list[dict],
-                          depth_level: str = "normal") -> list[dict]:
-    """合成 prompt：把工具结果 + 命中记忆交给 LLM，要求输出 citations。
-    depth_level（brief/normal/detailed）：场景化篇幅档位，normal 为默认不额外注入。"""
+                          depth_level: str = "normal",
+                          conversation_context: list[dict] | None = None) -> list[dict]:
+    """合成 prompt：把工具结果 + 命中记忆 + 会话上下文交给 LLM，要求输出 citations。
+    depth_level（brief/normal/detailed）：场景化篇幅档位，normal 为默认不额外注入。
+    conversation_context：FTS5 双通道检索命中的对话历史原文。"""
     ctx_parts = []
     if memories:
         mem_txt = "\n".join(
@@ -37,6 +54,18 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
             for i, m in enumerate(memories))
         ctx_parts.append(
             "已检索到的相关记忆（若用到其中任何一条，必须在回复末尾声明 citations）：\n" + mem_txt)
+    # 会话上下文检索：按 token 预算语义边界截断
+    if conversation_context:
+        _budget = 12000  # ~3000 tokens
+        _per = _budget // max(len(conversation_context), 1)
+        ctx_text = "\n---\n".join(
+            f"[会话上下文 {i+1}] {c['role']}：{_truncate_at_boundary(c['content'], _per)}"
+            for i, c in enumerate(conversation_context)
+        )
+        ctx_parts.append(
+            "从当前对话历史中检索到的相关内容（用于理解用户指代和复现之前讨论的方案）：\n"
+            + ctx_text
+        )
     if tool_results:
         def _clip(v) -> str:
             s = str(v)

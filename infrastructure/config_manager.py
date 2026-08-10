@@ -297,11 +297,23 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "default": 3, "effect": "next_turn", "group": "other", "order": 13,
      "label": "内置搜索关键词数上限",
      "desc": "一轮内置联网搜索最多并发的关键词数，直接影响联网插件计费次数与搜索覆盖面。"},
-    # -- 画像后台审核 --
-    {"key": "profile_auto_learning_enabled", "type": "bool", "default": True,
-     "effect": "next_turn", "group": "profile", "order": 1,
-     "label": "自动学习画像",
-     "desc": "开启后系统自动学习你的偏好并生成待确认更新。关闭后完全依赖你手动编辑画像。"},
+    # -- 会话上下文管理（会话上下文管理方案 v2） --
+    {"key": "handoff_summary_enabled", "type": "bool", "default": True,
+     "effect": "next_turn", "group": "conversation", "order": 22,
+     "label": "会话切换摘要",
+     "desc": "切换会话时自动生成上一会话的摘要附件，新会话可继承上下文。"},
+    {"key": "handoff_summary_token_limit", "type": "int", "min": 2000, "max": 20000,
+     "default": 10000, "effect": "next_session", "group": "conversation", "order": 23,
+     "label": "摘要 Token 上限",
+     "desc": "handoff 摘要的最大 token 数，超出自动二次收敛。"},
+    {"key": "response_reservation_tokens", "type": "int", "min": 4096, "max": 65536,
+     "default": 16384, "effect": "next_turn", "group": "conversation", "order": 24,
+     "label": "响应预留 Token",
+     "desc": "为 AI 回复预留的 token 空间，从可用窗口中扣除。"},
+    {"key": "handoff_backtrack_depth", "type": "int", "min": 1, "max": 5,
+     "default": 2, "effect": "next_session", "group": "conversation", "order": 25,
+     "label": "回溯深度",
+     "desc": "view_previous_session 工具允许递归回溯的层数。"},
 ]
 
 _SCHEMA_BY_KEY = {p["key"]: p for p in PARAM_SCHEMA}

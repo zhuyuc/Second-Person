@@ -8,7 +8,8 @@ EventBus —— 模块间零直接调用，通过事件通信解耦。
 核心事件（11 个）：
   memory.created / memory.updated / turn.completed / lint.completed /
   review.completed / soul_style.updated / output_style.updated /
-  profile.rebuilt / task.progress / embedding.migration.completed / mood.updated
+  profile.rebuilt / task.progress / embedding.migration.completed / mood.updated /
+  handoff.generate / handoff.ready（会话上下文管理方案 v2）
 订阅方：container 启动时为全部预置事件挂接审计日志订阅者；
 插件通过 on_load(event_bus=...) 按需追加订阅。
 """
@@ -39,6 +40,9 @@ EVT_STRATEGY_DECIDED = "strategy.decided"
 EVT_SKELETON_EXTRACTED = "skeleton.extracted"
 EVT_STRATEGY_EXECUTED = "strategy.executed"
 EVT_STRATEGY_REFLECTED = "strategy.reflected"
+# 会话上下文管理（会话上下文管理方案 v2 §事件总线）
+EVT_HANDOFF_GENERATE = "handoff.generate"
+EVT_HANDOFF_READY = "handoff.ready"
 
 KNOWN_EVENTS = {
     EVT_MEMORY_CREATED, EVT_MEMORY_UPDATED, EVT_TURN_COMPLETED, EVT_LINT_COMPLETED,
@@ -47,6 +51,7 @@ KNOWN_EVENTS = {
     EVT_EMBEDDING_MIGRATION_COMPLETED, EVT_MOOD_UPDATED,
     EVT_STRATEGY_DECIDED, EVT_SKELETON_EXTRACTED,
     EVT_STRATEGY_EXECUTED, EVT_STRATEGY_REFLECTED,
+    EVT_HANDOFF_GENERATE, EVT_HANDOFF_READY,
 }
 
 

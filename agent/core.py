@@ -1292,11 +1292,11 @@ class AgentCore:
             await emit("thinking_delta",
                        {"text": f"【工具调用】正在调用 {tool_name}…\n"})
             params = (await self._format_template_save_params(
-                          message, sid, intent.intent_summary)
-                      if tool_name == "format_template_save"
-                      else await self._memory_save_params(message, sid)
-                      if tool_name == "memory_save"
-                      else await self._infer_params(tool_name, message, deps, sid))
+                message, sid, intent.intent_summary)
+                if tool_name == "format_template_save"
+                else await self._memory_save_params(message, sid)
+                if tool_name == "memory_save"
+                else await self._infer_params(tool_name, message, deps, sid))
             # file_write 延迟写入：content 由主回复填充，此时跳过执行
             if tool_name == "file_write" and params.get("content") == "__FROM_RESPONSE__":
                 shared.deferred_writes.append({
@@ -1808,7 +1808,8 @@ class AgentCore:
                             PROMPTS.load_raw("agent/prompts/format_scenario")},
                            {"role": "user", "content": question}],
                     source="intent", session_id=sid)
-                scenario = (resp.get("content") or "").strip().strip('"\'`')[:12]
+                scenario = (resp.get("content")
+                            or "").strip().strip('"\'`')[:12]
             except Exception:  # noqa: BLE001
                 logger.warning("格式绑定场景提取失败，回退意图摘要", exc_info=True)
         if not scenario:

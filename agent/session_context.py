@@ -6,6 +6,8 @@
 - 会话恢复：Tail 起点由 last_compressed_message_id 水位决定
 - 会话标题：首条消息后异步生成，title_source=manual 时丢弃自动结果
 - response_signal 两阶段采集
+- 会话继承关系与 handoff 摘要管理（会话上下文管理方案 v2）
+- readonly 会话写入保护
 """
 from __future__ import annotations
 
@@ -29,8 +31,9 @@ class SessionStore:
         self.data_dir = Path(data_dir)
 
     # ---- 会话 CRUD --------------------------------------------------------
-    def create_session(self, channel: str = None) -> str:
-        """channel：IM 渠道会话记录来源平台（feishu/telegram 等），Web 端为 None。"""
+    def create_session(self, channel: str = None, from_session: str = None) -> str:
+        """channel：IM 渠道会话记录来源平台（feishu/telegram 等），Web 端为 None。
+        from_session：handoff 前驱会话 ID（null 表示无前驱）。"""
         row = self.db.query_one(
             "SELECT MAX(CAST(SUBSTR(session_id,6) AS INTEGER)) m"
             " FROM sessions WHERE session_id LIKE 'sess_%'")
@@ -42,8 +45,8 @@ class SessionStore:
             seq += 1
         self.db.execute(
             "INSERT INTO sessions(session_id,title,title_source,last_active,"
-            "message_count,channel) VALUES(?,?,'auto',?,0,?)",
-            (sid, "新会话", _now(), channel))
+            "message_count,channel,from_session) VALUES(?,?,'auto',?,0,?,?)",
+            (sid, "新会话", _now(), channel, from_session))
         return sid
 
     def rename(self, sid: str, title: str) -> None:
@@ -85,7 +88,12 @@ class SessionStore:
             "compressed": bool(r["compressed_summary_path"]),
             "pinned": bool(r["pinned"]),
             "channel": r["channel"],
-            "title_source": r["title_source"]} for r in page_rows]}
+            "title_source": r["title_source"],
+            "readonly": bool(r["readonly"]),
+            "from_session": r["from_session"],
+            "handoff_status": _handoff_status_from_row(r),
+            "succeeded_by": r["succeeded_by"],
+        } for r in page_rows]}
 
     def set_pinned(self, sid: str, pinned: bool) -> None:
         self.db.execute(
@@ -113,7 +121,6 @@ class SessionStore:
         if summary.exists():
             summary.unlink()
 
-    # ---- 消息 -------------------------------------------------------------
     def append_message(self, sid: str, role: str, content: str,
                        message_type: str = "normal", citations: list | None = None,
                        notification_type: str = None,
@@ -122,11 +129,16 @@ class SessionStore:
                        visuals: list | None = None,
                        strategy_snapshot: dict | None = None,
                        skeleton_snapshot: dict | None = None) -> int:
+        # readonly 写入保护（会话上下文管理方案 v2 §旧会话状态管理）
+        row = self.db.query_one(
+            "SELECT readonly FROM sessions WHERE session_id=?", (sid,))
+        if row and row["readonly"]:
+            raise ValueError("会话已结束，不可写入新消息")
         cur = self.db.execute(
             "INSERT INTO conversations(session_id,role,message_type,notification_type,"
             "content,citations,feedback,create_time,thinking,images,visuals,"
-            "response_strategy_json,cognitive_skeleton_json) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?)",
+            "response_strategy_json,cognitive_skeleton_json,protected_from_compression) "
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
@@ -134,7 +146,10 @@ class SessionStore:
              json.dumps(visuals, ensure_ascii=False) if visuals else None,
              json.dumps(strategy_snapshot,
                         ensure_ascii=False) if strategy_snapshot else None,
-             json.dumps(skeleton_snapshot, ensure_ascii=False) if skeleton_snapshot else None))
+             json.dumps(skeleton_snapshot,
+                        ensure_ascii=False) if skeleton_snapshot else None,
+             int(self._should_protect(role, content)))
+        )
         self.db.execute(
             "UPDATE sessions SET last_active=?, message_count=message_count+1 "
             "WHERE session_id=?", (_now(), sid))
@@ -256,6 +271,16 @@ class SessionStore:
                 "WHERE session_id=? AND message_type='normal' ORDER BY id",
                 (sid,))
         msgs = []
+        # 第一优先级：protected 消息完整原文（始终加载，不受 watermark 限制）
+        protected_rows = self.db.query_all(
+            "SELECT id,role,content FROM conversations "
+            "WHERE session_id=? AND message_type='normal' "
+            "AND protected_from_compression=1 ORDER BY id",
+            (sid,))
+        for r in protected_rows:
+            if r["role"] in ("user", "assistant"):
+                msgs.append({"role": r["role"], "content": r["content"],
+                             "id": r["id"]})
         if summary_text:
             # Protected Head：已被压缩覆盖的最初几条原文保留不动（水位之前）
             head_rows = self.db.query_all(
@@ -307,6 +332,113 @@ class SessionStore:
         p.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
 
     @staticmethod
-    def _fts(keyword: str) -> str:
-        tokens = re.findall(r"[\w\u4e00-\u9fff]+", keyword)
-        return " OR ".join(f'"{t}"' for t in tokens[:10]) or '""'
+    def _should_protect(role: str, content: str) -> bool:
+        """判断消息是否应标记为 protected_from_compression。
+
+        规则：
+        - 用户消息 ≥500 字 → protected
+        - AI 回复 ≥3 个 ## → protected
+        - AI 回复 ≥100 行代码 → protected
+        - AI 回复 ≥1000 字 + 结构化信号（≥5 列表/≥2 代码块/≥8 段落）→ protected
+        """
+        if role == "user":
+            return len(content) >= 500
+        if role == "assistant":
+            if len(re.findall(r'^##\s+', content, re.MULTILINE)) >= 3:
+                return True
+            code_lines = sum(
+                len(block.split('\n'))
+                for block in re.findall(r'```[\s\S]*?```', content))
+            if code_lines >= 100:
+                return True
+            if len(content) >= 1000:
+                bullets = len(re.findall(
+                    r'^\s*[-*+]\s+', content, re.MULTILINE))
+                blocks = content.count('```') // 2
+                paras = len([p for p in content.split('\n\n') if p.strip()])
+                if bullets >= 5 or blocks >= 2 or paras >= 8:
+                    return True
+        return False
+
+    def search_history(
+        self,
+        session_id: str,
+        query: str,
+        top_k: int = 5,
+        role_filter: str | None = None,
+        time_window_messages: int = 200,
+    ) -> list[dict]:
+        """FTS5 trigram 全文检索会话历史，bm25() 排名。
+
+        Args:
+            session_id: 目标会话
+            query: 搜索查询（原生文本，直接传给 FTS5 MATCH）
+            top_k: 返回条数上限
+            role_filter: None=不过滤, "user"=仅用户, "assistant"=仅AI
+            time_window_messages: 时间窗（最近 N 条消息内检索）
+        """
+        if not query or not query.strip():
+            return []
+
+        conditions = [
+            "conversations_fts MATCH ?",
+            "c.session_id = ?",
+            "c.message_type = 'normal'",
+        ]
+        params = [query.strip(), session_id]
+
+        if role_filter:
+            conditions.append("c.role = ?")
+            params.append(role_filter)
+
+        # 时间窗：仅在最近 N 条消息内检索
+        max_id_row = self.db.query_one(
+            "SELECT MAX(id) as max_id FROM conversations WHERE session_id=?",
+            (session_id,))
+        if max_id_row and max_id_row["max_id"]:
+            min_id = max(0, max_id_row["max_id"] - time_window_messages)
+            conditions.append("c.id > ?")
+            params.append(min_id)
+
+        where = " AND ".join(conditions)
+        sql = f"""
+            SELECT c.id, c.role, c.content, c.create_time,
+                   c.protected_from_compression,
+                   bm25(conversations_fts, 0, 1, 0) AS score
+            FROM conversations c
+            JOIN conversations_fts ON c.id = conversations_fts.rowid
+            WHERE {where}
+            ORDER BY score LIMIT ?
+        """
+        params.append(top_k)
+
+        rows = self.db.query_all(sql, tuple(params))
+        return [
+            {
+                "id": r["id"],
+                "role": r["role"],
+                "content": r["content"],
+                "score": r["score"],
+                "protected": bool(r["protected_from_compression"]),
+                "created_at": r["create_time"],
+            }
+            for r in rows
+        ]
+
+
+def _handoff_status_from_row(r) -> str | None:
+    """从 sessions 行派生 handoff 摘要状态（会话上下文管理方案 v2）。
+    返回 None / 'generating' / 'ready' / 'failed'。"""
+    path = r["handoff_summary_path"]
+    if not path:
+        return None
+    from pathlib import Path as _Path
+    from memory.md_file import split_frontmatter
+    try:
+        p = _Path(path)
+        if not p.exists():
+            return "generating"
+        fm, _ = split_frontmatter(p.read_text(encoding="utf-8"))
+        return fm.get("status", "ready")
+    except Exception:  # noqa: BLE001
+        return "failed"
