@@ -251,7 +251,7 @@ class StrategyEngine:
         from infrastructure.json_repair import repair_json
         import json as _json
 
-        snap = self._provider_snapshot_fn()
+        snap = self.snapshot_fn()
         if not snap:
             return None  # 模型不可用 → 走文字澄清
 

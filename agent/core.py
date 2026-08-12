@@ -1404,7 +1404,7 @@ class AgentCore:
         if confidence >= confidence_threshold:
             return None
 
-        # 检查会话级上限和关闭标记
+        # 检查会话级上限（计数门槛）和关闭标记（blocked 门槛）——两条独立判定
         row = self.db.query_one(
             "SELECT COUNT(*) as cnt FROM elicitations WHERE session_id=? AND status IN ('pending','answered_all','closed')",
             (sid,))
@@ -1416,14 +1416,18 @@ class AgentCore:
         if row2 and row2["elicitation_blocked"]:
             return None
 
-        # 调用 clarification_router 判定可枚举性
+        # 调用 clarification_router 判定可枚举性（零阻塞：异常跳过追问，主对话不受影响）
         gap = getattr(first_intent, "intent_summary", "") or ""
-        seed = await self.strategy_engine.clarification_router(
-            sid, message, gap,
-            {k: self.config.get(k) for k in (
-                "elicitation_max_questions", "elicitation_max_per_session",
-                "elicitation_web_ttl_minutes", "elicitation_im_ttl_hours",
-            ) if self.config.get(k) is not None})
+        try:
+            seed = await self.strategy_engine.clarification_router(
+                sid, message, gap,
+                {k: self.config.get(k) for k in (
+                    "elicitation_max_questions", "elicitation_max_per_session",
+                    "elicitation_web_ttl_minutes", "elicitation_im_ttl_hours",
+                ) if self.config.get(k) is not None})
+        except Exception:  # noqa: BLE001 - 零阻塞：LLM 异常静默跳过追问
+            logger.warning("clarification_router 异常，跳过追问", exc_info=True)
+            return None
         if seed is None:
             return None
 
