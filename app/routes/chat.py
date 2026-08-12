@@ -358,7 +358,7 @@ async def _handle_downvote(c, message_id: int, reason: str):
     elif reason == "tone_wrong":
         # 改走画像审核队列，不再通过 ctx_entry.add_pending 直接注入对话
         if hasattr(c, "conflict_scanner") and c.conflict_scanner:
-            context_snippet = (row.get("content") or "")[:300] if row else ""
+            context_snippet = (row["content"] or "")[:300] if row else ""
             c.conflict_scanner.enqueue_tone_review(
                 message_id,
                 row["session_id"] if row else "",

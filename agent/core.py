@@ -1142,6 +1142,7 @@ class AgentCore:
             try:
                 row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
                 if row:
+                    row = dict(row)  # sqlite3.Row 不支持 .get()，转 dict 后用默认值访问
                     from soul.mood_manager import _mood_cn
                     await emit("mood_updated", {
                         "ai_mood": row["ai_mood"],
@@ -2601,7 +2602,9 @@ class AgentCore:
             recent_history = self._format_recent_history(sid, limit=5)
 
             state = self.db.query_one(
-                "SELECT * FROM mood_state WHERE id=1") or {}
+                "SELECT * FROM mood_state WHERE id=1")
+            # sqlite3.Row 不支持 .get()，转 dict 后保留默认值访问
+            state = dict(state) if state else {}
             prev_user = state.get("user_mood", "neutral")
             prev_user_i = self.mood._decay(
                 state.get("user_intensity", 0), state.get("user_updated_at"))
@@ -2657,7 +2660,7 @@ class AgentCore:
         min_interval = self.config.get("mood_judge_min_interval_sec", 30)
         row = self.db.query_one(
             "SELECT user_updated_at FROM mood_state WHERE id=1")
-        if row and row.get("user_updated_at"):
+        if row and row["user_updated_at"]:
             try:
                 last_dt = datetime.fromisoformat(row["user_updated_at"])
                 elapsed = (now_cst() - last_dt).total_seconds()
