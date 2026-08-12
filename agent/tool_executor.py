@@ -32,9 +32,16 @@ class ToolExecutor:
                            ) -> dict[str, Any]:
         """执行单个工具，含 pre/post hook。返回 {ok, result, skipped, error}。
         每个工具调用记录独立 Langfuse span（挂当前 trace/span 下），
-        参数/结果统一走 mark_preview 标记（content_type + 原始长度 + 截断标志）。"""
+        参数/结果统一走 mark_preview 标记（content_type + 原始长度 + 截断标志）。
+
+        ask_user 特殊处理：不执行工具逻辑，改为 emit elicitation SSE 并挂起等待。"""
         from observability_langfuse import get_tracer, mark_preview
         import json as _json
+
+        # ---- ask_user 特殊路径 ----
+        if tool_name == "ask_user":
+            return await self._execute_ask_user(params, intent_summary, emit)
+
         _sp = get_tracer().span_start("tool_execute", input={
             "tool": tool_name,
             "intent_summary": intent_summary or "",
@@ -71,6 +78,115 @@ class ToolExecutor:
             "ok": True, "redacted": hit, "injection": inj,
             "result": mark_preview(redacted, content_type="tool_result")})
         return {"ok": True, "result": redacted}
+
+    async def _execute_ask_user(self, params: dict, intent_summary: str = "",
+                                emit=None, session_id: str = "") -> dict[str, Any]:
+        """ask_user 特殊处理：校验 schema → emit elicitation SSE → 挂起等待答案 → 构造 tool_result。"""
+        import json as _json
+        import time as _time
+        from agent.elicitation_schema import validate_ask_user, build_tool_result_error
+        from agent.elicitation_state import ElicitationState, ElicitationStatus
+        from agent.elicitation_state import register as reg_state
+        from observability_langfuse import get_tracer
+
+        tracer = get_tracer()
+        tool_use_id = f"elic_{_time.time_ns()}"
+
+        # 1. Schema 校验
+        valid, errors, payload = validate_ask_user(params, self.config)
+        if not valid:
+            logger.warning("ask_user schema invalid: %s", errors)
+            sp = tracer.span_start("elicitation_schema_invalid", input={
+                "errors": errors,
+                "raw_payload_hash": str(hash(_json.dumps(params, sort_keys=True))),
+            })
+            sp.end(level="WARNING", output={"rejected": True})
+            return build_tool_result_error()
+
+        # 2. 构造 ElicitationState
+        questions_json = _json.dumps(payload["questions"], ensure_ascii=False)
+        reason = payload.get("reason", "")
+        platform = "web"  # TODO: 从上下文推断
+        ttl_minutes = self.config.get("elicitation_web_ttl_minutes", 30)
+
+        state = ElicitationState(
+            id=tool_use_id,
+            session_id=session_id,
+            questions_json=questions_json,
+            status=ElicitationStatus.PENDING,
+            trigger_source="",  # 由调用方设置
+            platform=platform,
+            created_at=_time.time(),
+            expires_at=_time.time() + ttl_minutes * 60,
+        )
+        reg_state(state)
+
+        # 3. Emit elicitation SSE 事件
+        if emit:
+            await emit("elicitation", {
+                "tool_use_id": tool_use_id,
+                "reason": reason,
+                "questions": payload["questions"],
+            })
+
+        # 4. Langfuse span
+        sp = tracer.span_start("elicitation_triggered", input={
+            "tool_use_id": tool_use_id,
+            "trigger_source": state.trigger_source,
+            "questions_count": len(payload["questions"]),
+            "reason": reason,
+            "options": [_json.dumps(q.get("options", [])) for q in payload["questions"]],
+        })
+
+        # 5. 挂起等待
+        wait_timeout = ttl_minutes * 60 + 60  # TTL + 1分钟缓冲区
+        woke = await state.wait(timeout=wait_timeout)
+
+        # 6. 恢复后处理
+        if not woke or state.is_expired:
+            sp.end(output={"resolution": "expired", "wait_ms": int(
+                (_time.time() - state.created_at) * 1000)})
+            from agent.elicitation_state import unregister
+            unregister(tool_use_id)
+            return {"ok": False, "error": "elicitation expired", "result": ""}
+
+        # 构造 tool_result
+        if state.status == ElicitationStatus.ANSWERED_ALL:
+            content = _json.loads(state.answers_json or "[]")
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+            }
+            sp.end(output={
+                "resolution": "answered_all",
+                "answered_count": len(content),
+                "custom_input_count": sum(1 for a in content if a.get("type") == "custom"),
+                "resolved_in_ms": int((state.resolved_at - state.created_at) * 1000) if state.resolved_at else 0,
+            })
+        elif state.status == ElicitationStatus.CLOSED:
+            content = _json.loads(state.answers_json or "[]")
+            content.append({"__closed_by_user__": True,
+                           "answered_partial": bool(content)})
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+            }
+            sp = tracer.span_start("elicitation_closed", input={
+                "tool_use_id": tool_use_id,
+                "answered_partial": bool(content),
+                "close_reason": state.close_reason,
+            })
+            sp.end(output={"close_reason": state.close_reason})
+        else:
+            tool_result = {"type": "tool_result",
+                           "tool_use_id": tool_use_id, "content": []}
+
+        from agent.elicitation_state import unregister
+        unregister(tool_use_id)
+
+        return {"ok": True, "result": _json.dumps(tool_result, ensure_ascii=False)}
 
     async def _run_with_empty_retry(self, tool, params) -> tuple[Any, str | None]:
         result = None

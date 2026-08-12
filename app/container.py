@@ -561,6 +561,10 @@ class AppContainer:
         s.register_task("profile_review_scan", "画像审核队列维护",
                         lambda: self.profile_review_scanner.daily_scan(),
                         "每天 04:30")
+        # 追问过期扫描：每 5 分钟清理过期 elicitation
+        s.register_task("elicit_expire", "追问过期扫描",
+                        lambda: self._elicit_expire_scan(),
+                        "每 5 分钟")
 
     async def _profile_rebuild_with_scan(self) -> bool:
         """画像重建 + 冲突检测（整合版）。
@@ -585,6 +589,15 @@ class AppContainer:
             except Exception:
                 logger.warning("画像冲突检测失败", exc_info=True)
         return True
+
+    def _elicit_expire_scan(self) -> None:
+        """扫描过期的 pending elicitation，更新状态为 expired。"""
+        import time
+        now = int(time.time())
+        self.db.execute(
+            "UPDATE elicitations SET status='expired', resolved_at=? "
+            "WHERE status='pending' AND expires_at < ?",
+            (now, now))
 
     # ---- 生命周期 ----
     def _ensure_local_embedding_provider(self) -> None:

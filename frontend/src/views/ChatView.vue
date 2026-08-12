@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { marked } from 'marked'
 import mermaid from 'mermaid'
 import { api } from '@/api/client'
@@ -10,6 +10,7 @@ import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
 import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import HandoffAttachment from '@/components/HandoffAttachment.vue'
+import ElicitationCard from '@/components/ElicitationCard.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { formatRelative as formatTime, formatTimeFull, fmtSize, nowLocalIso } from '@/utils/format'
 import { confidenceLabel, lifecycleLabel, TOAST_ONLY_NOTIF } from '@/utils/enumLabel'
@@ -71,7 +72,8 @@ const degraded = ref(false)
 const scroller = ref(null)
 const ta = ref(null)          // 输入框，用于自适应高度
 
-// 阈值状态（会话上下文管理方案 v2）
+// 追问状态（elicitation）
+const activeElicitation = ref(null)  // { toolUseId, questions, reason } | null
 const thresholdBreached = ref(null)  // null / 'soft' / 'hard'
 const softToastShown = ref(false)
 // handoff 附件状态
@@ -119,6 +121,23 @@ async function switchModel(pid) {
   // 仅切换对话模型，不动 agent 模型分配（设置页的精细分配不被覆盖）
   await api.put('/settings/model-assignment', { chat_model: pid })
   toast.push('success', '已切换，下一轮对话生效')
+}
+
+// ---- 思考模式用户指定：quick=快速回复（默认）/ deep=深度思考；点击胶囊弹窗枚举选择 ----
+const thinkMode = ref('quick')
+const thinkMenuOpen = ref(false)
+const THINK_MODES = [
+  { value: 'quick', label: '快速回复' },
+  { value: 'deep', label: '深度思考' },
+]
+const thinkModeLabel = computed(() =>
+  (THINK_MODES.find(m => m.value === thinkMode.value) || THINK_MODES[0]).label)
+function pickThinkMode(v) { thinkMode.value = v; thinkMenuOpen.value = false }
+// 点击面板外部关闭思考模式菜单（菜单与胶囊按钮自身的事件已 stop）
+function onDocClickThink(e) {
+  if (!thinkMenuOpen.value) return
+  if (e.target.closest('.think-mode-menu') || e.target.closest('.think-mode-btn')) return
+  thinkMenuOpen.value = false
 }
 
 // 仅提示类系统通知：Web 端已在导入时用 toast 实时反馈，无需在对话流中留存横幅（含历史）
@@ -398,6 +417,13 @@ async function send() {
     backendMsg = blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
   }
   if (!backendMsg && imgs.length) backendMsg = '请看图并回应。'
+  // 追问上下文：有活跃 elicitation 时先关闭再发送
+  if (activeElicitation.value) {
+    const toolUseId = activeElicitation.value.toolUseId
+    activeElicitation.value = null
+    try { await api.post(`/chat/elicitations/${toolUseId}/close`, { answers: [] }) } catch {}
+    await new Promise(r => setTimeout(r, 100))
+  }
   // 气泡附件：保留粘贴全文与原始 File，供发送后点击弹窗回看/下载
   const bubbleAtts = attachments.value.filter(a => !a.isImage).map(a => ({
     name: a.name, pasted: !!a.pasted,
@@ -426,6 +452,7 @@ async function send() {
     images: imgs.length ? imgs : undefined,
     location: geoEnabled.value ? cachedLocation() : undefined,
     handoffPath: hPath,
+    thinkMode: thinkMode.value,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: () => { toast.push('error', '生成失败'); finishStream() },
   })
@@ -447,7 +474,15 @@ function handleEvent(ev, data) {
   else if (ev === 'tool_visual') { streamVisuals.value.push(data); maybeScroll() }
   else if (ev === 'turn_completed') {
     finishStream(data.message_id)
+    // 清理追问状态
+    activeElicitation.value = null
     if (data.threshold) handleThreshold(data.threshold)
+  }
+  else if (ev === 'elicitation') {
+    activeElicitation.value = { toolUseId: data.tool_use_id, questions: data.questions, reason: data.reason }
+  }
+  else if (ev === 'elicitation_status') {
+    if (data.status === 'done' || data.status === 'closed' || data.status === 'expired') activeElicitation.value = null
   }
   else if (ev === 'error') { toast.push('error', data.message || '出错'); finishStream() }
   // handoff 摘要就绪（会话上下文管理方案 v2）
@@ -600,6 +635,7 @@ async function regenerate(msg) {
     sessionId: sessStore.currentSid, message: userMsg.content,
     regenerateMessageId: msg.id,
     location: geoEnabled.value ? cachedLocation() : undefined,
+    thinkMode: thinkMode.value,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: () => { toast.push('error', '生成失败'); finishStream() },
   })
@@ -776,6 +812,7 @@ onMounted(() => {
   if (sessStore.currentSid && !messages.value.length) openSession(sessStore.currentSid)
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)
+  document.addEventListener('click', onDocClickThink)
 })
 // 浏览器定位（方案 A）：开关开启时获取一次并缓存，发消息时携带城市名
 const geoEnabled = ref(false)
@@ -851,6 +888,7 @@ onUnmounted(() => {
   window.removeEventListener('sp-open-session', onOpenSession)
   document.removeEventListener('click', handleMermaidActions)
   document.removeEventListener('click', onDocClickEmoji)
+  document.removeEventListener('click', onDocClickThink)
 })
 </script>
 
@@ -964,6 +1002,13 @@ onUnmounted(() => {
               </div>
               <!-- 图形组件 -->
               <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv' + vi" :type="v.type" :data="v.data" />
+              <!-- 追问卡片（elicitation） -->
+              <ElicitationCard v-if="activeElicitation"
+                :tool-use-id="activeElicitation.toolUseId"
+                :reason="activeElicitation.reason"
+                :questions="activeElicitation.questions"
+                @resolved="activeElicitation = null"
+                @close="activeElicitation = null" />
               <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body, streamVisuals)">
               </div>
               <div v-if="streamText && webSrc(streamText).count" class="think-panel" style="margin-top:8px">
@@ -1044,6 +1089,22 @@ onUnmounted(() => {
               <i class="ti ti-mood-smile emoji-toggle"
                 style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="表情" @mousedown.prevent
                 @click.stop="emojiOpen = !emojiOpen"></i>
+              <!-- 思考模式选择器：用户指定深度思考/快速回复（默认快速回复，点击外部关闭） -->
+              <div class="think-mode-wrap">
+                <button type="button" class="think-mode-btn" :title="'思考模式：' + thinkModeLabel"
+                  @mousedown.prevent @click.stop="thinkMenuOpen = !thinkMenuOpen">
+                  <i class="ti" :class="thinkMode === 'deep' ? 'ti-bulb' : 'ti-zap'"></i>
+                  <span>{{ thinkModeLabel }}</span>
+                  <i class="ti think-mode-arrow" :class="thinkMenuOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+                </button>
+                <div v-if="thinkMenuOpen" class="think-mode-menu" @click.stop>
+                  <button v-for="opt in THINK_MODES" :key="opt.value" type="button" class="think-mode-opt"
+                    :class="{ active: thinkMode === opt.value }" @click="pickThinkMode(opt.value)">
+                    <span>{{ opt.label }}</span>
+                    <i v-if="thinkMode === opt.value" class="ti ti-check"></i>
+                  </button>
+                </div>
+              </div>
               <!-- option 不允许子元素：状态色直接作用于选项文字 -->
               <select v-if="providers.length" v-model="chatModelId" @change="switchModel(chatModelId)"
                 style="padding:4px 8px;font-size:var(--fs-sm);max-width:140px">

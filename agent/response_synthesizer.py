@@ -43,10 +43,12 @@ TOOL_RESULT_MAX_CHARS = 30000
 def build_response_prompt(user_message: str, tool_results: list[dict],
                           memories: list[dict],
                           depth_level: str = "normal",
-                          conversation_context: list[dict] | None = None) -> list[dict]:
+                          conversation_context: list[dict] | None = None,
+                          next_step_seeds: list | None = None) -> list[dict]:
     """合成 prompt：把工具结果 + 命中记忆 + 会话上下文交给 LLM，要求输出 citations。
     depth_level（brief/normal/detailed）：场景化篇幅档位，normal 为默认不额外注入。
-    conversation_context：FTS5 双通道检索命中的对话历史原文。"""
+    conversation_context：FTS5 双通道检索命中的对话历史原文。
+    next_step_seeds：下一步建议候选种子列表（非空时注入建议指令段）。"""
     ctx_parts = []
     if memories:
         mem_txt = "\n".join(
@@ -101,6 +103,13 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
         ctx_parts.append(
             PROMPTS.load_raw("agent/prompts/response_depth")
             + f"\n\n本轮判定档位：{depth_level}，必须按该档位控制回复篇幅。")
+    # 下一步建议种子注入：有候选则追加建议指令段（doc_only/brief 场景由调用方保证 seeds 为空）
+    if next_step_seeds:
+        seeds_text = "\n".join(
+            f"- [{s.kind}] {s.text}（锚点：{s.anchor_ref}）"
+            for s in next_step_seeds)
+        ctx_parts.append(PROMPTS.render(
+            "agent/prompts/next_step_suggest", seeds_text=seeds_text))
     system = (PROMPTS.load_raw("agent/prompts/response_synth")
               + "\n\n" + "\n\n".join(ctx_parts))
     return [{"role": "system", "content": system},

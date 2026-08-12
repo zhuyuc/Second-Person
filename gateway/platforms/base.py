@@ -86,6 +86,12 @@ class BasePlatformAdapter:
                 chat_id, f"图片较多，仅处理前 {MAX_IMAGES_PER_MSG} 张")
         # 映射 session
         sid = self._resolve_session(platform_user_id)
+        # 追问上下文：有 pending elicitation 时，解析为答案而非路由到 Agent
+        if sid:
+            elicit_answer = await self._check_elicit_and_parse(sid, text)
+            if elicit_answer is not None:
+                await self._deliver_elicit_answer(sid, chat_id, elicit_answer)
+                return
         # /new 命令
         if text.strip() == "/new":
             sid = self.sessions.create_session(channel=self.platform_type)
@@ -212,6 +218,44 @@ class BasePlatformAdapter:
             "session_id,created_at) VALUES(?,?,?,?)",
             (self.platform_type, platform_user_id, sid,
              now_cst().isoformat(timespec="seconds")))
+
+    # ---- 追问上下文（elicitation）------------------------------------------
+
+    async def _check_elicit_and_parse(self, sid: str, text: str) -> dict | None:
+        """检查是否有 pending elicitation，有则解析答案。"""
+        import json as _json
+        row = self.db.query_one(
+            "SELECT id, questions_json FROM elicitations "
+            "WHERE session_id=? AND status='pending' LIMIT 1", (sid,))
+        if not row:
+            return None
+        questions = _json.loads(row["questions_json"])
+        from gateway.elicitation_parser import parse_im_elicitation
+        parsed = parse_im_elicitation(text, questions)
+        parsed["tool_use_id"] = row["id"]
+        return parsed
+
+    async def _deliver_elicit_answer(self, sid: str, chat_id: str,
+                                     parsed: dict) -> None:
+        """提交 IM 追问答案并触发后续回复。"""
+        import json as _json
+        import time as _time
+        now = int(_time.time())
+        if parsed["action"] == "close":
+            self.db.execute(
+                "UPDATE elicitations SET status='closed', close_reason='user_x', "
+                "resolved_at=? WHERE id=?", (now, parsed["tool_use_id"]))
+            await self.send_message(chat_id, "已关闭追问")
+        else:
+            answers = parsed["answers"]
+            from agent.elicitation_state import get as get_state
+            state = get_state(parsed["tool_use_id"])
+            if state and not state.is_resolved:
+                state.answer(_json.dumps(answers, ensure_ascii=False))
+            self.db.execute(
+                "UPDATE elicitations SET status='answered_all', answers_json=?, "
+                "resolved_at=? WHERE id=?",
+                (_json.dumps(answers, ensure_ascii=False), now, parsed["tool_use_id"]))
 
     def _record_failure(self, reason: str) -> None:
         self._failures += 1

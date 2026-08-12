@@ -90,8 +90,8 @@ def create_app(data_dir: str | Path) -> FastAPI:
             "trace_id": tid, "details": None})
 
     # 路由注册
-    from .routes import chat, memory, settings, soul, misc
-    for mod in (chat, memory, settings, soul, misc):
+    from .routes import chat, memory, settings, soul, misc, elicitations
+    for mod in (chat, memory, settings, soul, misc, elicitations):
         app.include_router(mod.router, prefix="/api")
 
     # 对话图片（用户消息携带的图片持久化目录，历史消息回看）

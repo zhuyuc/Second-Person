@@ -24,6 +24,7 @@ class DegradationComponent(str, Enum):
     CONVERGENCE_LOOP = "convergence_loop"
     FORMAT_INFER = "format_infer"
     TOOL_EXECUTOR = "tool_executor"
+    ELICITATION = "elicitation"
 
 
 @dataclass

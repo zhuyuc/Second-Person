@@ -47,6 +47,7 @@ from .strategy_engine import (
     StrategyInputs,
 )
 from .meta_cognitive import CognitiveSkeleton, MetaCognitiveProtocol
+from .next_step import NextStepPipeline, parse_suggestion, strip_suggestion_from_partial
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
@@ -222,6 +223,8 @@ class AgentCore:
         # 元认知协议（v3 §六）：高复杂度问题的思考骨架，失败跳过不阻塞
         self.metacog = MetaCognitiveProtocol(
             llm_client, lambda: self.providers.snapshot_for("agent"))
+        # 下一步建议模块：种子提取 + 门槛过滤 + 分隔符解析
+        self.next_step = NextStepPipeline(config)
         self.compressor = Compressor(
             llm_client, lambda: self.providers.snapshot_for("agent"),
             lambda: self.providers.snapshot_for("chat"))
@@ -237,7 +240,9 @@ class AgentCore:
                   images: list[str] | None = None,
                   regenerate: bool = False,
                   location: str | None = None,
-                  regenerate_message_id: str | None = None) -> AsyncIterator[dict]:
+                  regenerate_message_id: str | None = None,
+                  handoff_path: str | None = None,
+                  think_mode: str = "auto") -> AsyncIterator[dict]:
         limit = self.config.get("session_queue_limit", 3)
         if self._session_queue[session_id] >= limit:
             yield {"event": "error", "data": {"code": 429, "message": "会话繁忙，请稍后再试"}}
@@ -260,7 +265,9 @@ class AgentCore:
                     await asyncio.wait_for(
                         self._pipeline(session_id, message, emit, images,
                                        regenerate, location,
-                                       regenerate_message_id),
+                                       regenerate_message_id,
+                                       handoff_path=handoff_path,
+                                       think_mode=think_mode),
                         timeout=600)
                 except asyncio.TimeoutError:
                     logger.warning("请求超时（600s）：session=%s", session_id)
@@ -287,7 +294,9 @@ class AgentCore:
 
     async def _pipeline(self, sid: str, message: str, emit, images=None,
                         regenerate=False, location=None,
-                        regenerate_message_id: str | None = None) -> None:
+                        regenerate_message_id: str | None = None,
+                        handoff_path: str | None = None,
+                        think_mode: str = "auto") -> None:
         """包一层 Langfuse trace，内部实现不变（步骤 span 在 _pipeline_impl 中）。"""
         tracer = get_tracer()
         trace = tracer.trace_start(
@@ -296,10 +305,13 @@ class AgentCore:
                       "images": len(images) if images else 0,
                       "regenerate": regenerate,
                       "regenerate_message_id": regenerate_message_id,
-                      "location": location})
+                      "location": location,
+                      "handoff_path": handoff_path,
+                      "think_mode": think_mode})
         try:
             await self._pipeline_impl(sid, message, emit, trace, images,
-                                      regenerate, location)
+                                      regenerate, location,
+                                      think_mode=think_mode)
         except Exception as e:  # noqa: BLE001
             trace.update(metadata={"internal_trace_id": get_trace_id(),
                                    "images": len(images) if images else 0,
@@ -310,7 +322,8 @@ class AgentCore:
             trace.end()
 
     async def _pipeline_impl(self, sid: str, message: str, emit, trace,
-                             images=None, regenerate=False, location=None) -> None:
+                             images=None, regenerate=False, location=None,
+                             think_mode: str = "auto") -> None:
         tracer = get_tracer()
         onboarding = not self.config.get_raw("onboarding_completed", False)
         _start_time = time.monotonic()
@@ -430,12 +443,27 @@ class AgentCore:
                     "reason": quick_result.complexity_reason,
                     "complexity_hint": quick_result.complexity_hint,
                     "consistency_corrected": quick_result.consistency_corrected,
+                    "think_mode": think_mode,
                 })
-                # 思考过程外露：快速预判结论
+                # 用户指定思考模式优先（Web 端）：覆盖模型自我决策，
+                # 下游收敛环/篇幅档位自动跟随有效值；
+                # auto（IM 等无 UI 渠道）保留模型判断
+                if think_mode == "deep" and not quick_result.needs_convergence:
+                    quick_result.needs_convergence = True
+                    quick_result.complexity_reason = "用户指定深度思考"
+                elif think_mode == "quick" and quick_result.needs_convergence:
+                    quick_result.needs_convergence = False
+                    quick_result.complexity_reason = "用户指定快速回复"
+                # 思考过程外露：快速预判结论（用户指定时标注来源）
+                if think_mode == "deep":
+                    _mode_tail = "（用户指定深度思考，进入收敛环）"
+                elif think_mode == "quick":
+                    _mode_tail = "（用户指定快速回复，快速通道）"
+                else:
+                    _mode_tail = ("（需深度收敛：" + quick_result.complexity_reason + "）"
+                                  if quick_result.needs_convergence else "（简单，快速通道）")
                 await emit("thinking_delta", {
-                    "text": f"【快速预判】{quick_result.intent_hypothesis}"
-                    f"{'（需深度收敛：' + quick_result.complexity_reason + '）'
-                       if quick_result.needs_convergence else '（简单，快速通道）'}\n"})
+                    "text": f"【快速预判】{quick_result.intent_hypothesis}{_mode_tail}\n"})
             except Exception:
                 _sp.end(level="ERROR")
                 raise
@@ -462,15 +490,24 @@ class AgentCore:
                 sid, message, quick_result, history, tracer, emit,
                 max_rounds=max_rounds)
             if understanding is None:
-                _conv_strategy_task.cancel()
-                return  # 收敛失败（已 emit error），中止
-            # 从理解包提取 intents 给下游，跳过原有检索+意图流程
-            intents = [understanding.rich_intent]
-            memories = conv_memories
-            loaded_ids = [m["id"] for m in conv_memories]
-            _convergence_done = True
-            # 思考过程外露：收敛后的丰满意图
-            await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
+                # 检查是否因 elicitation 而返回 None（缺口可枚举 → 走追问分支）
+                if self._elicitation_seed is not None:
+                    # 不从这里 abort：交给 _pipeline_impl 的 elicitation 判定处理
+                    intents = []
+                    memories = []
+                    _convergence_done = True
+                    strategy = await _conv_strategy_task if _conv_strategy_task and not _conv_strategy_task.done() else None
+                else:
+                    _conv_strategy_task.cancel()
+                    return  # 收敛失败（已 emit error），中止
+            else:
+                # 从理解包提取 intents 给下游，跳过原有检索+意图流程
+                intents = [understanding.rich_intent]
+                memories = conv_memories
+                loaded_ids = [m["id"] for m in conv_memories]
+                _convergence_done = True
+                # 思考过程外露：收敛后的丰满意图
+                await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
             # 收敛通道策略结果：并行任务此时通常已完成，零等待取回
             try:
                 strategy = await _conv_strategy_task
@@ -534,6 +571,10 @@ class AgentCore:
                 raise
 
         tool_names = [s.name for s in self.registry.all_specs()]
+
+        # 用于收敛环内向 elicitation 传递 seed 的 nonlocal 变量
+        self._elicitation_seed = None       # 实例变量：收敛环 → try_elicitation
+        self._elicitation_from_gap = False
 
         async def _run_intent():
             """第 4 步 意图识别（读完整消息：附件/长文本可能本身就是意图载体，
@@ -615,12 +656,28 @@ class AgentCore:
         # 触发唯一条件：complexity_score≥7 且 intent_type∉排除集 且开关开启；
         # fallback 策略不触发（避免低质量决策叠加高成本环节）
         skeleton: CognitiveSkeleton | None = None
+        next_step_seeds: list = []
         if (not onboarding and strategy is not None and intents
                 and StrategyEngine.should_trigger_meta(
                     strategy, getattr(intents[0], "intent_type", "chat"),
                     self.config.get("meta_cognitive_enabled", True))):
             skeleton = await self._run_meta_cognitive(
                 sid, message, strategy, memories, tracer, emit)
+
+        # ---- 下一步建议：种子提取 + 门槛过滤 ----
+        if not onboarding and skeleton is not None \
+                and self.next_step.enabled:
+            _ns_sp = tracer.span_start("next_step_pipeline", input={
+                "skeleton_available": True})
+            try:
+                next_step_seeds = self.next_step.extract_seeds(skeleton)
+                # 门槛过滤延迟到响应合成前（需 depth_level / doc_only / emotion）
+            except Exception:  # noqa: BLE001 - 零阻塞
+                logger.warning("种子提取失败", exc_info=True)
+                next_step_seeds = []
+            _ns_sp.end(output={"seeds_count": len(next_step_seeds),
+                               "seeds": [{"kind": s.kind, "text": s.text[:60]}
+                                         for s in next_step_seeds]})
 
         # mimo 内置联网搜索：query_external 意图且 chat 模型为 mimo 且开关开启时，
         # 由模型端执行搜索（博查源，带结构化引用），跳过自研 web_search；
@@ -662,9 +719,36 @@ class AgentCore:
                     elif not it.tools_needed:
                         it.tools_needed = ["memory_save"]
 
+        # ---- 追问式补充信息：elicitation 判定与触发（产品方案 §05/06） ----
+        # 触发条件：(未 onboarding) AND (策略已产出) AND (置信度<阈值 OR gap检测到缺口)
+        elicitation_triggered = False
+        if (not onboarding and strategy is not None
+                and (intents or self._elicitation_from_gap)
+                and self.config.get("elicitation_confidence_threshold", -1) > 0):
+            _elicit_sp = tracer.span_start("elicitation_check", input={
+                "session_id": sid,
+                "confidence": getattr(intents[0], "confidence", 1.0) if intents else 1.0,
+                "intent_type": getattr(intents[0], "intent_type", "") if intents else "",
+                "gap_detected": self._elicitation_from_gap,
+            })
+            _elicitation = await self._try_elicitation(
+                sid, message, intents, strategy,
+                self.config.get("elicitation_confidence_threshold", 0.6),
+                emit,
+                gap_seed=self._elicitation_seed)
+            _elicit_sp.end(output={
+                "triggered": _elicitation is not None,
+                "source": "gap_detect" if self._elicitation_from_gap and _elicitation is not None else "confidence",
+            })
+            if _elicitation is not None:
+                # ask_user 已触发并完成：将 tool_result 注入 tool_results，跳过正常工具执行
+                tool_results = [_elicitation]
+                elicitation_triggered = True
+
         # 第 5 步 流程编排
         shared = SharedState()
-        tool_results: list[dict] = []
+        if not elicitation_triggered:
+            tool_results: list[dict] = []
         skill_text = ""
         if not onboarding:
             # 请求级技能按需追加（第 4 步意图识别后）：命中的活跃技能加载 Level1 SKILL.md
@@ -690,43 +774,44 @@ class AgentCore:
                 logger.warning("技能按需追加失败", exc_info=True)
                 if _skill_sp is not None:
                     _skill_sp.end(level="ERROR", status_message=str(e)[:500])
-            dag = build_dag(list(intents), set(tool_names))
-            # DAG 环检测降级：向用户说明（thinking_delta 外露 + prompt 注入）
-            if dag.degraded:
-                await emit("thinking_delta",
-                           {"text": f"【流程编排】{dag.reason}\n"})
-                skill_text += f"\n（注意：{dag.reason}，本轮已降级为直接回答）"
-            # 第 6 步 工具执行
-            _sp = tracer.span_start("tool_execution", input={
-                "intent_count": len(intents),
-                "intents": [
-                    {"type": getattr(i, "intent_type", ""),
-                     "summary": getattr(i, "intent_summary", ""),
-                     "tools": getattr(i, "tools_needed", [])}
-                    for i in intents
-                ],
-                "dag_order": [list(layer) for layer in dag.order] if hasattr(dag, "order") else [],
-                "all_tool_names": tool_names,
-            })
-            try:
-                tool_results = await self._execute_tools(intents, dag, shared, message, emit, sid)
-                _sp.end(output={
-                    "count": len(tool_results),
-                    "tool_results": [
-                        {"tool": r.get("tool"), "ok": r.get("ok"),
-                         "error": r.get("error"),
-                         **mark_preview(r.get("result"),
-                                        content_type="tool_result")}
-                        for r in tool_results
+            if not elicitation_triggered:
+                dag = build_dag(list(intents), set(tool_names))
+                # DAG 环检测降级：向用户说明（thinking_delta 外露 + prompt 注入）
+                if dag.degraded:
+                    await emit("thinking_delta",
+                               {"text": f"【流程编排】{dag.reason}\n"})
+                    skill_text += f"\n（注意：{dag.reason}，本轮已降级为直接回答）"
+                # 第 6 步 工具执行
+                _sp = tracer.span_start("tool_execution", input={
+                    "intent_count": len(intents),
+                    "intents": [
+                        {"type": getattr(i, "intent_type", ""),
+                         "summary": getattr(i, "intent_summary", ""),
+                         "tools": getattr(i, "tools_needed", [])}
+                        for i in intents
                     ],
-                    "shared_keys": sorted(shared._data.keys()),
-                    "deferred_writes": len(shared.deferred_writes),
-                    "deferred_docs": len(shared.deferred_docs),
+                    "dag_order": [list(layer) for layer in dag.order] if hasattr(dag, "order") else [],
+                    "all_tool_names": tool_names,
                 })
-            except BaseException:
-                # BaseException：手动停止（CancelledError）时 span 同样收尾，避免悬空 trace
-                _sp.end(level="ERROR")
-                raise
+                try:
+                    tool_results = await self._execute_tools(intents, dag, shared, message, emit, sid)
+                    _sp.end(output={
+                        "count": len(tool_results),
+                        "tool_results": [
+                            {"tool": r.get("tool"), "ok": r.get("ok"),
+                             "error": r.get("error"),
+                             **mark_preview(r.get("result"),
+                                            content_type="tool_result")}
+                            for r in tool_results
+                        ],
+                        "shared_keys": sorted(shared._data.keys()),
+                        "deferred_writes": len(shared.deferred_writes),
+                        "deferred_docs": len(shared.deferred_docs),
+                    })
+                except BaseException:
+                    # BaseException：手动停止（CancelledError）时 span 同样收尾，避免悬空 trace
+                    _sp.end(level="ERROR")
+                    raise
 
         # 第 7 步 响应合成与输出（流式）
         assistant_text, citations = "", []
@@ -766,6 +851,7 @@ class AgentCore:
                                       content_type="cognitive_skeleton")
                          if skeleton else None),
         })
+        _next_step_shown = None  # 建议句落盘数据（模型不可用/熔断等分支安全默认值）
         try:
             if not chat_configured and not onboarding:
                 # 态三：模型不可用 → 记录 decision_reason
@@ -788,12 +874,32 @@ class AgentCore:
                 if self.config.get("response_depth_enabled", True):
                     depth_level = self._decide_depth_level(
                         message, quick_result, intents, memories, tool_results)
+                # 门槛过滤（需 depth_level + doc_only + emotion 就绪）
+                if next_step_seeds:
+                    _emotion = self._read_current_emotion()
+                    next_step_seeds = self.next_step.filter_gates(
+                        next_step_seeds, emotion=_emotion, db=self.db,
+                        session_id=sid, depth_level=depth_level,
+                        doc_only=doc_only,
+                        elicitation_active=elicitation_triggered)
                 prompt = self._build_final_prompt(system_prompt, history, message,
                                                   tool_results, memories, onboarding,
                                                   skill_text, preload_text,
                                                   depth_level=depth_level,
                                                   strategy=strategy,
-                                                  skeleton=skeleton)
+                                                  skeleton=skeleton,
+                                                  next_step_seeds=next_step_seeds)
+                # 关闭追问后新消息：注入临时决策指令
+                if not elicitation_triggered:
+                    row = self.db.query_one(
+                        "SELECT id, status FROM elicitations "
+                        "WHERE session_id=? AND status='closed' AND close_reason='user_x' "
+                        "ORDER BY resolved_at DESC LIMIT 1", (sid,))
+                    if row:
+                        supplement = PROMPTS.load_raw(
+                            "agent/prompts/elicitation_supplement")
+                        prompt[0]["content"] = (prompt[0]["content"]
+                                                + "\n\n" + supplement)
                 valid_ids = {m["id"] for m in memories}
 
                 # 推理模型（DeepSeek 等）的原生思考过程同样以 thinking_delta 外露
@@ -864,6 +970,11 @@ class AgentCore:
                     doc_only = False
                     shared.deferred_docs.clear()
                 raw = "".join(buf)
+                # 建议句解析：从 LLM 输出中分离正文与分隔符后的建议句
+                raw, _suggestion_text = parse_suggestion(raw)
+                _next_step_shown = None
+                if _suggestion_text:
+                    _next_step_shown = {"text": _suggestion_text}
                 assistant_text, citations = rs.extract_citations(
                     raw, valid_ids)
                 # low 待确认声明：用户在本轮明确确认/否认早前推断 → 升级/记录
@@ -996,7 +1107,8 @@ class AgentCore:
                                                       if strategy else None),
                                                   skeleton_snapshot=(
                                                       skeleton.to_dict()
-                                                      if skeleton else None))
+                                                      if skeleton else None),
+                                                  next_step_shown=_next_step_shown)
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
                                                      message, onboarding, user_msg_id=user_msg_id, intents=intents)
             _sp.end(output={"message_id": msg_id, "cited": cited_ids,
@@ -1064,6 +1176,8 @@ class AgentCore:
         try:
             # 清理可能已生成的 citations 尾部声明（中断场景不做引用登记）
             partial, _ = rs.extract_citations(partial, set())
+            # 清理可能已产出的建议句分隔符（中断场景建议句不完整，剥离）
+            partial = strip_suggestion_from_partial(partial)
             self.sessions.append_message(
                 sid, "assistant",
                 partial + "\n\n> ⚠️ 本回复未完成：生成已中断，以上为已生成部分",
@@ -1261,6 +1375,68 @@ class AgentCore:
             if url and fname and url not in (text or ""):
                 parts.append(f"\n\n[{fname}]({url})")
         return "".join(parts)
+
+    async def _try_elicitation(self, sid, message, intents, strategy,
+                               confidence_threshold, emit, gap_seed=None) -> dict | None:
+        """尝试触发追问式补充信息。
+
+        返回 None = 不触发追问（继续正常流程）
+        返回 dict = ask_user 已触发并完成，含 tool_result 格式的结果
+
+        gap_seed: 从收敛环 gap_detect 传入的已判定可枚举的 seed（跳过 clarification_router）
+        """
+        # 优先使用 gap 检测出的 seed（已通过 clarification_router 判定）
+        if gap_seed is not None:
+            ask_params = {
+                "questions": gap_seed["questions"],
+                "reason": gap_seed.get("reason", ""),
+            }
+            result = await self.executor._execute_ask_user(ask_params, "gap_detect", emit, session_id=sid)
+            if result.get("ok"):
+                return {"tool": "ask_user", "ok": True, "result": result.get("result", "")}
+            return None
+
+        # 门槛：意图置信度低于阈值 或 走诚实澄清路径
+        first_intent = intents[0] if intents else None
+        if first_intent is None:
+            return None
+        confidence = getattr(first_intent, "confidence", 1.0) or 1.0
+        if confidence >= confidence_threshold:
+            return None
+
+        # 检查会话级上限和关闭标记
+        row = self.db.query_one(
+            "SELECT COUNT(*) as cnt FROM elicitations WHERE session_id=? AND status IN ('pending','answered_all','closed')",
+            (sid,))
+        max_per = self.config.get("elicitation_max_per_session", 3)
+        if row and row["cnt"] >= max_per:
+            return None
+        row2 = self.db.query_one(
+            "SELECT elicitation_blocked FROM sessions WHERE session_id=?", (sid,))
+        if row2 and row2["elicitation_blocked"]:
+            return None
+
+        # 调用 clarification_router 判定可枚举性
+        gap = getattr(first_intent, "intent_summary", "") or ""
+        seed = await self.strategy_engine.clarification_router(
+            sid, message, gap,
+            {k: self.config.get(k) for k in (
+                "elicitation_max_questions", "elicitation_max_per_session",
+                "elicitation_web_ttl_minutes", "elicitation_im_ttl_hours",
+            ) if self.config.get(k) is not None})
+        if seed is None:
+            return None
+
+        # 组装 ask_user 入参并执行（通过 tool_executor 的 _execute_ask_user 暂停/恢复）
+        ask_params = {
+            "questions": seed["questions"],
+            "reason": seed.get("reason", ""),
+        }
+        result = await self.executor._execute_ask_user(ask_params, "elicitation", emit, session_id=sid)
+        if not result.get("ok"):
+            return None
+        # 返回 tool_result 格式（与正常工具执行一致的格式）
+        return {"tool": "ask_user", "ok": True, "result": result.get("result", "")}
 
     async def _execute_tools(self, intents, dag, shared, message, emit, sid=None) -> list[dict]:
         tool_results: list[dict] = []
@@ -1564,8 +1740,22 @@ class AgentCore:
                 })
                 return current_understanding, all_mems
 
-            # 缺口无法消解 → 诚实澄清（态二）
+            # 缺口无法消解 → 先尝试追问（elicitation），不可枚举则诚实澄清（态二）
             if gap_result.unresolvable:
+                # 尝试将缺口转为结构化追问
+                seed = await self.strategy_engine.clarification_router(
+                    sid, message,
+                    "；".join(g.get("description", "")
+                             for g in gap_result.gaps[:2]),
+                    {k: self.config.get(k) for k in (
+                        "elicitation_max_questions",
+                    ) if self.config.get(k) is not None})
+                if seed is not None:
+                    # 可枚举：通过实例变量传递给外部 _try_elicitation
+                    self._elicitation_seed = seed
+                    self._elicitation_from_gap = True
+                    return None, []
+                # 不可枚举：走诚实澄清
                 _decision = decide_degradation(
                     failed_step="gap_detect",
                     error="理解缺口无法在系统内消解",
@@ -1575,7 +1765,6 @@ class AgentCore:
                 _decision.message = "；".join(
                     g.get("description", "") for g in gap_result.gaps[:2])
                 tracer.record_degradation(_decision)
-                # 生成诚实澄清回复
                 await self._emit_honest_clarify(
                     emit, gap_result, sid)
                 return None, []
@@ -2271,7 +2460,8 @@ class AgentCore:
                             memories, onboarding, skill_text="", preload_text="",
                             depth_level: str = "normal",
                             strategy: ResponseStrategy | None = None,
-                            skeleton: CognitiveSkeleton | None = None):
+                            skeleton: CognitiveSkeleton | None = None,
+                            next_step_seeds: list | None = None):
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
@@ -2281,7 +2471,8 @@ class AgentCore:
         if any(r.get("deferred") for r in (tool_results or [])):
             system_prompt = _strip_mood_section(system_prompt)
         synth = rs.build_response_prompt(
-            message, tool_results, memories, depth_level=depth_level)
+            message, tool_results, memories, depth_level=depth_level,
+            next_step_seeds=next_step_seeds)
         # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能
         merged_system = system_prompt + "\n\n" + synth[0]["content"]
         # 响应策略硬约束注入（v3 §六）：策略是逐轮决策，优先于长期风格基线

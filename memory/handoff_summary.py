@@ -92,6 +92,16 @@ class HandoffSummaryGenerator:
                         output={"final_summary_tokens": summary_tokens})
                 except Exception:  # noqa: BLE001
                     converge_span.end(level="ERROR")
+
+            # 4.5 追加追问未决信息
+            elicit_rows = self.db.query_all(
+                "SELECT status, questions_json, answers_json, created_at "
+                "FROM elicitations WHERE session_id=? AND status IN ('closed','expired')",
+                (from_session_id,))
+            if elicit_rows:
+                summary_text += "\n\n## 未决追问\n"
+                for er in elicit_rows:
+                    summary_text += f"- 状态：{er['status']}\n"
                     # 二次收敛失败仍保留首次摘要（可能略超限，但能用）
 
             # 5. 写入最终文件

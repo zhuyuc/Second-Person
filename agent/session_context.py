@@ -128,7 +128,8 @@ class SessionStore:
                        images: list[str] | None = None,
                        visuals: list | None = None,
                        strategy_snapshot: dict | None = None,
-                       skeleton_snapshot: dict | None = None) -> int:
+                       skeleton_snapshot: dict | None = None,
+                       next_step_shown: dict | None = None) -> int:
         # readonly 写入保护（会话上下文管理方案 v2 §旧会话状态管理）
         row = self.db.query_one(
             "SELECT readonly FROM sessions WHERE session_id=?", (sid,))
@@ -137,8 +138,9 @@ class SessionStore:
         cur = self.db.execute(
             "INSERT INTO conversations(session_id,role,message_type,notification_type,"
             "content,citations,feedback,create_time,thinking,images,visuals,"
-            "response_strategy_json,cognitive_skeleton_json,protected_from_compression) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?)",
+            "response_strategy_json,cognitive_skeleton_json,protected_from_compression,"
+            "next_step_shown) "
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
@@ -148,7 +150,9 @@ class SessionStore:
                         ensure_ascii=False) if strategy_snapshot else None,
              json.dumps(skeleton_snapshot,
                         ensure_ascii=False) if skeleton_snapshot else None,
-             int(self._should_protect(role, content)))
+             int(self._should_protect(role, content)),
+             json.dumps(next_step_shown,
+                        ensure_ascii=False) if next_step_shown else None)
         )
         self.db.execute(
             "UPDATE sessions SET last_active=?, message_count=message_count+1 "

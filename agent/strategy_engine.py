@@ -238,3 +238,46 @@ class StrategyEngine:
         return (enabled and strategy.complexity_score >= 7
                 and not strategy.fallback_used
                 and intent_type not in META_EXCLUDED_INTENTS)
+
+    # ---- 追问式补充信息：clarification_router（elicitation §05 触发与门槛） ---
+
+    async def clarification_router(self, session_id: str, message: str,
+                                   gap_description: str, config: dict) -> dict | None:
+        """判定缺失信息可枚举/发散 → 可枚举时返回 ask_user seed。
+
+        返回 None 表示不可枚举（走文字澄清），返回 dict 表示可枚举（走追问）。
+        """
+        from infrastructure.prompt_loader import PROMPTS
+        from infrastructure.json_repair import repair_json
+        import json as _json
+
+        snap = self._provider_snapshot_fn()
+        if not snap:
+            return None  # 模型不可用 → 走文字澄清
+
+        system_prompt = PROMPTS.load_raw(
+            "agent/prompts/elicitation_decision")
+        user_prompt = (
+            f"用户消息：{message}\n"
+            f"缺失信息：{gap_description}\n"
+            f"请判定上述缺失信息是否可枚举为 2-4 个选项。"
+        )
+
+        try:
+            resp = await self.llm.chat(snap, [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ], source="elicitation_decision", session_id=session_id)
+            raw = resp.get("content", "")
+            data = _json.loads(repair_json(raw))
+
+            if data.get("enumerable") and data.get("questions"):
+                return {
+                    "questions": data["questions"],
+                    "reason": data.get("reason", ""),
+                    "trigger_source": "intent_low_conf",
+                }
+        except Exception:  # noqa: BLE001
+            logger.warning("clarification_router LLM 调用失败", exc_info=True)
+
+        return None

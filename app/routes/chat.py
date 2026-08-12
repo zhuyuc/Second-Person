@@ -50,6 +50,8 @@ class SessionPinRequest(BaseModel):
 _BUFFERS: dict[str, dict] = {}
 BUFFER_TTL = 300        # 生成完成后缓冲保留 5 分钟供断线重连
 BUFFER_HARD_TTL = 900   # 硬上限：超时仍未完成（流水线自身 600s 超时）取消并回收
+# elicitation 等待中超时放宽（48h，覆盖 IM 24h TTL）
+BUFFER_HARD_TTL_ELICITATION = 86400 * 2
 BUFFER_MAX = 1024 * 1024
 
 
@@ -64,11 +66,15 @@ def _gc_buffers():
         if v["done"]:
             if now - (v.get("finished") or v["started"]) > BUFFER_TTL:
                 _BUFFERS.pop(k, None)
-        elif now - v["started"] > BUFFER_HARD_TTL:
-            t = v.get("task")
-            if t and not t.done():
-                t.cancel()
-            _BUFFERS.pop(k, None)
+        else:
+            # elicitation 等待中的任务使用宽松 TTL
+            hard_ttl = BUFFER_HARD_TTL_ELICITATION if v.get(
+                "elicitation_pending") else BUFFER_HARD_TTL
+            if now - v["started"] > hard_ttl:
+                t = v.get("task")
+                if t and not t.done():
+                    t.cancel()
+                _BUFFERS.pop(k, None)
 
 
 async def _follow(buf: dict):
@@ -115,6 +121,11 @@ async def chat_send(request: Request):
     location = (body.get("location") or "").strip()[:60] or None
     # handoff 摘要附件路径（会话上下文管理方案 v2）
     handoff_path = (body.get("handoff_path") or "").strip() or None
+    # 思考模式用户指定：quick=快速回复 / deep=深度思考；
+    # 缺失或非法 → auto（保留模型判断，IM 等无 UI 渠道兜底）
+    think_mode = body.get("think_mode")
+    if think_mode not in ("quick", "deep"):
+        think_mode = "auto"
     c = _c()
 
     _gc_buffers()
@@ -152,7 +163,8 @@ async def chat_send(request: Request):
                                         regenerate=bool(regen_id),
                                         regenerate_message_id=regen_id,
                                         location=location,
-                                        handoff_path=handoff_path):
+                                        handoff_path=handoff_path,
+                                        think_mode=think_mode):
                 buf["events"].append(evt)
                 buf["size"] += len(json.dumps(evt.get("data", {})))
                 if buf["size"] > BUFFER_MAX:

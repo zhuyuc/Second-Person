@@ -120,6 +120,12 @@ class ProviderRegistry:
             pid = (self.assignment("convergence") or self.assignment("intent")
                    or self.assignment("agent") or self.assignment("chat"))
             logger.info("未配置 mood 模型，回退使用 convergence/intent/agent/chat 模型")
+        if not pid and task_type == "elicitation":
+            # 追问判定（clarification_router / ask_user 补充决策）：轻量语义任务，
+            # 优先走 intent 槽位（小模型足够），未配回退 intent→agent→chat
+            pid = (self.assignment("intent")
+                   or self.assignment("agent") or self.assignment("chat"))
+            logger.info("未配置 elicitation 模型，回退使用 intent/agent/chat 模型")
         if not pid:
             return None
         return self.snapshot(pid)
