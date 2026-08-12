@@ -140,7 +140,7 @@ class SessionStore:
             "content,citations,feedback,create_time,thinking,images,visuals,"
             "response_strategy_json,cognitive_skeleton_json,protected_from_compression,"
             "next_step_shown) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,)",
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
