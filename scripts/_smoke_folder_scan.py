@@ -1,12 +1,20 @@
 """迁移 017 + 新参数 + FolderScanner 逻辑冒烟验证（不依赖 LLM）。"""
-from scheduler.folder_scan import FolderScanner
 import asyncio
 import json
+import os
 import pathlib
+import sys
 import tempfile
+from pathlib import Path
 
-from infrastructure.db import Database
-from infrastructure.config_manager import PARAM_SCHEMA
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
+
+from scheduler.folder_scan import FolderScanner  # noqa: E402
+
+from infrastructure.db import Database  # noqa: E402
+from infrastructure.config_manager import PARAM_SCHEMA  # noqa: E402
 
 tmp = pathlib.Path(tempfile.mkdtemp())
 db = Database(tmp / "t.db")

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import requests
 
-BASE = Path(__file__).resolve().parent
+BASE = Path(__file__).resolve().parent.parent
 API = "http://localhost:8000/api"
 DB_PATH = BASE / "data" / "palace.db"
 results = []
@@ -26,7 +26,8 @@ results = []
 
 def check(name, ok, detail=""):
     results.append((name, ok, detail))
-    print(f"{'PASS' if ok else 'FAIL'} | {name}" + (f" | {detail}" if detail else ""))
+    print(f"{'PASS' if ok else 'FAIL'} | {name}" +
+          (f" | {detail}" if detail else ""))
 
 
 def sse_send(payload, timeout=300):

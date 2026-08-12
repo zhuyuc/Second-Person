@@ -1,7 +1,14 @@
 """阶段 3 冒烟：OutputStyleBuilder 策略候选入队双保险门槛。"""
+import os
 import sqlite3
+import sys
+from pathlib import Path
 
-from agent.system_agents import OutputStyleBuilder
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
+
+from agent.system_agents import OutputStyleBuilder  # noqa: E402
 
 
 class FakeDB:

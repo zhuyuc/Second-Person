@@ -22,10 +22,11 @@ dist/
 # 原始需求文档（本地参考）
 *.docx
 
-# Langfuse 本地自托管源码已迁至工作区外同级目录（D:\project\langfuse-server）
+# Langfuse 全部收敛至 langfuse/ 目录（部署脚本 + 集成代码 + 运行时源码）
 
 # Langfuse 真实环境变量（含数据库密码/密钥，只入库 example 模板）
-/langfuse-deploy/langfuse.env
+/langfuse/deploy/langfuse.env
+/langfuse/server/
 
 # IDE 内部知识库
 .qoder/

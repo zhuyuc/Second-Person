@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from infrastructure.config_manager import ConfigManager  # noqa: E402
-from observability_langfuse.config import LangfuseConfig  # noqa: E402
+from langfuse.integration.config import LangfuseConfig  # noqa: E402
 
 BASE = "http://localhost:8000/api"
 SKELETON_KEYS = {"reframe", "decompose", "hidden_assumptions",

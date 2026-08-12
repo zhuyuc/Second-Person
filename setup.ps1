@@ -68,5 +68,5 @@ Ok "安装完成。启动方式："
 Write-Host "  .\.venv\Scripts\python.exe start.py      # 一键启动（自动拉起 Embedding 服务并打开浏览器）"
 Write-Host ""
 Write-Host "可选增强（不影响核心功能）：" -ForegroundColor DarkGray
-Write-Host "  - Langfuse 链路观测：需 PostgreSQL/Redis/Node/pnpm，参照 langfuse-deploy/README.md 部署" -ForegroundColor DarkGray
+Write-Host "  - Langfuse 链路观测：需 PostgreSQL/Redis/Node/pnpm，参照 langfuse/deploy/README.md 部署" -ForegroundColor DarkGray
 Write-Host "  - 修改前端：需 Node 18+，cd frontend && npm install && npm run build" -ForegroundColor DarkGray

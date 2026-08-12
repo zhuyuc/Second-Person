@@ -137,7 +137,7 @@ async def elicitation_pending(session_id: str = Query(...)):
 @router.post("/chat/elicitations/{tool_use_id}/rendered")
 async def elicitation_rendered(tool_use_id: str, body: ElicitationRenderedRequest):
     """前端回传渲染耗时，记录到 Langfuse span。"""
-    from observability_langfuse import get_tracer
+    from langfuse.integration import get_tracer
     tracer = get_tracer()
     sp = tracer.span_start("elicitation_rendered", input={
         "tool_use_id": tool_use_id,

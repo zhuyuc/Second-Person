@@ -1,10 +1,15 @@
 """端到端验证：读取类操作不再触发 soul_reloaded；真实修改正常触发。"""
 import os
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
 import urllib.request
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
 
 STYLE = Path("data/soul/SOUL_STYLE.md")
 orig = STYLE.read_text(encoding="utf-8")

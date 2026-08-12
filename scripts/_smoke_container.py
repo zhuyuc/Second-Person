@@ -1,6 +1,13 @@
 """容器装配验证：临时数据目录构造 AppContainer，确认本地目录功能完整接线。"""
+import os
 import pathlib
+import sys
 import tempfile
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
 
 tmp = pathlib.Path(tempfile.mkdtemp())
 

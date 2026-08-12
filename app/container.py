@@ -76,8 +76,8 @@ class AppContainer:
         # ---- 基础设施 ----
         self.config = ConfigManager(d / "config.yaml")
         # Langfuse 可观测性（默认禁用，配置密钥后自动启用）
-        from observability_langfuse import init_tracer
-        from observability_langfuse.config import LangfuseConfig
+        from langfuse.integration import init_tracer
+        from langfuse.integration.config import LangfuseConfig
         self.tracer = init_tracer(LangfuseConfig.from_sources(self.config.get))
         self.db = Database(d / "palace.db")
         # 先跑迁移，确保后续组件（如调度器注册）可直接写表

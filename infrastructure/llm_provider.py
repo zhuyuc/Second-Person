@@ -158,7 +158,7 @@ class LLMClient:
           对推理模型禁用思考模式）。收敛分析等轻量结构化任务建议传
           extra_body={"thinking_enabled": False} 以避免思考令牌拖慢响应。
         """
-        from observability_langfuse import get_tracer
+        from langfuse.integration import get_tracer
         gen = get_tracer().generation_start(
             name=f"llm.{source}", model=snap.model_id, input=messages,
             metadata={"source": source, "session_id": session_id,
@@ -210,7 +210,7 @@ class LLMClient:
         4xx（除 429）属配置错误快速失败不计熔断；首包后的中途失败不重试
         （已向下游吐出部分内容，重试会重复输出）且不计熔断。
         """
-        from observability_langfuse import get_tracer
+        from langfuse.integration import get_tracer
         gen = get_tracer().generation_start(
             name=f"llm.{source}", model=snap.model_id, input=messages,
             metadata={"source": source, "session_id": session_id,

@@ -5,13 +5,20 @@
 验收：不得出现 ≥90% hint<3（全短路退化）或 ≥50% hint≥7（全收敛膨胀）。
 """
 import json
+import os
+import sys
 import time
+from pathlib import Path
 
 import requests
 from requests.auth import HTTPBasicAuth
 
-from infrastructure.config_manager import ConfigManager
-from observability_langfuse.config import LangfuseConfig
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
+
+from infrastructure.config_manager import ConfigManager  # noqa: E402
+from langfuse.integration.config import LangfuseConfig  # noqa: E402
 
 BASE = "http://localhost:8000/api"
 

@@ -35,7 +35,7 @@ class ToolExecutor:
         参数/结果统一走 mark_preview 标记（content_type + 原始长度 + 截断标志）。
 
         ask_user 特殊处理：不执行工具逻辑，改为 emit elicitation SSE 并挂起等待。"""
-        from observability_langfuse import get_tracer, mark_preview
+        from langfuse.integration import get_tracer, mark_preview
         import json as _json
 
         # ---- ask_user 特殊路径 ----
@@ -87,7 +87,7 @@ class ToolExecutor:
         from agent.elicitation_schema import validate_ask_user, build_tool_result_error
         from agent.elicitation_state import ElicitationState, ElicitationStatus
         from agent.elicitation_state import register as reg_state
-        from observability_langfuse import get_tracer
+        from langfuse.integration import get_tracer
 
         tracer = get_tracer()
         tool_use_id = f"elic_{_time.time_ns()}"

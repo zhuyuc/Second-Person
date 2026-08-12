@@ -204,7 +204,7 @@ async def _generate_handoff(c, from_sid: str, to_sid: str) -> None:
     不阻塞路由返回，失败静默降级为 status=failed 的占位文件。
     """
     from memory.handoff_summary import HandoffSummaryGenerator
-    from observability_langfuse import get_tracer
+    from langfuse.integration import get_tracer
     tracer = get_tracer()
     trace = tracer.trace_start(
         "handoff.summary", session_id=to_sid,
@@ -224,7 +224,7 @@ async def _gen_title(c, sid: str, message: str):
     """首条消息异步生成 10 字标题；3 秒超时退化为取前 15 字符。
     超时后 LLM 调用仍继续完成（shielding），晚到时覆盖已退化标题。
     使用独立 Langfuse trace，确保 generation 可被观测。"""
-    from observability_langfuse import get_tracer
+    from langfuse.integration import get_tracer
     tracer = get_tracer()
     trace = tracer.trace_start("title_generation", session_id=sid, input={
         "session_id": sid, "message": message})
@@ -306,7 +306,7 @@ async def feedback(body: ChatFeedbackRequest):
     mid = body.message_id
     fb = body.feedback
     reason = body.reason
-    from observability_langfuse import get_tracer
+    from langfuse.integration import get_tracer
     tr = get_tracer().trace_start("user_feedback", input={
         "message_id": mid, "feedback": fb, "reason": reason,
         "session_id": c.db.query_one(
@@ -454,7 +454,7 @@ async def upload_attachment(file: UploadFile = File(...)):
     import os
     from pathlib import Path
     from scheduler.ingest import extract_text
-    from observability_langfuse import get_tracer
+    from langfuse.integration import get_tracer
     tr = get_tracer().trace_start("attachment_upload", input={
         "filename": file.filename,
         "size_bytes": file.size if file.size is not None else 0})

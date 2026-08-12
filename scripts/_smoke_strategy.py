@@ -1,8 +1,15 @@
 """阶段 1 冒烟：响应策略引擎双通道接线 + 快照落库 + narrative 外露。"""
 import json
+import os
 import sqlite3
+import sys
+from pathlib import Path
 
 import requests
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
 
 BASE = "http://localhost:8000/api"
 results = []

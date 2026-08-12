@@ -18,13 +18,13 @@ createdb -U postgres langfuse
 # 或用 pgAdmin 图形界面新建数据库 langfuse
 ```
 
-然后运行一次 `./langfuse-deploy/deploy-langfuse.ps1`，首次会从模板生成 `langfuse.env`（安全密钥自动随机）；
+然后运行一次 `./langfuse/deploy/deploy-langfuse.ps1`，首次会从模板生成 `langfuse.env`（安全密钥自动随机）；
 按提示编辑其中的 **DATABASE_URL / DIRECT_URL**（改成你本机的用户名/密码/端口）与 **LANGFUSE_INIT_USER_PASSWORD**（登录密码）。
 
 ### 2. 一键部署并启动 Langfuse
 
 ```powershell
-./langfuse-deploy/deploy-langfuse.ps1
+./langfuse/deploy/deploy-langfuse.ps1
 ```
 
 脚本会：克隆 v2 源码 → 写入 `.env` → `pnpm install` → 数据库迁移 → 构建 → 启动在 **<http://localhost:3001**。>

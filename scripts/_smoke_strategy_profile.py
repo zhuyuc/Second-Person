@@ -1,11 +1,19 @@
 """阶段 4 端到端：候选入队 → pending API → 确认写入 RESPONSE_STRATEGY.md → 策略引擎读先验。"""
-from agent.strategy_engine import StrategyEngine
-from infrastructure.config_manager import ConfigManager
-import pathlib
 import json
+import os
+import pathlib
 import sqlite3
+import sys
+from pathlib import Path
 
 import requests
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
+
+from agent.strategy_engine import StrategyEngine  # noqa: E402
+from infrastructure.config_manager import ConfigManager  # noqa: E402
 
 BASE = "http://localhost:8000/api"
 results = []

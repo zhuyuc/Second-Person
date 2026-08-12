@@ -5,8 +5,8 @@
 """
 from __future__ import annotations
 
-from observability_langfuse.config import LangfuseConfig
-from observability_langfuse.tracer import PipelineTracer
+from langfuse.integration.config import LangfuseConfig
+from langfuse.integration.tracer import PipelineTracer
 
 
 class _FakeClient:

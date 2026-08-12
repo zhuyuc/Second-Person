@@ -35,13 +35,13 @@ python start.py
 | **必需** | Python 3.10+ | 核心应用（前端构建产物已入库，免装 Node） |
 | 可选 | NVIDIA GPU | 本地 Embedding 加速（无 GPU 自动用 CPU） |
 | 可选 | Node 18+ | 仅修改前端时需要（`cd frontend && npm install && npm run build`） |
-| 可选 | PostgreSQL / Redis / pnpm | 仅自托管 Langfuse 链路观测时需要，参照 `langfuse-deploy/README.md` |
+| 可选 | PostgreSQL / Redis / pnpm | 仅自托管 Langfuse 链路观测时需要，参照 `langfuse/deploy/README.md` |
 
 首次启动进入引导：配置对话模型（必填，测试通过才继续）→ 配置 Embedding（可跳过，先用全文搜索）
 → 欢迎对话 → 确认初始人格。首启会自动生成 `data/` 目录骨架与默认配置，无需手动准备。
 
 > 敏感信息隔离：`data/`（含密钥与全部用户数据）、`embedding/models/`、所有 venv、
-> `langfuse-deploy/langfuse.env`（真实密钥）均已被 `.gitignore` 排除，不会随仓库传播；
+> `langfuse/deploy/langfuse.env`（真实密钥）均已被 `.gitignore` 排除，不会随仓库传播；
 > Langfuse 配置只入库脱敏模板 `langfuse.env.example`。
 
 ## 命令

@@ -15,12 +15,12 @@ import pytest
 checker = pytest.importorskip("pyflakes.checker")
 
 BACKEND_DIRS = ["agent", "app", "connectors", "gateway", "infrastructure",
-                "memory", "observability_langfuse", "plugins", "scheduler",
+                "memory", "langfuse/integration", "plugins", "scheduler",
                 "soul", "tools", "user_profile"]
 ROOT = Path(__file__).resolve().parent.parent
 _TIME_NOW_ALLOWED = {
     "infrastructure/timeutil.py",          # 统一时间源本身
-    "observability_langfuse/tracer.py",   # Langfuse 需要 aware ISO 时间戳
+    "langfuse/integration/tracer.py",   # Langfuse 需要 aware ISO 时间戳
     "tools/builtin.py",                   # datetime_now 工具支持用户指定时区
 }
 

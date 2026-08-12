@@ -1,9 +1,9 @@
 """微信 iLink 直连冒烟测试（任务 6 验收脚本）。
 
 用法：
-  python _smoke_ilink.py selfcheck     # 无账号自检：AES 加解密 / 解析函数 / 请求头
-  python _smoke_ilink.py qrcode        # 扫码绑定 + 收发闭环（需真实账号与 ClawBot 灰度）
-  python _smoke_ilink.py qrcode --token data/temp/ilink_smoke_token.json
+  python scripts/_smoke_ilink.py selfcheck     # 无账号自检：AES 加解密 / 解析函数 / 请求头
+  python scripts/_smoke_ilink.py qrcode        # 扫码绑定 + 收发闭环（需真实账号与 ClawBot 灰度）
+  python scripts/_smoke_ilink.py qrcode --token data/temp/ilink_smoke_token.json
                                       # 复用已绑定 token（验证重启免扫码）
 """
 from __future__ import annotations
@@ -11,11 +11,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import sys
 import time
 from pathlib import Path
 
-from gateway.platforms.ilink_client import (ILinkClient, MSG_TEXT, extract_media,
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
+
+from gateway.platforms.ilink_client import (ILinkClient, MSG_TEXT, extract_media,  # noqa: E402
                                             extract_text)
 
 results = []
@@ -23,7 +28,8 @@ results = []
 
 def check(name, ok, detail=""):
     results.append((name, ok, detail))
-    print(f"{'PASS' if ok else 'FAIL'} | {name}" + (f" | {detail}" if detail else ""))
+    print(f"{'PASS' if ok else 'FAIL'} | {name}" +
+          (f" | {detail}" if detail else ""))
 
 
 # ---- 1. 无账号自检 ---------------------------------------------------------
@@ -87,11 +93,13 @@ async def qrcode_flow(token_path: Path) -> None:
                     print(f"    → 扫码链接：{img}（微信内打开识别，或浏览器打开后用微信扫）")
                 else:
                     # 兼容 data:image/png;base64, 前缀与纯 base64
-                    raw = img.split(",", 1)[1] if img.startswith("data:") else img
+                    raw = img.split(",", 1)[1] if img.startswith(
+                        "data:") else img
                     out = Path("data/temp/ilink_qrcode.png")
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_bytes(base64.b64decode(raw))
-                    print(f"    → 二维码已保存：{out.resolve()}，请用微信「我→设置→插件→ClawBot」扫码")
+                    print(
+                        f"    → 二维码已保存：{out.resolve()}，请用微信「我→设置→插件→ClawBot」扫码")
             else:
                 print(f"    → 二维码内容无图片数据，qrcode={qrcode}")
             # 2b. 轮询扫码状态（最长 120s）

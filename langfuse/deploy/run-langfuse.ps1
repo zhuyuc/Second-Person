@@ -1,7 +1,7 @@
 # 独立会话启动 Langfuse（由计划任务 SecondPersonLangfuse 调用，也可手动执行）
 # 与任何终端会话隔离，避免外部控制台中断信号误杀 web（next start 收到 Ctrl+C 会优雅退出）
 $ErrorActionPreference = 'Stop'
-$root = Split-Path $PSScriptRoot -Parent          # second-person 项目根
+$root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent  # langfuse/deploy/ → langfuse/ → 项目根
 $envFile = Join-Path $PSScriptRoot 'langfuse.env'
 $logFile = Join-Path $root 'data\logs\langfuse.log'
 
@@ -29,7 +29,7 @@ if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path $logFile) | Out-Null
-Set-Location 'D:\project\langfuse-server'
+Set-Location (Join-Path $PSScriptRoot '..\server')
 $env:npm_config_engine_strict = 'false'   # 兼容 Node 22（仓库 engines 声明 node=20）
 Add-Content $logFile "[run-langfuse] $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 启动（pid=$PID，独立会话）"
 pnpm run start *>> $logFile

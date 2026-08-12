@@ -19,7 +19,7 @@ from typing import AsyncIterator
 from infrastructure.llm_provider import CircuitOpenError
 from infrastructure.observability import get_trace_id
 from infrastructure.prompt_loader import PROMPTS
-from observability_langfuse import get_tracer, mark_preview
+from langfuse.integration import get_tracer, mark_preview
 from soul.constants import ONBOARDING_PERSONA
 
 from . import response_synthesizer as rs
@@ -1156,7 +1156,7 @@ class AgentCore:
 
     async def _image_kb_task(self, images) -> None:
         """后台静默将当轮图片存入知识库（fire-and-forget，失败不影响对话）。"""
-        from observability_langfuse import get_tracer
+        from langfuse.integration import get_tracer
         tr = get_tracer().trace_start("image_kb_store", input={
             "image_count": len(images) if images else 0})
         try:
@@ -1884,7 +1884,7 @@ class AgentCore:
         """第 1 步：检测消息中的 URL 并用 web_fetch 预加载；失败不中断，失败信息作为上下文。"""
         import re
         from tools import hooks as tool_hooks
-        from observability_langfuse import get_tracer, mark_preview
+        from langfuse.integration import get_tracer, mark_preview
         urls = re.findall(r"https?://[^\s]+", message)
         if not urls:
             return ""

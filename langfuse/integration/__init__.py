@@ -3,8 +3,8 @@ Langfuse 集成（可观测性）—— 将 Second Person 的对话流水线全�
 
 注意：本包**不依赖** pip 的 langfuse SDK，而是直接对接
 Langfuse 官方 Ingestion REST API（POST /api/public/ingestion，Basic Auth）。
-包名为 `observability_langfuse`，避免遮蔽官方 `langfuse` SDK 的 import 命名空间，
-也无需额外安装依赖（复用 httpx）。
+位于 langfuse/integration/，与部署脚本（langfuse/deploy/）统一归入 langfuse/ 目录。
+无需额外安装依赖（复用 httpx）。
 
 对外主要接口：
 - init_tracer(config)  在应用启动装配时初始化全局 tracer

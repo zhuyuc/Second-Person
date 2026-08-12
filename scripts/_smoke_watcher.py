@@ -1,10 +1,17 @@
 """FileWatcher 快照过滤冒烟：读取类事件不触发 / 真实修改触发 / 内部写入抑制。"""
 import hashlib
+import os
 import pathlib
+import sys
 import tempfile
 import time
+from pathlib import Path
 
-from memory.file_watcher import FileWatcher
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
+
+from memory.file_watcher import FileWatcher  # noqa: E402
 
 tmp = pathlib.Path(tempfile.mkdtemp())
 (tmp / "soul").mkdir()

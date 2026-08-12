@@ -1,8 +1,15 @@
 """阶段 2 冒烟：元认知协议触发链路（高复杂度消息 → 骨架 → 注入生成 → 落库）。"""
 import json
+import os
 import sqlite3
+import sys
+from pathlib import Path
 
 import requests
+
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+os.chdir(_ROOT)
 
 BASE = "http://localhost:8000/api"
 results = []

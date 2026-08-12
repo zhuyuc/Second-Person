@@ -36,4 +36,4 @@ second-person = "start:main"
 py-modules = ["start"]
 packages = ["app", "agent", "memory", "tools", "connectors", "user_profile",
             "soul", "plugins", "scheduler", "infrastructure", "gateway",
-            "observability_langfuse"]
+            "langfuse", "langfuse.integration"]

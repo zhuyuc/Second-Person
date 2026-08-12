@@ -1,14 +1,13 @@
 # ============================================================
 # Langfuse v2 本地部署脚本（从源码运行，仅依赖 PostgreSQL，无需 Docker）
-# 在你自己的 PowerShell 里运行：  ./langfuse-deploy/deploy-langfuse.ps1
+# 在你自己的 PowerShell 里运行：  ./langfuse/deploy/deploy-langfuse.ps1
 # 前提：已安装 PostgreSQL 并可连接（DATABASE_URL 见 langfuse.env）
 # ============================================================
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = $PSScriptRoot
-$ProjectDir = Split-Path $ScriptDir -Parent
-# langfuse-server 位于项目工作区外的同级目录（不污染仓库/IDE 索引）
-$ServerDir = Join-Path (Split-Path $ProjectDir -Parent) "langfuse-server"
+# langfuse/server 位于 langfuse/ 目录内（gitignored，不污染仓库/IDE 索引）
+$ServerDir = Join-Path $ScriptDir "..\server"
 $EnvFile = Join-Path $ScriptDir "langfuse.env"
 $EnvExample = Join-Path $ScriptDir "langfuse.env.example"
 
@@ -55,7 +54,7 @@ if (-not (Test-Path (Join-Path $ServerDir "package.json"))) {
   git clone --branch v2 --depth 1 https://github.com/langfuse/langfuse.git $ServerDir
 }
 else {
-  Write-Host "已存在 langfuse-server，跳过克隆。"
+  Write-Host "已存在 langfuse/server，跳过克隆。"
 }
 
 Write-Host "=== [3/6] 写入 .env 并加载到进程环境 ===" -ForegroundColor Cyan
