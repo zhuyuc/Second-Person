@@ -319,17 +319,27 @@ class AppContainer:
             proposed = item.get("detail", "")
             canonical_dim = item.get("canonical_dim", "")
 
-            # style 反馈交给即时路径（不入 review queue）
+            # style 反馈入审核队列，由用户确认后生效
             if feedback_kind == "style" and canonical_dim and canonical_dim != "other":
-                # 即时生效：直接更新对话风格/行为原则对应维度
-                # 当前阶段为框架预留，后续实现根据 canonical_dim 做定向更新
-                logger.info(
-                    "SOUL style 即时反馈：dim=%s, detail=%s", canonical_dim, proposed[:80]
+                import hashlib as _hashlib
+                style_key = f"style:{canonical_dim}:{proposed[:50].strip()}"
+                style_change_key = _hashlib.md5(style_key.encode()).hexdigest()[:16]
+                now_str = now_cst().isoformat(timespec="seconds")
+                if self.conflict_scanner.check_rejection_protection(style_change_key, now_str):
+                    return
+                occ, newly_enqueued = self.conflict_scanner.accumulate_feedback(
+                    style_change_key, proposed, item.get("summary", ""), "style"
                 )
+                if newly_enqueued:
+                    current_dialog = self.soul.read_style().get("对话风格", "")
+                    self.conflict_scanner.enqueue_persona_review(
+                        style_change_key, proposed, item.get("summary", ""),
+                        occ, current_dialog
+                    )
                 return
 
             # persona 反馈走频次累积
-            ptype = "behavior" if feedback_kind == "behavior" else "behavior"
+            ptype = "behavior" if feedback_kind == "behavior" else "persona"
             raw_key = f"persona:{proposed[:50].strip()}"
             change_key = hashlib.md5(raw_key.encode()).hexdigest()[:16]
             now_str = now_cst().isoformat(timespec="seconds")

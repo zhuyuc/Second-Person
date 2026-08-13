@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 
 from fastapi import APIRouter, Request, UploadFile, File
@@ -60,6 +61,9 @@ def _c():
     return get_container()
 
 
+_BUFFERS_MAX_COUNT = 200
+
+
 def _gc_buffers():
     now = time.time()
     for k, v in list(_BUFFERS.items()):
@@ -67,7 +71,6 @@ def _gc_buffers():
             if now - (v.get("finished") or v["started"]) > BUFFER_TTL:
                 _BUFFERS.pop(k, None)
         else:
-            # elicitation 等待中的任务使用宽松 TTL
             hard_ttl = BUFFER_HARD_TTL_ELICITATION if v.get(
                 "elicitation_pending") else BUFFER_HARD_TTL
             if now - v["started"] > hard_ttl:
@@ -75,6 +78,14 @@ def _gc_buffers():
                 if t and not t.done():
                     t.cancel()
                 _BUFFERS.pop(k, None)
+    if len(_BUFFERS) > _BUFFERS_MAX_COUNT:
+        by_age = sorted(_BUFFERS.items(), key=lambda kv: kv[1]["started"])
+        for k, _ in by_age[:len(_BUFFERS) - _BUFFERS_MAX_COUNT]:
+            buf = _BUFFERS.pop(k, None)
+            if buf and not buf["done"]:
+                t = buf.get("task")
+                if t and not t.done():
+                    t.cancel()
 
 
 async def _follow(buf: dict):
@@ -217,7 +228,11 @@ async def _generate_handoff(c, from_sid: str, to_sid: str) -> None:
         trace.end(output={"status": "completed"})
     except Exception as e:  # noqa: BLE001
         trace.end(level="ERROR", status_message=str(e))
-        pass  # _generate_handoff 内部已兜底
+        logging.getLogger("second_person.chat").warning(
+            "handoff 摘要生成失败 from=%s to=%s: %s", from_sid, to_sid, e)
+        c.db.execute(
+            "UPDATE sessions SET handoff_summary_path='__failed__' "
+            "WHERE session_id=?", (to_sid,))
 
 
 async def _gen_title(c, sid: str, message: str):
@@ -307,12 +322,11 @@ async def feedback(body: ChatFeedbackRequest):
     fb = body.feedback
     reason = body.reason
     from langfuse.integration import get_tracer
+    msg_row = c.db.query_one(
+        "SELECT session_id FROM conversations WHERE id=?", (mid,))
     tr = get_tracer().trace_start("user_feedback", input={
         "message_id": mid, "feedback": fb, "reason": reason,
-        "session_id": c.db.query_one(
-            "SELECT session_id FROM conversations WHERE id=?", (mid,))["session_id"]
-        if c.db.query_one("SELECT 1 FROM conversations WHERE id=?", (mid,))
-        else None})
+        "session_id": msg_row["session_id"] if msg_row else None})
     try:
         c.sessions.set_feedback(mid, fb)
         if fb == 2:

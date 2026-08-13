@@ -18,4 +18,8 @@ const router = createRouter({
     ],
 })
 
-createApp(App).use(createPinia()).use(router).mount('#app')
+const app = createApp(App)
+app.config.errorHandler = (err, vm, info) => {
+    console.error('[Vue Error]', err, info)
+}
+app.use(createPinia()).use(router).mount('#app')

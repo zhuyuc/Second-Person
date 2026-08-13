@@ -196,7 +196,9 @@ async def put_output_style(body: OutputStyleRequest):
             "section": "auto", "content": content,
             "create_version": True, "diff_summary": "用户手动编辑"}, wait=True)
     except Exception as e:  # noqa: BLE001 - 含 WriteFailedError/QueueFullError
-        return {"code": 500, "message": f"画像写入失败：{e}"}
+        from infrastructure.observability import get_trace_id
+        return {"code": 500, "message": f"画像写入失败：{e}",
+                "trace_id": get_trace_id(), "details": None}
     if c.oplog:
         c.oplog.log("output_style_edit", "用户手动编辑输出样式画像")
     return {"code": 200, "data": {}}
@@ -236,9 +238,13 @@ async def profile_review_confirm(body: ProfileReviewActionRequest):
         "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
         (body.id,))
     if not row:
-        return {"code": 404, "message": "候选不存在或已处理"}
+        from infrastructure.observability import get_trace_id
+        return {"code": 404, "message": "候选不存在或已处理",
+                "trace_id": get_trace_id(), "details": None}
     if row["review_type"] != "strategy_preference":
-        return {"code": 400, "message": "该轨道暂不支持在线确认"}
+        from infrastructure.observability import get_trace_id
+        return {"code": 400, "message": "该轨道暂不支持在线确认",
+                "trace_id": get_trace_id(), "details": None}
     scene = "other"
     try:
         ev = _json.loads(row["evidence"] or "{}")
@@ -249,7 +255,11 @@ async def profile_review_confirm(body: ProfileReviewActionRequest):
         await c.fw.submit("response_strategy", {
             "scene": scene, "entry": row["proposed_content"]}, wait=True)
     except Exception as e:  # noqa: BLE001
-        return {"code": 500, "message": f"策略偏好写入失败：{e}"}
+        import logging
+        logging.getLogger("second_person.soul").warning("策略偏好写入失败", exc_info=True)
+        from infrastructure.observability import get_trace_id
+        return {"code": 500, "message": "策略偏好写入失败",
+                "trace_id": get_trace_id(), "details": None}
     from infrastructure.timeutil import now_cst
     c.db.execute(
         "UPDATE profile_review_queue SET status='confirmed', reviewed_at=?, "
@@ -268,7 +278,9 @@ async def profile_review_reject(body: ProfileReviewActionRequest):
         "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
         (body.id,))
     if not row:
-        return {"code": 404, "message": "候选不存在或已处理"}
+        from infrastructure.observability import get_trace_id
+        return {"code": 404, "message": "候选不存在或已处理",
+                "trace_id": get_trace_id(), "details": None}
     c.conflict_scanner.reject_and_protect(
         row["review_type"], row["change_key"], row["proposed_content"][:200])
     from infrastructure.timeutil import now_cst

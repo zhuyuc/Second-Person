@@ -10,6 +10,7 @@ export const useConfirm = defineStore('confirm', {
     actions: {
         // opts 支持字符串或 { title, message, confirmText, cancelText, danger, checkbox }
         ask(opts) {
+            if (pendingResolve) { pendingResolve(false); pendingResolve = null }
             const o = typeof opts === 'string' ? { message: opts } : (opts || {})
             this.checked = false
             this.item = {

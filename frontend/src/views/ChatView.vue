@@ -12,7 +12,7 @@ import BaseModal from '@/components/BaseModal.vue'
 import HandoffAttachment from '@/components/HandoffAttachment.vue'
 import ElicitationCard from '@/components/ElicitationCard.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
-import { formatRelative as formatTime, formatTimeFull, fmtSize, nowLocalIso } from '@/utils/format'
+import { formatRelative, formatTimeFull, fmtSize, nowLocalIso } from '@/utils/format'
 import { confidenceLabel, lifecycleLabel, TOAST_ONLY_NOTIF } from '@/utils/enumLabel'
 import { withQuery } from '@/utils/query'
 import { sanitizeHtml } from '@/utils/sanitize'
@@ -267,7 +267,17 @@ function readAsDataURL(f) {
     r.readAsDataURL(f)
   })
 }
-function removeAttachment(i) { attachments.value.splice(i, 1) }
+function removeAttachment(i) {
+  const a = attachments.value[i]
+  if (a && a.isImage && a.preview) URL.revokeObjectURL(a.preview)
+  attachments.value.splice(i, 1)
+}
+function clearAttachments() {
+  for (const a of attachments.value) {
+    if (a.isImage && a.preview) URL.revokeObjectURL(a.preview)
+  }
+  attachments.value = []
+}
 
 // ---- 表情选择器：点击表情插入输入框光标处（支持连续插入，点击外部关闭） ----
 const emojiOpen = ref(false)
@@ -436,7 +446,7 @@ async function send() {
     create_time: nowLocalIso()
   })
   input.value = ''
-  attachments.value = []
+  clearAttachments()
   // 文档附件统一存入知识库：后台异步导入，不阻塞本次对话
   kbFiles.forEach(f => ingestToKb(f))
   nextTick(autoGrow)
@@ -727,10 +737,20 @@ function webSrc(content) {
   const count = (list.match(/^\d+\./gm) || []).length
   return { body: c.slice(0, idx).trimEnd(), list, count }
 }
+const _wsCache = new Map()
+function cachedWebSrc(content) {
+  let r = _wsCache.get(content)
+  if (r) return r
+  r = webSrc(content)
+  _wsCache.set(content, r)
+  if (_wsCache.size > 200) _wsCache.delete(_wsCache.keys().next().value)
+  return r
+}
+const streamWebSrc = computed(() => webSrc(streamText.value))
 function renderUser(text) {
   // 用户消息：转义 HTML 防注入 → 换行保留 → URL 转为新标签打开的链接
   const esc = (text || '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
   return sanitizeHtml(esc
     .replace(/(https?:\/\/[^\s<]+)/g,
       '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>')
@@ -794,7 +814,7 @@ function resetToHome() {
   thinkText.value = ''
   streamVisuals.value = []
   input.value = ''
-  attachments.value = []
+  clearAttachments()
   generating.value = false
   sessStore.load()
 }
@@ -877,12 +897,14 @@ async function copyMermaidAsImage(wrap) {
   } catch { toast.push('error', '复制图片失败') }
 }
 // Mermaid 图表自动渲染：消息更新或流式结束后触发
-watch(() => messages.value.length, () => {
-  nextTick(() => { try { mermaid.run() } catch (e) { /* 忽略语法错误 */ } })
-})
-watch(generating, (v) => {
-  if (!v) nextTick(() => { try { mermaid.run() } catch (e) { } })
-})
+function runMermaidScoped() {
+  nextTick(() => {
+    const nodes = document.querySelectorAll('.mermaid:not([data-processed])')
+    if (nodes.length) { try { mermaid.run({ nodes }) } catch (e) { } }
+  })
+}
+watch(() => messages.value.length, runMermaidScoped)
+watch(generating, (v) => { if (!v) runMermaidScoped() })
 onUnmounted(() => {
   window.removeEventListener('sp-new-chat', resetToHome)
   window.removeEventListener('sp-open-session', onOpenSession)
@@ -937,7 +959,7 @@ onUnmounted(() => {
             <!-- 系统通知 -->
             <div v-else-if="m.message_type === 'system_notification'" class="banner"
               style="background:var(--brand-soft);color:var(--acctx)">
-              <i class="ti ti-bell"></i> <span style="opacity:0.7">{{ formatTime(m.create_time) }}</span> {{ m.content
+              <i class="ti ti-bell"></i> <span style="opacity:0.7">{{ formatRelative(m.create_time) }}</span> {{ m.content
               }}
             </div>
             <!-- AI 回复 -->
@@ -953,14 +975,14 @@ onUnmounted(() => {
                   <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
                 </div>
                 <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv' + vi" :type="v.type" :data="v.data" />
-                <div class="content" v-html="render(webSrc(m.content).body, m.visuals)"></div>
-                <div v-if="webSrc(m.content).count" class="think-panel" style="margin-top:8px">
+                <div class="content" v-html="render(cachedWebSrc(m.content).body, m.visuals)"></div>
+                <div v-if="cachedWebSrc(m.content).count" class="think-panel" style="margin-top:8px">
                   <div class="think-head" @click="m.srcOpen = !m.srcOpen">
-                    <i class="ti ti-world"></i><span>联网来源（{{ webSrc(m.content).count }}）</span>
+                    <i class="ti ti-world"></i><span>联网来源（{{ cachedWebSrc(m.content).count }}）</span>
                     <i class="ti" :class="m.srcOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                   </div>
                   <div v-show="m.srcOpen" class="content" style="padding:8px 12px 8px 34px"
-                    v-html="render(webSrc(m.content).list)"></div>
+                    v-html="render(cachedWebSrc(m.content).list)"></div>
                 </div>
                 <div v-if="m.citations && m.citations.length" class="muted" style="margin-top:8px">
                   <i class="ti ti-quote"></i> 引用记忆：<span v-for="(c, ci) in m.citations" :key="ci" class="cite-link"
@@ -1009,15 +1031,15 @@ onUnmounted(() => {
                 :questions="activeElicitation.questions"
                 @resolved="activeElicitation = null"
                 @close="activeElicitation = null" />
-              <div v-if="streamText" class="content streaming" v-html="render(webSrc(streamText).body, streamVisuals)">
+              <div v-if="streamText" class="content streaming" v-html="render(streamWebSrc.body, streamVisuals)">
               </div>
-              <div v-if="streamText && webSrc(streamText).count" class="think-panel" style="margin-top:8px">
+              <div v-if="streamText && streamWebSrc.count" class="think-panel" style="margin-top:8px">
                 <div class="think-head" @click="streamSrcOpen = !streamSrcOpen">
-                  <i class="ti ti-world"></i><span>联网来源（{{ webSrc(streamText).count }}）</span>
+                  <i class="ti ti-world"></i><span>联网来源（{{ streamWebSrc.count }}）</span>
                   <i class="ti" :class="streamSrcOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </div>
                 <div v-show="streamSrcOpen" class="content" style="padding:8px 12px 8px 34px"
-                  v-html="render(webSrc(streamText).list)"></div>
+                  v-html="render(streamWebSrc.list)"></div>
               </div>
             </div>
           </div>
@@ -1229,7 +1251,7 @@ onUnmounted(() => {
         </div>
       </div>
       <iframe class="html-preview-iframe" :srcdoc="htmlPreview"
-        sandbox="allow-scripts allow-same-origin"></iframe>
+        sandbox="allow-scripts"></iframe>
     </div>
   </transition>
 </template>

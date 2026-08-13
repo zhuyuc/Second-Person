@@ -2,7 +2,7 @@
 const ALLOWED_TAGS = new Set([
     'A', 'P', 'BR', 'HR', 'BLOCKQUOTE', 'PRE', 'CODE', 'SPAN', 'DIV', 'SECTION',
     'UL', 'OL', 'LI', 'STRONG', 'B', 'EM', 'I', 'S', 'DEL', 'TABLE', 'THEAD', 'TBODY',
-    'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'IMG', 'BUTTON'
+    'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'IMG'
 ])
 
 const ALLOWED_ATTRS = new Set([

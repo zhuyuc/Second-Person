@@ -128,8 +128,8 @@ class VectorStore:
         with self._lock:
             if self._matrix is None or self._matrix.shape[0] == 0:
                 return []
-            mat = self._matrix
-            index_to_id = list(self._index_to_id)   # 快照，与 mat 同一时刻一致
+            mat = self._matrix.copy()
+            index_to_id = list(self._index_to_id)
             dim = self._dim
         q = np.asarray(query_vec, dtype=np.float32)
         if dim is None or q.shape[0] != dim:
@@ -237,8 +237,15 @@ class VectorStore:
 
     def stage_vector(self, memory_id: str, vec: list[float] | np.ndarray) -> None:
         """迁移期间把新模型向量写入 staging（不影响旧数组的检索）。"""
+        arr = np.asarray(vec, dtype=np.float32)
         with self._lock:
-            self._staging[memory_id] = np.asarray(vec, dtype=np.float32)
+            if self._staging:
+                expected_dim = next(iter(self._staging.values())).shape[0]
+                if arr.shape[0] != expected_dim:
+                    logger.error("stage_vector 维度不一致：%s 期望 %d 实际 %d",
+                                 memory_id, expected_dim, arr.shape[0])
+                    return
+            self._staging[memory_id] = arr
 
     def commit_migration(self, new_dim: int) -> int:
         """完成迁移：用 staging 原子替换主数组与映射（引用赋值原子）。"""

@@ -46,6 +46,8 @@ MOOD_CN = {
     "peaceful": "安宁", "wary": "警觉",
 }
 
+MOOD_CN_REVERSE = {v: k for k, v in MOOD_CN.items()}
+
 
 # v2 情绪分类常量（传染算法 + 平复事件 + 主动行为判定用）
 NEGATIVE_MOODS = {"angry", "irritated", "frustrated", "indignant", "hurt",

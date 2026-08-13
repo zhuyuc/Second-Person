@@ -24,6 +24,7 @@ class TelegramAdapter(BasePlatformAdapter):
         self._offset = 0
         self._task: asyncio.Task | None = None
         self._running = False
+        self._http: httpx.AsyncClient | None = None
 
     @property
     def _api(self) -> str:
@@ -31,29 +32,37 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def connect(self) -> None:
         self._running = True
+        self._http = httpx.AsyncClient(timeout=60)
         self._task = asyncio.create_task(self._poll_loop())
 
     async def disconnect(self) -> None:
         self._running = False
         if self._task:
             self._task.cancel()
+        if self._http:
+            await self._http.aclose()
+            self._http = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=60)
+        return self._http
 
     async def send_message(self, chat_id: str, text: str) -> None:
-        # 提取 MEDIA: 附件标记
         media_path = None
         if "MEDIA:" in text:
             lines = text.splitlines()
             text = "\n".join(l for l in lines if not l.startswith("MEDIA:"))
             media_path = next((l[6:]
                               for l in lines if l.startswith("MEDIA:")), None)
-        async with httpx.AsyncClient(timeout=30) as c:
-            await c.post(f"{self._api}/sendMessage",
-                         json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
-            if media_path:
-                with open(media_path, "rb") as fp:
-                    await c.post(f"{self._api}/sendDocument",
-                                 data={"chat_id": chat_id},
-                                 files={"document": fp})
+        c = self._client()
+        await c.post(f"{self._api}/sendMessage",
+                     json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
+        if media_path:
+            with open(media_path, "rb") as fp:
+                await c.post(f"{self._api}/sendDocument",
+                             data={"chat_id": chat_id},
+                             files={"document": fp})
 
     async def _poll_loop(self) -> None:
         while self._running:
@@ -62,10 +71,11 @@ class TelegramAdapter(BasePlatformAdapter):
                 await asyncio.sleep(5)
                 continue
             try:
-                async with httpx.AsyncClient(timeout=35) as c:
-                    r = await c.get(f"{self._api}/getUpdates",
-                                    params={"offset": self._offset, "timeout": 30})
-                    updates = r.json().get("result", [])
+                c = self._client()
+                r = await c.get(f"{self._api}/getUpdates",
+                                params={"offset": self._offset, "timeout": 30},
+                                timeout=35)
+                updates = r.json().get("result", [])
                 for u in updates:
                     self._offset = u["update_id"] + 1
                     msg = u.get("message")
@@ -107,16 +117,16 @@ class TelegramAdapter(BasePlatformAdapter):
 
     async def _download_file(self, file_id: str) -> tuple[bytes, str]:
         """getFile → 下载，返回 (内容, file_path)。失败抛异常由上层提示。"""
-        async with httpx.AsyncClient(timeout=60) as c:
-            r = await c.get(f"{self._api}/getFile", params={"file_id": file_id})
-            file_path = r.json().get("result", {}).get("file_path")
-            if not file_path:
-                raise RuntimeError("Telegram getFile 未返回 file_path")
-            fr = await c.get(
-                f"https://api.telegram.org/file/bot{self.token}/{file_path}")
-            if len(fr.content) > MAX_MEDIA_MB * 1024 * 1024:
-                raise ValueError(f"媒体超过 {MAX_MEDIA_MB}MB 上限")
-            return fr.content, file_path
+        c = self._client()
+        r = await c.get(f"{self._api}/getFile", params={"file_id": file_id})
+        file_path = r.json().get("result", {}).get("file_path")
+        if not file_path:
+            raise RuntimeError("Telegram getFile 未返回 file_path")
+        fr = await c.get(
+            f"https://api.telegram.org/file/bot{self.token}/{file_path}")
+        if len(fr.content) > MAX_MEDIA_MB * 1024 * 1024:
+            raise ValueError(f"媒体超过 {MAX_MEDIA_MB}MB 上限")
+        return fr.content, file_path
 
     async def _fetch_photo(self, file_id: str) -> list[str]:
         """下载图片转 dataURL（供 on_message 懒回调，去重通过后才执行）。"""

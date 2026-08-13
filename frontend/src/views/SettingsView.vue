@@ -7,7 +7,7 @@ import { useBusy } from '@/composables/useBusy'
 import BaseModal from '@/components/BaseModal.vue'
 import { formatTime } from '@/utils/format'
 import { withQuery } from '@/utils/query'
-import { PLATFORM_MAP, SOURCE_NAMES } from '@/utils/enumLabel'
+import { PLATFORM_MAP, usageSourceLabel } from '@/utils/enumLabel'
 
 const toast = useToast()
 const confirm = useConfirm()
@@ -406,8 +406,6 @@ async function testEditChannel() {
 
 const groups = ['memory', 'conversation', 'cost', 'retrieval', 'visualization', 'other']
 const groupNames = { memory: '记忆参数', conversation: '对话参数', cost: '成本控制', retrieval: '检索与去重', visualization: '可视化', other: '其他' }
-// 用量来源中文映射（未知值兜底显示原文）
-function sourceName(s) { return SOURCE_NAMES[s] || s }
 const effectNames = { immediate: '立即生效', next_turn: '下一轮对话生效', next_session: '下次会话生效' }
 const enumLabels = { remind_only: '仅提醒（不阻断）' }
 function enumLabel(o) { return enumLabels[o] || o }
@@ -621,7 +619,7 @@ onActivated(() => selectTab(tab.value))
       <div class="fg" style="gap:8px;margin-bottom:12px;justify-content:flex-end">
         <select v-model="usageSource" style="font-size:var(--fs-sm)" @change="loadUsage">
           <option value="">全部来源</option>
-          <option v-for="s in sourceOptions" :key="s" :value="s">{{ sourceName(s) }}</option>
+          <option v-for="s in sourceOptions" :key="s" :value="s">{{ usageSourceLabel(s) }}</option>
         </select>
         <select v-model="usageModel" style="font-size:var(--fs-sm)" @change="loadUsage">
           <option value="">全部模型</option>
@@ -723,7 +721,7 @@ onActivated(() => selectTab(tab.value))
       <div class="g2" style="margin-top:12px">
         <div class="cw"><b>按来源</b>
           <div v-for="s in (distribution.by_source || [])" :key="s.name" class="row" style="margin-top:8px">
-            <span>{{ sourceName(s.name) }}</span><span>{{ formatNum(s.tokens) }}</span>
+            <span>{{ usageSourceLabel(s.name) }}</span><span>{{ formatNum(s.tokens) }}</span>
           </div>
           <div v-if="!distribution.by_source?.length" class="muted">暂无数据</div>
         </div>

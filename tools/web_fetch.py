@@ -36,7 +36,7 @@ class FetchError(RuntimeError):
     pass
 
 
-def _is_private(host: str) -> bool:
+def is_private_host(host: str) -> bool:
     """同步 DNS 解析判私网（getaddrinfo 无超时控制，须在工作线程调用）。"""
     try:
         infos = socket.getaddrinfo(host, None)
@@ -53,13 +53,28 @@ def _is_private(host: str) -> bool:
     return False
 
 
-async def _is_private_async(host: str) -> bool:
+async def is_private_host_async(host: str) -> bool:
     """DNS 解析丢工作线程 + 5 秒超时，避免慢 DNS 同步挂死事件循环；
     超时按不可达处理（非私网，后续真实请求自有超时兑底）。"""
     try:
-        return await asyncio.wait_for(asyncio.to_thread(_is_private, host), 5)
+        return await asyncio.wait_for(asyncio.to_thread(is_private_host, host), 5)
     except asyncio.TimeoutError:
         return False
+
+
+async def validate_base_url(url: str) -> str | None:
+    """校验 Provider base_url，返回错误描述或 None 表示通过。"""
+    if not url or not url.strip():
+        return "请填写 Base URL"
+    parsed = urlparse(url.strip())
+    if parsed.scheme not in ("http", "https"):
+        return "Base URL 仅支持 http/https 协议"
+    host = parsed.hostname
+    if not host:
+        return "Base URL 缺少主机名"
+    if await is_private_host_async(host):
+        return "Base URL 不允许指向内网地址"
+    return None
 
 
 async def web_fetch(url: str, timeout: int = 15,
@@ -68,7 +83,7 @@ async def web_fetch(url: str, timeout: int = 15,
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         raise FetchError(f"仅支持 http/https：{url}")
-    if not allow_private and await _is_private_async(parsed.hostname or ""):
+    if not allow_private and await is_private_host_async(parsed.hostname or ""):
         raise FetchError(f"拒绝访问私网地址（防 SSRF）：{url}")
 
     _web = timeout_for("web")

@@ -31,6 +31,7 @@ from .degradation import (
     decide_degradation,
 )
 from .intent_parser import (
+    INTENT_TYPE_LABELS,
     AttentionFocuser,
     DegradationError,
     EmotionState,
@@ -51,16 +52,6 @@ from .next_step import NextStepPipeline, parse_suggestion, strip_suggestion_from
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
-
-# 意图类型中文标签（思考过程展示用，提交/存储仍用英文枚举值）
-INTENT_TYPE_LABELS = {
-    "query_memory": "检索记忆", "query_knowledge": "查询知识库",
-    "query_external": "查询外部信息", "compute": "计算任务",
-    "file_op": "文件操作", "remember_intent": "记忆指令",
-    "remember_confirm": "重要信息待确认",
-    "soul_feedback": "风格反馈", "output_preference_feedback": "输出偏好反馈",
-    "meta": "系统相关", "chat": "日常对话",
-}
 
 
 # 输入清洗：剔除控制字符（保留换行/制表符），首尾去空
@@ -290,7 +281,10 @@ class AgentCore:
             # 客户端断开/中断时取消后台 worker，避免流式输出继续跑完
             if not task.done():
                 task.cancel()
-        await task
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _pipeline(self, sid: str, message: str, emit, images=None,
                         regenerate=False, location=None,
@@ -344,6 +338,8 @@ class AgentCore:
         # 输入清洗；信号采集阶段二：新用户消息到达 → 回填上一条 assistant 回复的隐式反应/关键词
         # 重新生成时跳过：重发的提问不是对上一轮回复的真实反应
         message = _sanitize_input(message)
+        # 图片提示：意图分析不收图片，在文本末尾附加标记让预判/收敛环知道有图
+        _img_hint = f"\n[用户附带了 {len(images)} 张图片]" if images else ""
         # 记忆检索专用：剥离附件正文后的真实提问。仅因本地 Embedding 算不动超长文本，
         # 意图识别/技能匹配等云端 LLM 环节仍读完整消息（材料本身可能承载意图）
         core_query = _strip_attachment_context(message)
@@ -435,7 +431,7 @@ class AgentCore:
                 "message": message})
             try:
                 quick_result = await self.intent_parser.quick_intent(
-                    message, session_id=sid,
+                    message + _img_hint, session_id=sid,
                     recent_history=recent_history)
                 _sp.end(output={
                     "needs_convergence": quick_result.needs_convergence,
@@ -475,10 +471,12 @@ class AgentCore:
             if not self.config.get("strategy_engine_enabled", True):
                 return None
             return await self._run_strategy_decision(
-                sid, message, quick_result, tracer, emit,
+                sid, message + _img_hint, quick_result, tracer, emit,
                 emotion=self._read_current_emotion())
 
         # ---- 收敛环（§3.5）仅在 LLM 可用 + 需深度收敛时进入 ----
+        self._elicitation_seed = None
+        self._elicitation_from_gap = False
         max_rounds = self.config.get("convergence_max_rounds", 2)
         _convergence_done = False
         _conv_strategy_task = None
@@ -487,7 +485,7 @@ class AgentCore:
             # 策略决策与收敛环同时启动：策略不依赖理解包，收敛环耗时完全掩盖决策耗时
             _conv_strategy_task = asyncio.create_task(_run_strategy())
             understanding, conv_memories = await self._convergence_loop(
-                sid, message, quick_result, history, tracer, emit,
+                sid, message + _img_hint, quick_result, history, tracer, emit,
                 max_rounds=max_rounds)
             if understanding is None:
                 # 检查是否因 elicitation 而返回 None（缺口可枚举 → 走追问分支）
@@ -572,10 +570,6 @@ class AgentCore:
 
         tool_names = [s.name for s in self.registry.all_specs()]
 
-        # 用于收敛环内向 elicitation 传递 seed 的 nonlocal 变量
-        self._elicitation_seed = None       # 实例变量：收敛环 → try_elicitation
-        self._elicitation_from_gap = False
-
         async def _run_intent():
             """第 4 步 意图识别（读完整消息：附件/长文本可能本身就是意图载体，
             云端模型处理长输入无本地算力瓶颈）。"""
@@ -588,7 +582,7 @@ class AgentCore:
                                                "depends_on": []})()]
                 else:
                     _intents = await self.intent_parser.parse(
-                        message, tool_names, sid,
+                        message + _img_hint, tool_names, sid,
                         recent_history=history[-6:])
                     # 兜底：外部类意图若未选工具，自动补上 web_search（防止模型凭空回答实时信息）
                     if "web_search" in tool_names:
@@ -652,8 +646,8 @@ class AgentCore:
         if not onboarding and not _convergence_done:
             await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
 
-        # ---- 元认知协议（v3 §六）：高复杂度且非排除意图才触发 ----
-        # 触发唯一条件：complexity_score≥7 且 intent_type∉排除集 且开关开启；
+        # ---- 元认知协议（v3 §六）：中等以上复杂度且非排除意图才触发 ----
+        # 触发条件：complexity_score≥4 且 intent_type∉排除集 且开关开启；
         # fallback 策略不触发（避免低质量决策叠加高成本环节）
         skeleton: CognitiveSkeleton | None = None
         next_step_seeds: list = []
@@ -727,7 +721,7 @@ class AgentCore:
                 and self.config.get("elicitation_confidence_threshold", -1) > 0):
             _elicit_sp = tracer.span_start("elicitation_check", input={
                 "session_id": sid,
-                "confidence": getattr(intents[0], "confidence", 1.0) if intents else 1.0,
+                "confidence": intents[0].confidence if intents else 1.0,
                 "intent_type": getattr(intents[0], "intent_type", "") if intents else "",
                 "gap_detected": self._elicitation_from_gap,
             })
@@ -1124,7 +1118,7 @@ class AgentCore:
                     "session_id": sid, "message_id": msg_id,
                     "strategy": strategy.db_snapshot()})
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("策略执行事件广播失败", exc_info=True)
         trace.update(output=assistant_text,
                      metadata={"internal_trace_id": get_trace_id(),
                                "images": len(images) if images else 0,
@@ -1142,7 +1136,6 @@ class AgentCore:
             try:
                 row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
                 if row:
-                    row = dict(row)  # sqlite3.Row 不支持 .get()，转 dict 后用默认值访问
                     from soul.mood_manager import _mood_cn
                     await emit("mood_updated", {
                         "ai_mood": row["ai_mood"],
@@ -1153,7 +1146,7 @@ class AgentCore:
                         "ai_active_action": row.get("active_action", ""),
                     })
             except Exception:  # noqa: BLE001
-                pass  # 静默降级，不影响对话
+                logger.debug("情绪快照推送失败", exc_info=True)
 
     async def _image_kb_task(self, images) -> None:
         """后台静默将当轮图片存入知识库（fire-and-forget，失败不影响对话）。"""
@@ -1293,11 +1286,13 @@ class AgentCore:
         else:
             _sp.end(output=result.span_snapshot())
         # 思考过程外露：自然语言 narrative（非字段值，v3 R4）
-        try:
-            await emit("thinking_delta",
-                       {"text": f"【策略决策】{result.strategy_narrative}\n"})
-        except Exception:  # noqa: BLE001
-            pass
+        # fallback 时 narrative 固定无信息量，不输出到思考过程
+        if not result.fallback_used:
+            try:
+                await emit("thinking_delta",
+                           {"text": f"【策略决策】{result.strategy_narrative}\n"})
+            except Exception:  # noqa: BLE001
+                logger.debug("策略 narrative 外露失败", exc_info=True)
         # 事件广播（观测/日志订阅，零阻塞）
         if self.bus:
             try:
@@ -1306,7 +1301,7 @@ class AgentCore:
                     "session_id": sid, "strategy": result.db_snapshot(),
                     "fallback_used": result.fallback_used})
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("策略决策事件广播失败", exc_info=True)
         return result
 
     async def _run_meta_cognitive(self, sid, message, strategy, memories,
@@ -1401,7 +1396,7 @@ class AgentCore:
         first_intent = intents[0] if intents else None
         if first_intent is None:
             return None
-        confidence = getattr(first_intent, "confidence", 1.0) or 1.0
+        confidence = first_intent.confidence
         if confidence >= confidence_threshold:
             return None
 
@@ -1505,7 +1500,7 @@ class AgentCore:
                 continue
             result = await self.executor.execute_tool(
                 tool_name, params, intent_summary=intent.intent_summary,
-                emit=emit)
+                emit=emit, session_id=sid)
             # DAG 层面 Replan：核心意图失败且未达上限时补救
             if not result.get("ok") and not result.get("skipped") and self._replan_count < self._replan_max:
                 self._replan_count += 1
@@ -1529,7 +1524,8 @@ class AgentCore:
                                    {"text": f"【工具调用】{tool_name} 失败，重新规划改用 {new_tool}…\n"})
                         result = await self.executor.execute_tool(
                             new_tool, new_params,
-                            intent_summary=intent.intent_summary, emit=emit)
+                            intent_summary=intent.intent_summary, emit=emit,
+                            session_id=sid)
                         tool_name = new_tool
                 elif tool_name == "render_flowchart":
                     # 图形工具降级兜底：Replan 也未给出有效方案 → 明确告知
@@ -1581,6 +1577,8 @@ class AgentCore:
                 f"convergence_round_{round_num}",
                 input={"round": round_num, "max_rounds": max_rounds,
                        "hypothesis": quick_result.intent_hypothesis})
+            await emit("thinking_delta",
+                       {"text": f"【深度理解】第 {round_num} 轮收敛：检索记忆…\n"})
 
             # 1. 上下文收集：检索记忆（复用现有检索器，每轮可能不同策略）
             cg_sp = tracer.span_start(
@@ -1614,12 +1612,10 @@ class AgentCore:
                     row = self.mood.db.query_one(
                         "SELECT * FROM mood_state WHERE id=1")
                     if row:
-                        # sqlite3.Row 不支持 .get()，转为 dict 访问
-                        rd = dict(row)
-                        em = rd.get("user_mood", "neutral") or "neutral"
+                        em = row.get("user_mood", "neutral") or "neutral"
                         ei = self.mood._decay(
-                            rd.get("user_intensity", 0) or 0,
-                            rd.get("user_updated_at"))
+                            row.get("user_intensity", 0) or 0,
+                            row.get("user_updated_at"))
                         emotion = EmotionState(
                             valence=em, intensity=round(ei, 2))
                 ea_sp.end(output={"valence": emotion.valence,
@@ -1628,6 +1624,7 @@ class AgentCore:
                 ea_sp.end(level="ERROR", status_message=str(e))
 
             # 3. 注意力聚焦：LLM 分析诉求点权重
+            await emit("thinking_delta", {"text": "分析诉求焦点…\n"})
             af_sp = tracer.span_start(
                 "attention_focus",
                 input={"message": message[:500], "round": round_num},
@@ -1648,6 +1645,7 @@ class AgentCore:
                     primary_focus=message[:60])
 
             # 4. 意图收敛：整合三者产出
+            await emit("thinking_delta", {"text": "收敛意图…\n"})
             ic_sp = tracer.span_start(
                 "intent_converge",
                 input={"hypothesis": quick_result.intent_hypothesis,
@@ -1690,7 +1688,23 @@ class AgentCore:
                 focus=focus,
             )
 
+            # 低置信度快速通道：意图清晰但执行前提严重缺失 → 跳过缺口检测，
+            # 直接退出收敛环让 _try_elicitation 接管（省 1-2 次 LLM 调用）
+            _conf = getattr(current_understanding.rich_intent, "confidence", 1.0)
+            if _conf < 0.4:
+                logger.info("收敛环第 %d 轮置信度极低（%.2f），跳过缺口检测直接退出",
+                            round_num, _conf)
+                await emit("thinking_delta",
+                           {"text": f"【信息不足】置信度 {_conf:.1f}，需要补充信息…\n"})
+                round_sp.end(output={
+                    "intent": current_understanding.rich_intent.intent_summary,
+                    "has_gaps": True,
+                    "early_exit_reason": "low_confidence_shortcut",
+                })
+                return current_understanding, all_mems
+
             # 5. 缺口检测
+            await emit("thinking_delta", {"text": "检测理解缺口…\n"})
             gd_sp = tracer.span_start(
                 "gap_detect",
                 input={"round": round_num},
@@ -1709,13 +1723,12 @@ class AgentCore:
                 gap_result = GapResult(
                     gaps=[], has_gaps=False, retarget_tasks=[])
 
-            round_sp.end(output={
-                "intent": current_understanding.rich_intent.intent_summary,
-                "has_gaps": gap_result.has_gaps,
-            })
-
             # 无缺口 → 理解完整，退出
             if not gap_result.has_gaps:
+                round_sp.end(output={
+                    "intent": current_understanding.rich_intent.intent_summary,
+                    "has_gaps": False,
+                })
                 return current_understanding, all_mems
 
             # 缺口收敛停滞检测：当前缺口类型与上一轮无变化或为其子集 → 早停
@@ -1747,6 +1760,13 @@ class AgentCore:
 
             # 缺口无法消解 → 先尝试追问（elicitation），不可枚举则诚实澄清（态二）
             if gap_result.unresolvable:
+                await emit("thinking_delta",
+                           {"text": "【信息不足】准备结构化追问…\n"})
+                round_sp.end(output={
+                    "intent": current_understanding.rich_intent.intent_summary,
+                    "has_gaps": True,
+                    "early_exit_reason": "unresolvable",
+                })
                 # 尝试将缺口转为结构化追问
                 seed = await self.strategy_engine.clarification_router(
                     sid, message,
@@ -1775,6 +1795,10 @@ class AgentCore:
                 return None, []
 
             # 有缺口且未达上限 → 准备下一轮定向重收集
+            round_sp.end(output={
+                "intent": current_understanding.rich_intent.intent_summary,
+                "has_gaps": True,
+            })
             if round_num < max_rounds:
                 await emit("thinking_delta", {
                     "text": f"【理解收敛】第 {round_num} 轮发现 {len(gap_result.gaps)} 个缺口，进入定向重收集…\n"})
@@ -2166,7 +2190,7 @@ class AgentCore:
             import re
             text = re.sub(r"^(请|麻烦)?(帮我?)?(记住|记录一下|remember|/remember)[：:，,\s]*",
                           "", message).strip() or message
-            return {"title": text[:30], "summary": text[:30],
+            return {"title": text[:30], "summary": text[:500],
                     "detail": message, "domain": "general"}
         if tool_name == "file_write":
             return AgentCore._heuristic_file_write(message)
@@ -2603,8 +2627,7 @@ class AgentCore:
 
             state = self.db.query_one(
                 "SELECT * FROM mood_state WHERE id=1")
-            # sqlite3.Row 不支持 .get()，转 dict 后保留默认值访问
-            state = dict(state) if state else {}
+            state = state if state else {}
             prev_user = state.get("user_mood", "neutral")
             prev_user_i = self.mood._decay(
                 state.get("user_intensity", 0), state.get("user_updated_at"))

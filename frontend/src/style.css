@@ -6,7 +6,9 @@
 * {
     margin: 0;
     padding: 0;
-    box-sizing: border-box
+    box-sizing: border-box;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(128, 128, 134, .3) transparent
 }
 
 :root {
@@ -169,7 +171,7 @@ body {
     font-family: var(--sans);
     background: var(--bg);
     color: var(--fg);
-    font-size: 14px;
+    font-size: var(--fs-md);
     line-height: 1.65;
     font-variant-numeric: tabular-nums;
     -webkit-font-smoothing: antialiased
@@ -197,17 +199,13 @@ body {
     background: rgba(128, 128, 134, .5)
 }
 
-* {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(128, 128, 134, .3) transparent
-}
 
 input,
 select,
 textarea,
 button {
     font-family: inherit;
-    font-size: 13px;
+    font-size: var(--fs-base);
     color: var(--fg)
 }
 
@@ -1107,7 +1105,7 @@ code {
     flex: 1;
     border: none;
     width: 100%;
-    background: #fff
+    background: var(--surface)
 }
 
 .html-preview-drawer.fullscreen {
@@ -1298,6 +1296,17 @@ code {
 
 .think-dots span:nth-child(3) {
     animation-delay: .4s
+}
+
+.handoff-bar {
+    max-width: 820px;
+    margin: 0 auto var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    background: var(--warnbg);
+    border-radius: var(--radius-sm);
+    font-size: var(--fs-sm);
+    color: var(--warntx);
+    text-align: center
 }
 
 /* ---- 输入区 ---- */
@@ -1707,7 +1716,7 @@ code {
     position: absolute;
     right: 8px;
     top: 34px;
-    z-index: calc(var(--z-menu) + 1);
+    z-index: var(--z-menu);
     background: var(--surface);
     border: 1px solid var(--bd);
     border-radius: 12px;
@@ -1728,6 +1737,15 @@ code {
 
 .sess-menu>div:hover {
     background: var(--surface-2)
+}
+
+.sess-readonly-badge {
+    font-size: var(--fs-xs);
+    color: var(--muted);
+    background: var(--surface-2);
+    padding: 1px 6px;
+    border-radius: var(--radius-xs);
+    flex-shrink: 0
 }
 
 .sess-rename-input {
@@ -1846,7 +1864,7 @@ code {
 }
 
 .kg-count {
-    fill: #fff;
+    fill: var(--surface);
     font-size: 10px;
     font-weight: 600;
     pointer-events: none

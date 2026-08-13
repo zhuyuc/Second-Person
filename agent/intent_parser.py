@@ -59,6 +59,7 @@ class Intent:
     intent_type: str
     tools_needed: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
+    confidence: float = 1.0
 
 
 # ---- 收敛式理解数据结构（§3.2） --------------------------------------------
@@ -515,10 +516,16 @@ class IntentParser:
                 logger.warning(
                     "意图解析返回未知 intent_type '%s'，安全降级为 chat（态一）", itype)
                 itype = "chat"
+            raw_conf = it.get("confidence")
+            try:
+                conf = max(0.0, min(1.0, float(raw_conf))) if raw_conf is not None else 1.0
+            except (TypeError, ValueError):
+                conf = 1.0
             out.append(Intent(
                 id=it.get("id", f"i{i+1}"),
                 intent_summary=it.get("intent_summary", ""),
                 intent_type=itype,
                 tools_needed=it.get("tools_needed", []) or [],
-                depends_on=it.get("depends_on", []) or []))
+                depends_on=it.get("depends_on", []) or [],
+                confidence=conf))
         return out or [Intent("i1", "意图识别失败", "unknown")]

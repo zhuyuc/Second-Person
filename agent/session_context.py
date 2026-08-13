@@ -43,10 +43,11 @@ class SessionStore:
             if not self.db.query_one("SELECT 1 FROM sessions WHERE session_id=?", (sid,)):
                 break
             seq += 1
+        now = _now()
         self.db.execute(
             "INSERT INTO sessions(session_id,title,title_source,last_active,"
-            "message_count,channel,from_session) VALUES(?,?,'auto',?,0,?,?)",
-            (sid, "新会话", _now(), channel, from_session))
+            "message_count,channel,from_session,created_at) VALUES(?,?,'auto',?,0,?,?,?)",
+            (sid, "新会话", now, channel, from_session, now))
         return sid
 
     def rename(self, sid: str, title: str) -> None:

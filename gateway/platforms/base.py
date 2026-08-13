@@ -248,14 +248,22 @@ class BasePlatformAdapter:
             await self.send_message(chat_id, "已关闭追问")
         else:
             answers = parsed["answers"]
+            answers_json = _json.dumps(answers, ensure_ascii=False)
             from agent.elicitation_state import get as get_state
             state = get_state(parsed["tool_use_id"])
+            pipeline_alive = False
             if state and not state.is_resolved:
-                state.answer(_json.dumps(answers, ensure_ascii=False))
+                state.answer(answers_json)
+                pipeline_alive = True
             self.db.execute(
                 "UPDATE elicitations SET status='answered_all', answers_json=?, "
                 "resolved_at=? WHERE id=?",
-                (_json.dumps(answers, ensure_ascii=False), now, parsed["tool_use_id"]))
+                (answers_json, now, parsed["tool_use_id"]))
+            if not pipeline_alive:
+                summary = "; ".join(
+                    f"{a.get('question','')}: {a.get('answer','')}"
+                    for a in answers if isinstance(a, dict))
+                await self._deliver(chat_id, sid, summary or "（已回答追问）")
 
     def _record_failure(self, reason: str) -> None:
         self._failures += 1

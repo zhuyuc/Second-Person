@@ -119,7 +119,7 @@ onMounted(() => sess.load())
 
     <!-- 历史会话（置顶 / 渠道 / 最近） -->
     <div class="side-sess">
-      <div v-if="!sess.list.length" class="empty" style="padding:32px 8px"><i class="ti ti-messages"></i>还没有会话</div>
+      <div v-if="!sess.list.length" class="empty" style="padding:32px 8px"><i class="ti ti-messages"></i>还没有会话<br>发送第一条消息开始吧</div>
       <div v-for="grp in sessionGroups" :key="grp.key" v-show="grp.items.length" style="margin-bottom:8px">
         <div class="sess-group-hd" @click="collapsed[grp.key] = !collapsed[grp.key]">
           <i class="ti" :class="collapsed[grp.key] ? 'ti-chevron-right' : 'ti-chevron-down'"></i>

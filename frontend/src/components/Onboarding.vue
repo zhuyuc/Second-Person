@@ -136,7 +136,7 @@ async function confirmSoul() {
           <input v-model="emb.model_id" placeholder="text-embedding-3" style="width:100%" />
         </div>
         <div class="fg" style="justify-content:flex-end;gap:8px">
-          <button @click="step = 3">暂不配置，先用全文搜索</button>
+          <button @click="run('enterW', enterWelcome)" :disabled="busy('enterW')">暂不配置，先用全文搜索</button>
           <button @click="run('testEmb', testEmb)" :disabled="busy('testEmb')"><i v-if="busy('testEmb')"
               class="ti ti-loader-2"></i> 测试</button>
           <button class="btn-primary" @click="run('enterW', enterWelcome)" :disabled="busy('enterW')"><i

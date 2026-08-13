@@ -45,6 +45,19 @@ class ConflictDetector:
     async def mark_conflict(self, mid_a: str, mid_b: str, title: str) -> str:
         """把两条记忆标为 disputed，建 contradicts，生成 conflict 文件。"""
         conflict_id = f"conflict_{uuid.uuid4().hex[:8]}"
+        # 先写 conflict 文件，再提交索引更新：文件写失败时不会留下半成品索引
+        self.conflicts_dir.mkdir(parents=True, exist_ok=True)
+        row_a, doc_a = self._load_doc(mid_a)
+        row_b, doc_b = self._load_doc(mid_b)
+        fm = {"conflict_id": conflict_id, "status": "pending",
+              "detected_at": now_cst().strftime("%Y-%m-%d"),
+              "detected_by": "conflict_detector"}
+        body = (f"## 来源 A\n- 记忆：[[{mid_a}]]\n- 内容：{doc_a.summary if doc_a else ''}\n\n"
+                f"## 来源 B\n- 记忆：[[{mid_b}]]\n- 内容：{doc_b.summary if doc_b else ''}\n\n"
+                f"## 处理结果\n")
+        (self.conflicts_dir / f"{conflict_id}.md").write_text(
+            dump_frontmatter_doc(fm, body), encoding="utf-8")
+
         for mid in (mid_a, mid_b):
             row, doc = self._load_doc(mid)
             if not doc:
@@ -58,18 +71,6 @@ class ConflictDetector:
                 "change_history": doc.change_history, "links": doc.links,
                 "entities": doc.entities, "reason": "矛盾检测：置 disputed"})
         await self.linker.add_link(mid_a, mid_b, "contradicts")
-
-        self.conflicts_dir.mkdir(parents=True, exist_ok=True)
-        row_a, doc_a = self._load_doc(mid_a)
-        row_b, doc_b = self._load_doc(mid_b)
-        fm = {"conflict_id": conflict_id, "status": "pending",
-              "detected_at": now_cst().strftime("%Y-%m-%d"),
-              "detected_by": "conflict_detector"}
-        body = (f"## 来源 A\n- 记忆：[[{mid_a}]]\n- 内容：{doc_a.summary if doc_a else ''}\n\n"
-                f"## 来源 B\n- 记忆：[[{mid_b}]]\n- 内容：{doc_b.summary if doc_b else ''}\n\n"
-                f"## 处理结果\n")
-        (self.conflicts_dir / f"{conflict_id}.md").write_text(
-            dump_frontmatter_doc(fm, body), encoding="utf-8")
         return conflict_id
 
     # ---- 待处理矛盾列表 ---------------------------------------------------

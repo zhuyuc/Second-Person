@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -28,7 +29,8 @@ _container: AppContainer | None = None
 
 
 def get_container() -> AppContainer:
-    assert _container is not None, "容器未初始化"
+    if _container is None:
+        raise RuntimeError("容器未初始化")
     return _container
 
 
@@ -44,6 +46,18 @@ def create_app(data_dir: str | Path) -> FastAPI:
         await _container.shutdown()
 
     app = FastAPI(title="Second Person", version="1.0.0", lifespan=lifespan)
+
+    cors_origins = [
+        "http://localhost:8000", "http://127.0.0.1:8000",
+        "http://localhost:5173", "http://127.0.0.1:5173",
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     @app.middleware("http")
     async def trace_mw(request: Request, call_next):
@@ -107,7 +121,3 @@ def create_app(data_dir: str | Path) -> FastAPI:
                   html=True), name="static")
 
     return app
-
-
-def ok(data=None):
-    return {"code": 200, "data": data}

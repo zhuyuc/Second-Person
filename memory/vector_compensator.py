@@ -82,6 +82,7 @@ class VectorCompensator:
                         "UPDATE vectors SET vector_status='failed', updated_at=? "
                         "WHERE memory_id=?",
                         (now_cst().isoformat(timespec="seconds"), mid))
+                    self._retry_counts.pop(mid, None)
                     self.notify("vector_failed", f"记忆 {mid} 向量化失败：{e}")
             return len(ids)
 

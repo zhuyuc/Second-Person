@@ -407,17 +407,16 @@ class FileWriter:
 
     def _memory_delete(self, mid: str) -> None:
         row = self.palace.get(mid)
-        with self.db.transaction() as conn:
-            # 从指向它的记忆 frontmatter 移除反向引用
-            for bl in self.palace.backlinks(mid):
-                self._remove_link_in_md(bl["source_id"], mid)
-            self.palace.delete_all_indexes(conn, mid)
-        # 删除 md 文件
+        # 先删文件再清索引：文件删除失败时 DB 事务可回滚，避免索引已清但文件残留
         if row and row["md_path"]:
             f = self.data_dir / row["md_path"]
             self._mark_internal(f)
             if f.exists():
                 f.unlink()
+        with self.db.transaction() as conn:
+            for bl in self.palace.backlinks(mid):
+                self._remove_link_in_md(bl["source_id"], mid)
+            self.palace.delete_all_indexes(conn, mid)
         self.vs.remove(mid)
         # 来源记忆被删除 → 涉及它的 pending 矛盾自动 resolved，对侧恢复 confidence
         self._auto_resolve_conflicts(mid)

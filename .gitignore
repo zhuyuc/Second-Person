@@ -30,6 +30,7 @@ dist/
 
 # IDE 内部知识库
 .qoder/
+.claude/
 
 # 运行产物
 *.pid

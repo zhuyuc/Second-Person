@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
+
+logger = logging.getLogger("second_person.settings")
 
 from fastapi import APIRouter, Request, UploadFile, File
 
@@ -89,7 +92,9 @@ async def get_provider_key(pid: str):
     snap = c.providers.snapshot(pid)
     if not snap:
         return {"code": 404, "message": "Provider 不存在", "trace_id": None, "details": None}
-    return {"code": 200, "data": {"api_key": snap.api_key or ""}}
+    key = snap.api_key or ""
+    masked = key[:3] + "****" + key[-4:] if len(key) > 8 else "****"
+    return {"code": 200, "data": {"api_key": key, "api_key_masked": masked}}
 
 
 @router.post("/settings/providers/test-connection")
@@ -106,8 +111,12 @@ async def test_connection_config(request: Request):
 
 
 async def _test_provider(c, body: dict) -> dict:
-    from infrastructure.llm_provider import ProviderSnapshot
+    from tools.web_fetch import validate_base_url
     body = _clean_provider_fields(body)
+    url_err = await validate_base_url(body.get("base_url", ""))
+    if url_err:
+        return {"ok": False, "error": url_err}
+    from infrastructure.llm_provider import ProviderSnapshot
     snap = ProviderSnapshot("test", body["provider_type"], body["base_url"],
                             body["api_key"], body["model_id"])
     return await _probe_snapshot(c, snap)
@@ -462,6 +471,9 @@ async def export_data():
     return {"code": 200, "data": {"path": path}}
 
 
+_BACKUP_IMPORT_MAX_BYTES = 500 * 1024 * 1024  # 500MB
+
+
 @router.post("/settings/backups/import")
 async def import_data(file: UploadFile = File(...)):
     c = _c()
@@ -469,6 +481,9 @@ async def import_data(file: UploadFile = File(...)):
     import tempfile
     from memory.recovery import rebuild_index
     content = await file.read()
+    if len(content) > _BACKUP_IMPORT_MAX_BYTES:
+        return {"code": 400, "message": f"备份文件过大（上限 {_BACKUP_IMPORT_MAX_BYTES // 1024 // 1024}MB）",
+                "trace_id": None, "details": None}
     tmp = Path(tempfile.mktemp(suffix=".zip"))
     tmp.write_bytes(content)
     # 导入前强制保护性备份 + manifest 校验（复用 restore 的校验路径）
@@ -478,9 +493,13 @@ async def import_data(file: UploadFile = File(...)):
         names = z.namelist()
         if "config.yaml" not in names:
             return {"code": 400, "message": "导入包缺少 config.yaml", "trace_id": None, "details": None}
+        data_root = Path(c.data_dir).resolve()
         for name in names:
             if name.startswith("md/"):
-                dst = Path(c.data_dir) / name[3:]
+                dst = (data_root / name[3:]).resolve()
+                if not str(dst).startswith(str(data_root)):
+                    logger.warning("备份导入跳过路径穿越条目：%s", name)
+                    continue
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 with z.open(name) as src:
                     dst.write_bytes(src.read())
@@ -641,9 +660,13 @@ async def platform_detail(pid: str):
                 app_secret = d.get("app_secret", "")
             except Exception:  # noqa: BLE001 - 换机后解密失败则留空引导重填
                 pass
+    def _mask(s: str) -> str:
+        return s[:3] + "****" + s[-4:] if len(s) > 8 else "****" if s else ""
     return {"code": 200, "data": {
         "id": row["id"], "platform_type": row["platform_type"],
         "bot_token": bot_token, "app_secret": app_secret,
+        "bot_token_masked": _mask(bot_token),
+        "app_secret_masked": _mask(app_secret),
         "whitelist_user_id": row["whitelist_user_id"] or "",
         "callback_url": row["callback_url"] or ""}}
 
@@ -769,7 +792,7 @@ def _weixin_qrcode_png(content: str) -> str:
             buf, format="PNG")
         return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
     except Exception as e:  # noqa: BLE001 - 二维码生成失败不阻断绑定流程
-        print(f"[weixin] 二维码生成失败（前端将显示链接兜底）：{e}")
+        logger.warning("微信二维码生成失败（前端将显示链接兜底）：%s", e)
         return ""
 
 

@@ -71,7 +71,7 @@ export function useSSE() {
     return { send, abort }
 }
 
-function parseSSE(chunk) {
+export function parseSSE(chunk) {
     let event = 'message', data = ''
     for (const line of chunk.split(/\r?\n/)) {
         if (line.startsWith('event:')) event = line.slice(6).trim()

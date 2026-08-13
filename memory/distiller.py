@@ -129,8 +129,12 @@ class Distiller:
         return await self._write_memory(item, attribution, source_type)
 
     async def _write_memory(self, item: dict, attribution: str, source_type: str) -> str | None:
-        title = item.get("title", "")[:30]
-        summary = item.get("summary", "")[:30]
+        title = item.get("title", "").strip()[:30]
+        if not title:
+            title = (item.get("summary", "") or item.get("detail", ""))[:30].strip()
+        if not title:
+            return None
+        summary = item.get("summary", "")[:500]
         entities, entity_types = normalize_entities(item.get("entities", []))
         item["entities"] = entities
         confidence = item.get("confidence") or ATTRIBUTION_CONFIDENCE.get(
@@ -200,8 +204,8 @@ class Distiller:
             return relation if relation in (
                 "same", "evolved", "contradicts", "related") else "same"
         except Exception:  # noqa: BLE001
-            logger.info("合并关系判定失败，回退 same")
-            return "same"
+            logger.info("合并关系判定失败，回退 related（避免误合并）")
+            return "related"
 
     def _fetch_detail(self, memory_id: str) -> str:
         """从 FTS 索引取记忆 detail 正文（避免读盘解析 md）。"""
@@ -232,7 +236,8 @@ class Distiller:
             return None, 0.0
         if rows:
             # 归一化到 0-1 粗略映射（BM25 降级区间：合并 0.75）
-            return rows[0]["memory_id"], min(1.0, rows[0]["s"] / 10.0)
+            bm25_divisor = self.config.get("bm25_normalization_divisor", 10.0)
+            return rows[0]["memory_id"], min(1.0, rows[0]["s"] / bm25_divisor)
         return None, 0.0
 
     async def _create(self, item, confidence, source_type, embedding, entities,
@@ -242,7 +247,7 @@ class Distiller:
         mid = mk_mid(seq)
         now = now_cst()
         fm = {
-            "id": mid, "title": item.get("title", "")[:30],
+            "id": mid, "title": item.get("title", "").strip()[:30] or "untitled",
             # 源头净化：LLM 蒸馏可能产出含反斜杠/多段式的脏 domain（v3 修复）
             "domain": normalize_domain(item.get("domain", "general")),
             "confidence": confidence,
@@ -255,7 +260,7 @@ class Distiller:
         }
         await self.fw.submit("memory", {
             "op": "create", "frontmatter": fm,
-            "summary": item.get("summary", "")[:30], "detail": item.get("detail", ""),
+            "summary": item.get("summary", "")[:500], "detail": item.get("detail", ""),
             "change_log": f"[{now:%Y-%m-%d}] 首次创建，来源：{item.get('reason', '提炼')}",
             "embedding": embedding, "entities": entities,
             "entity_types": entity_types or {},
@@ -434,6 +439,8 @@ class Distiller:
             "timeline_event": "merged"})
         await self.fw.submit("memory", {"op": "delete", "memory_id": dup_id})
         self._rededup_deleted.add(dup_id)
+        if len(self._rededup_deleted) > 1000:
+            self._rededup_deleted = set(list(self._rededup_deleted)[-500:])
 
     async def _clear_dedup_pending(self, mid: str) -> None:
         """清除 dedup_pending 标记（未找到重复或已完成合并的幸存者）。"""

@@ -25,12 +25,15 @@ async def test_connection(request: Request):
     body = await request.json()
     c = _c()
     cfg = body.get("provider_config", {})
+    from tools.web_fetch import validate_base_url
+    url_err = await validate_base_url(cfg.get("base_url", ""))
+    if url_err:
+        return {"code": 200, "data": {"ok": False, "error": url_err}}
     from infrastructure.llm_provider import ProviderSnapshot
     snap = ProviderSnapshot("onboard", cfg.get("provider_type", "openai_compatible"),
                             cfg.get("base_url", ""), cfg.get("api_key", ""),
                             cfg.get("model_id", ""))
     try:
-        # 同 settings 探测：连通性验证限 max_tokens，避免推理模型思考拖慢引导流程
         await c.llm.chat(snap, [{"role": "user", "content": "ping"}],
                          source="main_chat", max_tokens=10)
         return {"code": 200, "data": {"ok": True}}
@@ -43,6 +46,10 @@ async def test_embedding(request: Request):
     body = await request.json()
     c = _c()
     cfg = body.get("provider_config", {})
+    from tools.web_fetch import validate_base_url
+    url_err = await validate_base_url(cfg.get("base_url", ""))
+    if url_err:
+        return {"code": 200, "data": {"ok": False, "error": url_err}}
     from infrastructure.llm_provider import ProviderSnapshot
     snap = ProviderSnapshot("emb", "openai_compatible", cfg.get("base_url", ""),
                             cfg.get("api_key", ""), cfg.get("model_id", ""))
@@ -94,10 +101,16 @@ async def soul_confirm(request: Request):
 
 
 # ---- 四 文档导入 ----------------------------------------------------------
+_DOC_IMPORT_MAX_BYTES = 50 * 1024 * 1024  # 50MB
+
+
 @router.post("/import/document")
 async def import_document(file: UploadFile = File(...)):
     c = _c()
     content = await file.read()
+    if len(content) > _DOC_IMPORT_MAX_BYTES:
+        return {"code": 400, "message": f"文件过大（上限 {_DOC_IMPORT_MAX_BYTES // 1024 // 1024}MB）",
+                "trace_id": None, "details": None}
     try:
         result = await c.ingest.ingest_file(file.filename, content, source="web_ui")
     except ValueError as e:
@@ -280,12 +293,15 @@ async def download_generated_file(stored_name: str):
     """generate_document 工具产物下载（temp/exports，夜间链 7 天清理）。"""
     from pathlib import Path
     from fastapi.responses import FileResponse
-    # 防路径穿越：只接受纯文件名
-    if Path(stored_name).name != stored_name or stored_name.startswith("."):
+    # 防路径穿越：拒绝包含目录分隔符（含 Windows 反斜杠）和隐藏文件
+    if ("/" in stored_name or "\\" in stored_name
+            or Path(stored_name).name != stored_name
+            or stored_name.startswith(".")):
         return {"code": 404, "message": "文件不存在", "trace_id": None,
                 "details": None}
-    path = Path(_c().data_dir) / "temp" / "exports" / stored_name
-    if not path.is_file():
+    exports_dir = Path(_c().data_dir) / "temp" / "exports"
+    path = (exports_dir / stored_name).resolve()
+    if not path.is_relative_to(exports_dir.resolve()) or not path.is_file():
         return {"code": 404, "message": "文件不存在或已过期清理，请重新生成",
                 "trace_id": None, "details": None}
     # 对外文件名去掉 uuid 前缀，还原标题原名
@@ -328,7 +344,8 @@ async def oauth_callback(state: str = "", code: str = ""):
             c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
             return {"code": 400, "message": "授权已过期，请重试", "trace_id": None, "details": None}
     except (TypeError, ValueError):
-        pass
+        c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
+        return {"code": 400, "message": "授权记录异常，请重新发起", "trace_id": None, "details": None}
     # code 换 token 由具体连接器完成；此处标记已回调，加密存 credentials
     c.creds.store(f"oauth:{row['connector_id']}", "connector", code)
     c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
@@ -377,7 +394,7 @@ async def health():
         "database": "ok" if db_ok else "error",
         "vector_cache": "ok" if c.vs.loaded else "loading",
         "fts5": fts_state,
-        "event_bus": "ok",  # 总线常驻内存组件，订阅者数为扩展信息非健康指标
+        "event_bus": "ok" if getattr(c.bus, "_loop", None) else "degraded",
         "scheduler": "ok" if getattr(getattr(c, "scheduler", None),
                                      "_running", True) else "degraded",
         "file_writer": "ok" if _fw_ok(c) else "degraded",

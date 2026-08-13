@@ -59,7 +59,7 @@ class Palace:
                  dedup_pending=excluded.dedup_pending, md_path=excluded.md_path,
                  updated_at=excluded.updated_at""",
             {
-                "id": fm["id"], "title": fm.get("title", ""), "summary": summary,
+                "id": fm["id"], "title": fm.get("title", "") or "untitled", "summary": summary,
                 "domain": fm.get("domain", "general"),
                 "confidence": fm.get("confidence", "medium"),
                 "lifecycle": fm.get("lifecycle", "active"),

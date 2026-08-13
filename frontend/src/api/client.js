@@ -2,6 +2,8 @@
 import { useToast } from '@/stores/toast'
 
 const BASE = '/api'
+let _toast
+function getToast() { return _toast ??= useToast() }
 
 async function request(method, path, body, isForm) {
     const opts = { method, headers: {} }
@@ -15,7 +17,7 @@ async function request(method, path, body, isForm) {
     try {
         resp = await fetch(BASE + path, opts)
     } catch (e) {
-        useToast().push('error', '网络错误，请检查服务是否运行')
+        getToast().push('error', '网络错误，请检查服务是否运行')
         throw e
     }
     const data = await resp.json().catch(() => ({}))
@@ -24,16 +26,16 @@ async function request(method, path, body, isForm) {
         throw new Error(data.message || '请求失败')
     }
     // 非标准响应兑底：HTTP 失败但响应体无 code（如 405/502/网关错误页），
-    // 不能静默当成功返回，否则调用方会误报“操作成功”但后端实际未执行
+    // 不能静默当成功返回，否则调用方会误报"操作成功"但后端实际未执行
     if (!resp.ok) {
-        useToast().push('error', `请求失败（HTTP ${resp.status}），后端可能未重启或接口不存在`)
+        getToast().push('error', `请求失败（HTTP ${resp.status}），后端可能未重启或接口不存在`)
         throw new Error(`HTTP ${resp.status}`)
     }
     return data.data
 }
 
 function handleError(data, httpStatus) {
-    const t = useToast()
+    const t = getToast()
     const code = data.code
     const traceId = data.trace_id || undefined
     if (code === 400) t.push('error', data.message || '请检查输入', traceId)

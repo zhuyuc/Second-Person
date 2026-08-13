@@ -28,7 +28,8 @@ class ToolExecutor:
     async def execute_tool(self, tool_name: str, params: dict, *,
                            intent_summary: str = "",
                            emit: Callable[[str, dict],
-                                          Awaitable[None]] | None = None
+                                          Awaitable[None]] | None = None,
+                           session_id: str = "",
                            ) -> dict[str, Any]:
         """执行单个工具，含 pre/post hook。返回 {ok, result, skipped, error}。
         每个工具调用记录独立 Langfuse span（挂当前 trace/span 下），
@@ -40,7 +41,8 @@ class ToolExecutor:
 
         # ---- ask_user 特殊路径 ----
         if tool_name == "ask_user":
-            return await self._execute_ask_user(params, intent_summary, emit)
+            return await self._execute_ask_user(params, intent_summary, emit,
+                                                session_id=session_id)
 
         _sp = get_tracer().span_start("tool_execute", input={
             "tool": tool_name,
@@ -106,8 +108,16 @@ class ToolExecutor:
         # 2. 构造 ElicitationState
         questions_json = _json.dumps(payload["questions"], ensure_ascii=False)
         reason = payload.get("reason", "")
-        platform = "web"  # TODO: 从上下文推断
-        ttl_minutes = self.config.get("elicitation_web_ttl_minutes", 30)
+        platform = "web"
+        if session_id:
+            from app.main import get_container
+            row = get_container().db.query_one(
+                "SELECT channel FROM sessions WHERE session_id=?", (session_id,))
+            if row and row["channel"]:
+                platform = row["channel"]
+        ttl_key = ("elicitation_im_ttl_minutes" if platform != "web"
+                   else "elicitation_web_ttl_minutes")
+        ttl_minutes = self.config.get(ttl_key, 30 if platform == "web" else 1440)
 
         state = ElicitationState(
             id=tool_use_id,

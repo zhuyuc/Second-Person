@@ -129,8 +129,10 @@ class ElicitationState:
         }
 
     @classmethod
-    def from_db_row(cls, row: dict) -> ElicitationState:
+    def from_db_row(cls, row) -> ElicitationState:
         """从 elicitations 表查询结果恢复。"""
+        if not isinstance(row, dict):
+            row = dict(row)
         return cls(
             id=row["id"],
             session_id=row["session_id"],

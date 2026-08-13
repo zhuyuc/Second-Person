@@ -183,13 +183,13 @@ class StrategyEngine:
 
     def _validated(self, data: dict, hint: int) -> ResponseStrategy:
         """枚举/值域校验：非法值落默认而非整体失败（局部容错）。"""
-        # complexity_score 只允许在 hint 基础上 ±2（v3 §四.1 单一决策源）
+        # complexity_score 只允许在 hint 基础上 ±3（v3 §四.1 单一决策源）
         raw_score = data.get("complexity_score", hint)
         try:
             score = max(0, min(10, int(raw_score)))
         except (TypeError, ValueError):
             score = hint
-        score = max(hint - 2, min(hint + 2, score))
+        score = max(hint - 3, min(hint + 3, score))
         form = data.get("form") if data.get("form") in FORM_ENUM else "分析型"
         tone = data.get("tone") if data.get("tone") in TONE_ENUM else "中性"
         try:
@@ -235,7 +235,7 @@ class StrategyEngine:
     @staticmethod
     def should_trigger_meta(strategy: ResponseStrategy, intent_type: str,
                             enabled: bool) -> bool:
-        return (enabled and strategy.complexity_score >= 7
+        return (enabled and strategy.complexity_score >= 4
                 and not strategy.fallback_used
                 and intent_type not in META_EXCLUDED_INTENTS)
 
@@ -269,7 +269,7 @@ class StrategyEngine:
                 {"role": "user", "content": user_prompt},
             ], source="elicitation_decision", session_id=session_id)
             raw = resp.get("content", "")
-            data = _json.loads(repair_json(raw))
+            data = repair_json(raw)
 
             if data.get("enumerable") and data.get("questions"):
                 return {

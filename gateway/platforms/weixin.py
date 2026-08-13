@@ -217,6 +217,7 @@ class WeixinAdapter(BasePlatformAdapter):
                 from_user_id, from_user_id, context_token, filename, content)
         except Exception as e:  # noqa: BLE001
             logger.warning("微信文件下载失败：%s", e)
+            await self.send_message(from_user_id, "文件下载处理失败，请重新发送")
 
     async def _handle_voice(self, msg: dict, from_user_id: str,
                             context_token: str, item: dict) -> None:

@@ -102,12 +102,16 @@ class FileWatcher:
 
     def _dispatch(self, path: Path, event_type: str) -> None:
         rp = str(path.resolve())
+        now = time.monotonic()
         with self._lock:
             exp = self._internal_writes.get(rp)
             if exp:
-                if exp > time.monotonic():
+                if exp > now:
                     return
                 self._internal_writes.pop(rp, None)
+            if len(self._internal_writes) > 200:
+                self._internal_writes = {
+                    k: v for k, v in self._internal_writes.items() if v > now}
         resolved = path.resolve()
         # 按监控子目录精确判定归属：不能用目录名片段（parts 含 "soul"）
         # 匹配，否则 data/memories/soul 领域目录的事件会被误判为人格事件

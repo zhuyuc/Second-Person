@@ -6,11 +6,12 @@ import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useSessions } from '@/stores/sessions'
 import { useBusy } from '@/composables/useBusy'
+import { parseSSE } from '@/composables/useSSE'
 import KnowledgeGraph from '@/components/graph/KnowledgeGraph.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import { domainLabel, loadDomainLabels } from '@/utils/domainLabel'
-import { formatTimeFull as formatTime, fmtSize as fmtSizeBase } from '@/utils/format'
-import { CONF_MAP, LIFE_MAP, SRC_MAP, ATTR_MAP } from '@/utils/enumLabel'
+import { formatTimeFull, fmtSize as fmtSizeBase } from '@/utils/format'
+import { CONF_MAP, LIFE_MAP, SRC_MAP, ATTR_MAP, EVT_MAP, DEDUCT_MAP, eventLabel, dimStatusLabel } from '@/utils/enumLabel'
 
 const router = useRouter()
 const toast = useToast()
@@ -90,8 +91,6 @@ async function loadTimeline() {
   timeline.value = await api.get(q)
 }
 
-const EVT_MAP = { created: '新建', updated: '更新', evolved: '演变', imported: '导入', archived: '归档', merged: '合并' }
-
 // 时间线"建立引用"类事件：从 detail 中提取被关联的记忆 id，提供查看关联记忆的入口
 function tlLinkTarget(t) {
   const m = /→\s*(mem_\d+)/.exec(t.detail || '')
@@ -112,18 +111,6 @@ const timelineGroups = computed(() => {
 
 // 文件大小：空值显示 '-'（基础实现在 utils/format.js）
 function fmtSize(n) { return fmtSizeBase(n) || '-' }
-
-// 用户画像维度状态中文化（未知值兜底显示原文）
-const DIM_STATUS = { active: '活跃', building: '积累中', stable: '稳定', mature: '成熟', sparse: '样本较少', empty: '暂无内容' }
-function dimStatus(s) { return DIM_STATUS[s] || s }
-// SOUL 风格来源中文化
-const SOUL_SRC = { dialog: '对话确认', auto: '自动演化' }
-// 健康度扣分维度中文映射（与 score_breakdown.reason 对应）
-const DEDUCT_MAP = {
-  disputed: '矛盾记忆', low_unconfirmed: '低置信未确认', stale: '过期记忆',
-  orphan: '孤立记忆', duplicate: '疑似重复', missing: 'md 文件缺失',
-  failed_writes: '写入失败',
-}
 
 async function loadProfile() {
   try {
@@ -374,12 +361,8 @@ async function uploadDocStream(file, onEvent) {
     const parts = buffer.split(/\r?\n\r?\n/)
     buffer = parts.pop()
     for (const part of parts) {
-      let event = 'message', data = ''
-      for (const line of part.split(/\r?\n/)) {
-        if (line.startsWith('event:')) event = line.slice(6).trim()
-        else if (line.startsWith('data:')) data += line.slice(5).trim()
-      }
-      if (data) { try { onEvent(event, JSON.parse(data)) } catch { onEvent(event, {}) } }
+      const evt = parseSSE(part)
+      if (evt) onEvent(evt.event, evt.data)
     }
   }
 }
@@ -539,7 +522,7 @@ async function openLocalDirFiles(dir) {
 function localDirSummary(dir) {
   const s = dir.summary || {}
   if (!dir.last_scan_at) return '尚未扫描，可点“立即扫描”手动触发'
-  let t = `上次扫描 ${formatTime(dir.last_scan_at)}`
+  let t = `上次扫描 ${formatTimeFull(dir.last_scan_at)}`
   if (s.processed) t += ` · 最近一轮：导入 ${s.imported || 0} 个 / 提炼 ${s.memories || 0} 条`
   if (s.failed) t += ` / 失败 ${s.failed} 个`
   return t
@@ -612,7 +595,7 @@ onActivated(() => selectTab(tab.value))
         <input type="checkbox" v-model="importantOnly" @change="loadList" /> 只看重要记忆
       </label>
     </div>
-    <div v-if="!memList.length" class="empty"><i class="ti ti-brain"></i>记忆宫殿还是空的<br>对话中系统会自动沉淀记忆</div>
+    <div v-if="!memList.length" class="empty"><i class="ti ti-brain"></i>还没有记忆<br>对话中系统会自动沉淀记忆</div>
     <div v-for="m in memList" :key="m.id" class="cw" style="cursor:pointer" @click="openDetail(m.id)">
       <div class="row">
         <div>
@@ -646,18 +629,18 @@ onActivated(() => selectTab(tab.value))
         <option :value="90">近 90 天</option>
       </select>
     </div>
-    <div v-if="!timeline.length" class="empty"><i class="ti ti-timeline"></i>暂无记忆变更记录</div>
+    <div v-if="!timeline.length" class="empty"><i class="ti ti-timeline"></i>还没有变更记录<br>记忆的新建、更新、合并等操作将显示在这里</div>
     <div v-for="g in timelineGroups" :key="g.day">
       <div class="muted" style="font-weight:600;margin:14px 0 6px">{{ g.day }}</div>
       <div v-for="(t, i) in g.items" :key="i" class="cw" style="cursor:pointer" @click="openDetail(t.memory_id)">
         <div style="font-weight:500">{{ t.title || t.memory_id }}</div>
         <div class="row" style="margin-top:4px">
-          <span class="badge badge-a">{{ EVT_MAP[t.event_type] || t.event_type }}</span>
+          <span class="badge badge-a">{{ eventLabel(t.event_type) }}</span>
           <span class="muted" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.summary ||
             t.detail }}</span>
           <button v-if="tlLinkTarget(t)" class="btn-xs" style="flex-shrink:0"
             @click.stop="openDetail(tlLinkTarget(t))"><i class="ti ti-link"></i> 查看关联</button>
-          <span class="muted">{{ formatTime(t.event_time) }}</span>
+          <span class="muted">{{ formatTimeFull(t.event_time) }}</span>
         </div>
       </div>
     </div>
@@ -672,7 +655,7 @@ onActivated(() => selectTab(tab.value))
     <div v-if="!profile.dimensions.length" class="empty"><i class="ti ti-user"></i>用户画像积累中<br>系统在观察你的偏好</div>
     <div class="g2">
       <div v-for="(d, i) in profile.dimensions" :key="i" class="cw" style="cursor:pointer" @click="openDimDetail(d)">
-        <div class="row"><b>{{ d.name }}</b><span class="badge badge-g">{{ dimStatus(d.status) }}</span></div>
+        <div class="row"><b>{{ d.name }}</b><span class="badge badge-g">{{ dimStatusLabel(d.status) }}</span></div>
         <div class="dim-preview">{{ dimText(d) }}</div>
       </div>
     </div>
@@ -713,10 +696,10 @@ onActivated(() => selectTab(tab.value))
           <div class="muted" style="font-weight:500;margin-bottom:4px">{{ s.name }}</div>
           <pre v-if="s.text"
             style="white-space:pre-wrap;font-size:var(--fs-base);color:var(--sec);margin:0">{{ s.text }}</pre>
-          <div v-else class="muted" style="font-size:var(--fs-base)">暂时还没有内容</div>
+          <div v-else class="muted" style="font-size:var(--fs-base)">还没有内容</div>
         </div>
       </div>
-      <div v-if="!soulHistory.length" class="muted">暂无版本历史</div>
+      <div v-if="!soulHistory.length" class="muted">还没有版本历史</div>
       <div v-for="h in soulHistory" :key="h.version" class="row"
         style="padding:8px 0;border-bottom:1px solid var(--bd)">
         <div><b>v{{ h.version }}</b> <span v-if="h.current" class="badge badge-a">当前</span>
@@ -748,7 +731,7 @@ onActivated(() => selectTab(tab.value))
       <!-- 信号积累进度：已采集 / 上次提炼 / 下次触发条件 -->
       <div class="muted" style="margin-top:10px;font-size:var(--fs-sm)">
         已采集 {{ outputStyle.signal_count || 0 }} 条信号
-        <template v-if="outputStyle.last_built"> · 上次提炼 {{ formatTime(outputStyle.last_built) }}</template>
+        <template v-if="outputStyle.last_built"> · 上次提炼 {{ formatTimeFull(outputStyle.last_built) }}</template>
         <template v-if="outputStyle.is_cold_start"> · 首次提炼需满 50 条</template>
         <template v-else> · 新增满 {{ outputStyle.batch_threshold || 100 }} 条或到达周期自动提炼</template>
         <template v-if="!outputStyle.auto_evolve_enabled"> · <span
@@ -965,7 +948,7 @@ onActivated(() => selectTab(tab.value))
           <i class="ti ti-file-text" style="margin-right:6px;color:var(--acctx)"></i>{{ d.filename }}
         </div>
         <div class="muted" style="margin-top:4px">{{ fmtSize(d.size) }} · 提炼 {{ d.memory_count }} 条记忆 · {{
-          formatTime(d.imported_at) }}</div>
+          formatTimeFull(d.imported_at) }}</div>
       </div>
       <div class="fg" style="gap:6px;flex-shrink:0">
         <button class="btn-sm" :disabled="busy('docV' + d.id)" @click="run('docV' + d.id, () => openDocDetail(d.id))"><i
@@ -1008,7 +991,7 @@ onActivated(() => selectTab(tab.value))
         <dd>{{ detail.access_count || 0 }} 次</dd>
         <template v-if="detail.last_accessed">
           <dt>最近命中</dt>
-          <dd>{{ formatTime(detail.last_accessed) }}</dd>
+          <dd>{{ formatTimeFull(detail.last_accessed) }}</dd>
         </template>
       </dl>
       <div class="label">摘要</div>
@@ -1055,7 +1038,7 @@ onActivated(() => selectTab(tab.value))
         <div style="max-height:180px;overflow-y:auto;margin-bottom:12px">
           <div v-for="(ct, ci) in detail.citations" :key="ci" class="fg"
             style="gap:8px;padding:6px 0;font-size:var(--fs-base);border-bottom:1px solid var(--bd)">
-            <span class="muted" style="flex-shrink:0">{{ formatTime(ct.cited_at) }}</span>
+            <span class="muted" style="flex-shrink:0">{{ formatTimeFull(ct.cited_at) }}</span>
             <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="ct.session_title">{{
               ct.session_title }}</span>
             <button class="btn-xs" style="flex-shrink:0" @click="jumpToSession(ct.session_id)">
@@ -1065,12 +1048,12 @@ onActivated(() => selectTab(tab.value))
       </div>
       <div class="fg" style="justify-content:flex-end;gap:8px">
         <!-- 从 Lint 建议打开时：支持在详情内直接采纳/忽略该建议 -->
+        <button @click="detail = null">关闭</button>
         <template v-if="detailSug">
+          <button :disabled="busy('disSug')" @click="run('disSug', dismissDetailSug)">忽略</button>
           <button class="btn-primary" :disabled="busy('accSug')" @click="run('accSug', acceptDetailSug)"><i
               v-if="busy('accSug')" class="ti ti-loader-2"></i> 采纳</button>
-          <button :disabled="busy('disSug')" @click="run('disSug', dismissDetailSug)">忽略</button>
         </template>
-        <button @click="detail = null">关闭</button>
         <button v-if="detail.frontmatter?.lifecycle === 'archived'" :disabled="busy('mAct')"
           @click="run('mAct', () => restore(detail.id))">
           <i class="ti ti-restore"></i> 恢复</button>
@@ -1144,7 +1127,7 @@ onActivated(() => selectTab(tab.value))
     </h3>
       <div class="muted" style="margin-bottom:12px">{{ fmtSize(docDetail.size) }} · 提炼 {{ docDetail.memory_count }} 条记忆
         ·
-        {{ formatTime(docDetail.imported_at) }}</div>
+        {{ formatTimeFull(docDetail.imported_at) }}</div>
       <div class="label">文档正文</div>
       <pre
         style="white-space:pre-wrap;max-height:280px;overflow:auto;margin-bottom:12px;background:var(--surface-2);padding:12px;border-radius:var(--radius-sm);font-family:var(--mono);font-size:var(--fs-sm)">
@@ -1155,14 +1138,14 @@ onActivated(() => selectTab(tab.value))
         <b>{{ m.title }}</b>
         <div class="muted">{{ m.summary }}</div>
       </div>
-      <div v-if="!docDetail.memories.length" class="empty" style="padding:20px 12px">该文档暂无提炼记忆</div>
+      <div v-if="!docDetail.memories.length" class="empty" style="padding:20px 12px">该文档还没有提炼记忆</div>
       <!-- 被引用记录：该文档提炼的记忆被对话引用的明细 -->
       <div v-if="docDetail.citations && docDetail.citations.length">
         <div class="label" style="margin-top:12px">被引用记录（{{ docDetail.citations.length }}）</div>
         <div style="max-height:180px;overflow-y:auto">
           <div v-for="(ct, ci) in docDetail.citations" :key="ci" class="fg"
             style="gap:8px;padding:6px 0;font-size:var(--fs-base);border-bottom:1px solid var(--bd)">
-            <span class="muted" style="flex-shrink:0">{{ formatTime(ct.cited_at) }}</span>
+            <span class="muted" style="flex-shrink:0">{{ formatTimeFull(ct.cited_at) }}</span>
             <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
               :title="ct.memory_title + ' · ' + ct.session_title">{{ ct.memory_title }} · {{ ct.session_title }}</span>
             <button class="btn-xs" style="flex-shrink:0" @click="jumpToSession(ct.session_id)">
@@ -1191,7 +1174,7 @@ onActivated(() => selectTab(tab.value))
           </div>
           <div v-if="f.fail_reason" class="muted" style="margin-top:2px;font-size:var(--fs-xs)">{{ f.fail_reason }}</div>
         </div>
-        <div v-if="!localDirFiles.files.length" class="empty" style="padding:20px">暂无文件记录，接入后扫描即生成</div>
+        <div v-if="!localDirFiles.files.length" class="empty" style="padding:20px">还没有文件记录<br>接入后扫描即可生成</div>
       </div>
       <div class="fg" style="justify-content:flex-end">
         <button @click="localDirFiles = null">关闭</button>
@@ -1331,13 +1314,13 @@ onActivated(() => selectTab(tab.value))
   <!-- 用户画像维度详情弹窗 -->
   <BaseModal v-if="dimDetail" @close="dimDetail = null">
     <template #header>
-      {{ dimDetail.name }} <span class="badge badge-g" style="margin-left:8px">{{ dimStatus(dimDetail.status) }}</span>
+      {{ dimDetail.name }} <span class="badge badge-g" style="margin-left:8px">{{ dimStatusLabel(dimDetail.status) }}</span>
     </template>
     <div v-for="(it, j) in dimDetail.items" :key="j"
       style="margin-bottom:10px;color:var(--sec);font-size:var(--fs-md);line-height:1.6">
       · {{ it.text }} <span v-if="it.inferred" class="muted">[推断]</span>
     </div>
-    <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:24px 12px">该维度暂无内容</div>
+    <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:24px 12px">该维度还没有内容</div>
     <template #footer>
       <button @click="dimDetail = null">关闭</button>
     </template>

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { useToast } from '@/stores/toast'
@@ -22,15 +22,17 @@ async function refreshHealth() {
   } catch { health.value = 'unhealthy' }
 }
 
+let healthTimer = null
 onMounted(async () => {
   try {
     const st = await api.get('/onboarding/status')
     onboarded.value = st.completed
   } catch { }
   await refreshHealth()
-  setInterval(refreshHealth, 30000)
+  healthTimer = setInterval(refreshHealth, 30000)
   loading.value = false
 })
+onUnmounted(() => { if (healthTimer) clearInterval(healthTimer) })
 
 function onOnboarded() { onboarded.value = true; router.push('/chat') }
 function copyTraceId(tid) { navigator.clipboard.writeText(tid).catch(() => { }) }
@@ -44,7 +46,7 @@ function copyTraceId(tid) { navigator.clipboard.writeText(tid).catch(() => { }) 
     <SessionSidebar :health="health" />
     <div class="main">
       <router-view v-slot="{ Component }">
-        <keep-alive>
+        <keep-alive :max="2">
           <component :is="Component" />
         </keep-alive>
       </router-view>

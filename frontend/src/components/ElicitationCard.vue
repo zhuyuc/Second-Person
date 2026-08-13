@@ -60,6 +60,16 @@ function scheduleNext() {
   }
 }
 
+function skipQuestion() {
+  if (isSubmitting.value || status.value !== 'pending') return
+  clearTimeout(autoTimer)
+  if (currentIndex.value >= props.questions.length - 1) {
+    submitAll()
+  } else {
+    currentIndex.value++
+  }
+}
+
 function goPrev() {
   if (currentIndex.value > 0 && !isSubmitting.value) {
     clearTimeout(autoTimer)
@@ -110,6 +120,11 @@ function onKeydown(e) {
       clearTimeout(autoTimer)
       currentIndex.value++
     }
+    return
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault()
+    skipQuestion()
     return
   }
   if (e.key === 'Escape') {
@@ -182,14 +197,16 @@ onUnmounted(() => {
           <i class="ti ti-chevron-left"></i> 上一题
         </button>
         <span v-else></span>
-        <span class="ec-hint">选择或输入后自动进入下一题</span>
+        <button class="ec-skip" @click="skipQuestion" :disabled="isSubmitting">
+          {{ currentIndex >= questions.length - 1 ? '跳过并提交' : '跳过' }} <i class="ti ti-chevron-right"></i>
+        </button>
       </div>
     </template>
 
     <!-- 快捷提示 -->
     <div class="ec-shortcuts" v-if="status === 'pending' && cardFocused">
       <span>数字键 1-4 快速选择</span>
-      <span>Enter 下一题 / Esc 关闭</span>
+      <span>Tab 跳过 / Enter 下一题 / Esc 关闭</span>
     </div>
   </div>
 </template>
@@ -365,10 +382,20 @@ onUnmounted(() => {
 }
 .ec-prev:hover { color: var(--fg); }
 .ec-prev:disabled { opacity: 0.4; cursor: default; }
-.ec-hint {
-  font-size: var(--fs-xs);
+.ec-skip {
+  background: none;
+  border: none;
   color: var(--muted);
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: var(--sp-1) 0;
+  transition: color var(--dur-fast);
 }
+.ec-skip:hover { color: var(--fg); }
+.ec-skip:disabled { opacity: 0.4; cursor: default; }
 
 .ec-shortcuts {
   display: flex;

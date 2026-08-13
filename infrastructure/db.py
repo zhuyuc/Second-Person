@@ -265,11 +265,12 @@ class Database:
         self._submit(task)
         return await asyncio.to_thread(self._wait, task)
 
-    def query_one(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Row | None:
-        return self._conn().execute(sql, tuple(params)).fetchone()
+    def query_one(self, sql: str, params: Iterable[Any] = ()) -> dict | None:
+        row = self._conn().execute(sql, tuple(params)).fetchone()
+        return dict(row) if row is not None else None
 
-    def query_all(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
-        return self._conn().execute(sql, tuple(params)).fetchall()
+    def query_all(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
+        return [dict(r) for r in self._conn().execute(sql, tuple(params)).fetchall()]
 
     def write_queue_depth(self) -> int:
         """写队列深度（写压力仪表，供健康页/哨兵观测）。"""

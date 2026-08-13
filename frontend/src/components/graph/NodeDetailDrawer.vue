@@ -37,7 +37,7 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocMousedown))
           <b>{{ m.title }}</b>
           <div class="muted">{{ m.summary }}</div>
         </div>
-        <div v-if="!memories.length" class="empty" style="padding:28px 12px">暂无关联记忆</div>
+        <div v-if="!memories.length" class="empty" style="padding:28px 12px">还没有关联记忆</div>
       </div>
     </div>
   </transition>
