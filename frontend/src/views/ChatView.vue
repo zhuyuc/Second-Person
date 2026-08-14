@@ -12,6 +12,7 @@ import BaseModal from '@/components/BaseModal.vue'
 import HandoffAttachment from '@/components/HandoffAttachment.vue'
 import ElicitationCard from '@/components/ElicitationCard.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
+import { svgToPngBlob } from '@/utils/svgExport'
 import { formatRelative, formatTimeFull, fmtSize, nowLocalIso } from '@/utils/format'
 import { confidenceLabel, lifecycleLabel, TOAST_ONLY_NOTIF } from '@/utils/enumLabel'
 import { withQuery } from '@/utils/query'
@@ -84,23 +85,23 @@ const pendingMessage = ref(null)     // 摘要生成中暂存的消息
 
 // ---- handoff 操作 ----
 async function startHandoff() {
-    if (!sessStore.currentSid) return
-    try {
-        const d = await api.post('/chat/session/handoff', {
-            from_session_id: sessStore.currentSid
-        })
-        sessStore.setCurrent(d.new_session_id)
-        messages.value = []
-        handoffStatus.value = 'generating'
-        handoffData.value = null
-        thresholdBreached.value = null
-    } catch { toast.push('error', '创建新会话失败') }
+  if (!sessStore.currentSid) return
+  try {
+    const d = await api.post('/chat/session/handoff', {
+      from_session_id: sessStore.currentSid
+    })
+    sessStore.setCurrent(d.new_session_id)
+    messages.value = []
+    handoffStatus.value = 'generating'
+    handoffData.value = null
+    thresholdBreached.value = null
+  } catch { toast.push('error', '创建新会话失败') }
 }
 
 function removeHandoff() {
-    handoffStatus.value = null
-    handoffData.value = null
-    pendingMessage.value = null
+  handoffStatus.value = null
+  handoffData.value = null
+  pendingMessage.value = null
 }
 
 // 模型选择器
@@ -180,6 +181,8 @@ async function tryReattach(sid) {
       onEvent: (ev, data) => handleEvent(ev, data),
       onError: () => { toast.push('error', '生成失败'); finishStream() },
     })
+    // 兜底：重挂流异常断开（无终止事件）时同样保留已输出内容
+    if (generating.value) finishStream()
   } catch { /* 无进行中请求或接口异常：静默跳过 */ }
 }
 // 从历史消息的附件上下文前缀中还原各附件的名称与正文
@@ -272,9 +275,10 @@ function removeAttachment(i) {
   if (a && a.isImage && a.preview) URL.revokeObjectURL(a.preview)
   attachments.value.splice(i, 1)
 }
-function clearAttachments() {
+function clearAttachments(opts = {}) {
+  const keep = opts.keepPreviews
   for (const a of attachments.value) {
-    if (a.isImage && a.preview) URL.revokeObjectURL(a.preview)
+    if (a.isImage && a.preview && !(keep && keep.has(a.preview))) URL.revokeObjectURL(a.preview)
   }
   attachments.value = []
 }
@@ -431,7 +435,7 @@ async function send() {
   if (activeElicitation.value) {
     const toolUseId = activeElicitation.value.toolUseId
     activeElicitation.value = null
-    try { await api.post(`/chat/elicitations/${toolUseId}/close`, { answers: [] }) } catch {}
+    try { await api.post(`/chat/elicitations/${toolUseId}/close`, { answers: [] }) } catch { }
     await new Promise(r => setTimeout(r, 100))
   }
   // 气泡附件：保留粘贴全文与原始 File，供发送后点击弹窗回看/下载
@@ -440,13 +444,16 @@ async function send() {
     text: a.pasted ? a.text : undefined, file: a.file, chars: a.chars
   }))
   const bubbleImages = attachments.value.filter(a => a.isImage && a.preview).map(a => a.preview)
+  // 已随气泡送出的图片 preview（blob URL）不能在清空附件时 revoke，
+  // 否则消息气泡中的图片立即失效，需等刷新后由后端历史 URL 才恢复
+  const sentPreviews = new Set(bubbleImages)
   messages.value.push({
     role: 'user', content: text || (imgs.length ? '' : '（已上传附件）'),
     atts: bubbleAtts, images: bubbleImages,
     create_time: nowLocalIso()
   })
   input.value = ''
-  clearAttachments()
+  clearAttachments({ keepPreviews: sentPreviews })
   // 文档附件统一存入知识库：后台异步导入，不阻塞本次对话
   kbFiles.forEach(f => ingestToKb(f))
   nextTick(autoGrow)
@@ -466,6 +473,9 @@ async function send() {
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: () => { toast.push('error', '生成失败'); finishStream() },
   })
+  // 兜底：始终未收到 turn_completed/error（服务重启等异常断开）时，
+  // 同样保留已输出内容并释放输入锁，避免 UI 卡在生成中
+  if (generating.value) finishStream()
   // 发送后清除 handoff 附件状态
   if (hPath) { handoffStatus.value = null; handoffData.value = null }
 }
@@ -529,9 +539,13 @@ function finishStream(msgId) {
   // 跨会话保护：用户已切到其他会话时不把回复插进当前列表
   //（回复已按 session 落库，切回原会话时 openSession 会重新加载）
   const sameSession = streamSid.value === sessStore.currentSid
-  if (streamText.value && sameSession) {
+  // 中断终止（停止/出错/断连，无 msgId）时已输出的内容必须保留：
+  // 哪怕只输出了思考过程也要留下，否则流式区一清空内容就全部丢失
+  if ((streamText.value || thinkText.value) && sameSession) {
+    const body = stripTail(streamText.value, streamVisuals.value)
     const m = {
-      id: msgId, role: 'assistant', content: stripTail(streamText.value, streamVisuals.value),
+      id: msgId, role: 'assistant',
+      content: body || (msgId ? '' : '> ⚠️ 本回复未完成：生成已中断，仅输出了思考过程'),
       citations: lastCitations, feedback: 0,
       create_time: nowLocalIso(),
       thinking: thinkText.value || '', thinkOpen: false,
@@ -649,6 +663,8 @@ async function regenerate(msg) {
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: () => { toast.push('error', '生成失败'); finishStream() },
   })
+  // 兜底：异常断开（无终止事件）时同样保留已输出内容并释放输入锁
+  if (generating.value) finishStream()
 }
 
 function copyText(msg) { navigator.clipboard.writeText(msg.content); toast.push('success', '已复制') }
@@ -874,27 +890,11 @@ async function copyMermaidAsImage(wrap) {
   const svg = wrap.querySelector('svg')
   if (!svg) { toast.push('error', '图表未渲染'); return }
   try {
-    const svgData = new XMLSerializer().serializeToString(svg)
-    const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' })
-    const url = URL.createObjectURL(svgBlob)
-    const img = new Image()
-    img.onload = async () => {
-      const canvas = document.createElement('canvas')
-      canvas.width = img.naturalWidth * 2
-      canvas.height = img.naturalHeight * 2
-      const ctx = canvas.getContext('2d')
-      ctx.scale(2, 2)
-      ctx.drawImage(img, 0, 0)
-      URL.revokeObjectURL(url)
-      canvas.toBlob(async (blob) => {
-        try {
-          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-          toast.push('success', '图片已复制到剪贴板')
-        } catch { toast.push('error', '复制图片失败，请手动右键保存') }
-      }, 'image/png')
-    }
-    img.src = url
-  } catch { toast.push('error', '复制图片失败') }
+    // 共享导出工具：自动剥离 foreignObject 避免 tainted canvas（详见 utils/svgExport.js）
+    const blob = await svgToPngBlob(svg, 2)
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+    toast.push('success', '图片已复制到剪贴板')
+  } catch { toast.push('error', '复制图片失败，请手动右键保存') }
 }
 // Mermaid 图表自动渲染：消息更新或流式结束后触发
 function runMermaidScoped() {
@@ -959,7 +959,8 @@ onUnmounted(() => {
             <!-- 系统通知 -->
             <div v-else-if="m.message_type === 'system_notification'" class="banner"
               style="background:var(--brand-soft);color:var(--acctx)">
-              <i class="ti ti-bell"></i> <span style="opacity:0.7">{{ formatRelative(m.create_time) }}</span> {{ m.content
+              <i class="ti ti-bell"></i> <span style="opacity:0.7">{{ formatRelative(m.create_time) }}</span> {{
+                m.content
               }}
             </div>
             <!-- AI 回复 -->
@@ -1025,12 +1026,9 @@ onUnmounted(() => {
               <!-- 图形组件 -->
               <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv' + vi" :type="v.type" :data="v.data" />
               <!-- 追问卡片（elicitation） -->
-              <ElicitationCard v-if="activeElicitation"
-                :tool-use-id="activeElicitation.toolUseId"
-                :reason="activeElicitation.reason"
-                :questions="activeElicitation.questions"
-                @resolved="activeElicitation = null"
-                @close="activeElicitation = null" />
+              <ElicitationCard v-if="activeElicitation" :tool-use-id="activeElicitation.toolUseId"
+                :reason="activeElicitation.reason" :questions="activeElicitation.questions"
+                @resolved="activeElicitation = null" @close="activeElicitation = null" />
               <div v-if="streamText" class="content streaming" v-html="render(streamWebSrc.body, streamVisuals)">
               </div>
               <div v-if="streamText && streamWebSrc.count" class="think-panel" style="margin-top:8px">
@@ -1062,12 +1060,8 @@ onUnmounted(() => {
           </button>
         </div>
         <!-- handoff 摘要附件（会话上下文管理方案 v2） -->
-        <HandoffAttachment v-if="handoffStatus"
-          :status="handoffStatus"
-          :data="handoffData"
-          class="chat-handoff-attach"
-          @remove="removeHandoff"
-          @preview="handoffPreview = handoffData || { status: handoffStatus }" />
+        <HandoffAttachment v-if="handoffStatus" :status="handoffStatus" :data="handoffData" class="chat-handoff-attach"
+          @remove="removeHandoff" @preview="handoffPreview = handoffData || { status: handoffStatus }" />
         <div class="composer" :class="{ dragover: dragOver }" style="max-width:820px;margin:0 auto;position:relative"
           @dragenter.prevent="dragOver = true" @dragover.prevent="dragOver = true" @dragleave.prevent="onDragLeave"
           @drop.prevent.stop="onDrop">
@@ -1090,16 +1084,18 @@ onUnmounted(() => {
               <i class="ti ti-x" style="cursor:pointer" @click.stop="removeAttachment(ai)"></i>
             </span>
           </div>
-          <textarea ref="ta" v-model="input" :placeholder="thresholdBreached === 'hard' ? '已达容量上限，请开启新会话' : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件）'" rows="1"
-            @input="autoGrow" @keydown.enter.exact.prevent="send" @paste="onPaste" @dragenter.prevent="dragOver = true"
-            @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop" :disabled="thresholdBreached === 'hard'"></textarea>
+          <textarea ref="ta" v-model="input"
+            :placeholder="thresholdBreached === 'hard' ? '已达容量上限，请开启新会话' : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件）'"
+            rows="1" @input="autoGrow" @keydown.enter.exact.prevent="send" @paste="onPaste"
+            @dragenter.prevent="dragOver = true" @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop"
+            :disabled="thresholdBreached === 'hard'"></textarea>
           <!-- 表情选择面板（absolute 定位在 composer 上方，选择后保持打开可连续插入） -->
           <div v-if="emojiOpen" class="emoji-panel" @click.stop>
             <div v-for="g in EMOJI_GROUPS" :key="g.name" class="emoji-group">
               <div class="emoji-group-name">{{ g.name }}</div>
               <div class="emoji-grid">
                 <button v-for="em in g.items" :key="em" type="button" class="emoji-btn" @click="insertEmoji(em)">{{ em
-                  }}</button>
+                }}</button>
               </div>
             </div>
           </div>
@@ -1113,8 +1109,8 @@ onUnmounted(() => {
                 @click.stop="emojiOpen = !emojiOpen"></i>
               <!-- 思考模式选择器：用户指定深度思考/快速回复（默认快速回复，点击外部关闭） -->
               <div class="think-mode-wrap">
-                <button type="button" class="think-mode-btn" :title="'思考模式：' + thinkModeLabel"
-                  @mousedown.prevent @click.stop="thinkMenuOpen = !thinkMenuOpen">
+                <button type="button" class="think-mode-btn" :title="'思考模式：' + thinkModeLabel" @mousedown.prevent
+                  @click.stop="thinkMenuOpen = !thinkMenuOpen">
                   <i class="ti" :class="thinkMode === 'deep' ? 'ti-bulb' : 'ti-zap'"></i>
                   <span>{{ thinkModeLabel }}</span>
                   <i class="ti think-mode-arrow" :class="thinkMenuOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
@@ -1151,9 +1147,12 @@ onUnmounted(() => {
   <!-- handoff 摘要预览：摘要正文由后端注入下一轮上下文，前端展示可用元信息 -->
   <BaseModal v-if="handoffPreview" title="上一会话摘要" size="sm" stacked @close="handoffPreview = null">
     <dl class="kv">
-      <dt>状态</dt><dd>{{ handoffPreview.status === 'failed' ? '生成失败' : '已就绪' }}</dd>
-      <dt v-if="handoffPreview.original_turns != null">原会话轮次</dt><dd v-if="handoffPreview.original_turns != null">{{ handoffPreview.original_turns }}</dd>
-      <dt v-if="handoffPreview.summary_tokens != null">摘要长度</dt><dd v-if="handoffPreview.summary_tokens != null">约 {{ handoffPreview.summary_tokens }} token</dd>
+      <dt>状态</dt>
+      <dd>{{ handoffPreview.status === 'failed' ? '生成失败' : '已就绪' }}</dd>
+      <dt v-if="handoffPreview.original_turns != null">原会话轮次</dt>
+      <dd v-if="handoffPreview.original_turns != null">{{ handoffPreview.original_turns }}</dd>
+      <dt v-if="handoffPreview.summary_tokens != null">摘要长度</dt>
+      <dd v-if="handoffPreview.summary_tokens != null">约 {{ handoffPreview.summary_tokens }} token</dd>
     </dl>
     <p class="modal-subtitle">发送下一条消息时，系统会自动把该摘要注入新会话上下文。</p>
     <template #footer>
@@ -1219,8 +1218,7 @@ onUnmounted(() => {
   </BaseModal>
 
   <!-- 反馈原因弹窗（替代原生 prompt，统一走 BaseModal） -->
-  <BaseModal v-if="fbDialog" :title="fbDialog.fb === 1 ? '哪些地方做得好？' : '哪里出了问题？'" size="sm"
-    @close="fbDialog = null">
+  <BaseModal v-if="fbDialog" :title="fbDialog.fb === 1 ? '哪些地方做得好？' : '哪里出了问题？'" size="sm" @close="fbDialog = null">
     <div style="display:flex;flex-direction:column;gap:8px;margin:14px 0 18px">
       <button v-for="opt in (fbDialog.fb === 1 ? goodReasons : badReasons)" :key="opt.value" class="fb-reason"
         :class="{ active: fbDialog.reason === opt.value }" @click="fbDialog.reason = opt.value">{{ opt.label
@@ -1250,8 +1248,7 @@ onUnmounted(() => {
               class="ti ti-x"></i></button>
         </div>
       </div>
-      <iframe class="html-preview-iframe" :srcdoc="htmlPreview"
-        sandbox="allow-scripts"></iframe>
+      <iframe class="html-preview-iframe" :srcdoc="htmlPreview" sandbox="allow-scripts"></iframe>
     </div>
   </transition>
 </template>

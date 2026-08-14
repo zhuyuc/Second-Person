@@ -86,7 +86,8 @@ class ToolExecutor:
         """ask_user 特殊处理：校验 schema → emit elicitation SSE → 挂起等待答案 → 构造 tool_result。"""
         import json as _json
         import time as _time
-        from agent.elicitation_schema import validate_ask_user, build_tool_result_error
+        from agent.elicitation_schema import (validate_ask_user, build_tool_result_error,
+                                              strip_internal_fields)
         from agent.elicitation_state import ElicitationState, ElicitationStatus
         from agent.elicitation_state import register as reg_state
         from langfuse.integration import get_tracer
@@ -117,7 +118,8 @@ class ToolExecutor:
                 platform = row["channel"]
         ttl_key = ("elicitation_im_ttl_minutes" if platform != "web"
                    else "elicitation_web_ttl_minutes")
-        ttl_minutes = self.config.get(ttl_key, 30 if platform == "web" else 1440)
+        ttl_minutes = self.config.get(
+            ttl_key, 30 if platform == "web" else 1440)
 
         state = ElicitationState(
             id=tool_use_id,
@@ -131,12 +133,13 @@ class ToolExecutor:
         )
         reg_state(state)
 
-        # 3. Emit elicitation SSE 事件
+        # 3. Emit elicitation SSE 事件（剥离内部判定字段，仅透出展示字段）
         if emit:
+            clean = strip_internal_fields(payload)
             await emit("elicitation", {
                 "tool_use_id": tool_use_id,
                 "reason": reason,
-                "questions": payload["questions"],
+                "questions": clean["questions"],
             })
 
         # 4. Langfuse span

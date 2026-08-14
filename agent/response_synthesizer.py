@@ -86,6 +86,12 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
             else:
                 tr_parts.append(f"- {tn}: {_clip(r.get('result', ''))}")
         ctx_parts.append("工具执行结果：\n" + "\n".join(tr_parts))
+    # 追问已作答闭环：ask_user 结果存在时注入闭环硬约束
+    # （禁止二次追问、禁止编造用户事实、未提供信息用占位符）
+    if any(r.get("tool") == "ask_user" and r.get("ok")
+           for r in (tool_results or [])):
+        ctx_parts.append(PROMPTS.load_raw(
+            "agent/prompts/synth_elicitation_answered"))
     # disputed 记忆命中：要求 AI 主动告知矛盾并引导到健康度 Tab 裁决
     disputed = [m for m in memories if m.get("confidence") == "disputed"]
     if disputed:

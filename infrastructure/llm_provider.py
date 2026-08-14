@@ -101,8 +101,8 @@ class ProviderSnapshot:
     base_url: str
     api_key: str
     model_id: str
-    input_price: float = 0.0
-    output_price: float = 0.0
+    input_price: float | None = None   # None = 未配置单价（费用不计入）
+    output_price: float | None = None
     context_window: int = 128000
 
 
@@ -111,15 +111,25 @@ class TokenRecorder:
         self.db = db
 
     def record(self, model_name: str, source: str, input_tokens: int,
-               output_tokens: int, session_id: str | None = None) -> None:
+               output_tokens: int, session_id: str | None = None,
+               input_price: float | None = None,
+               output_price: float | None = None) -> None:
+        # 单价快照随用量落库：费用按用量发生时的单价冻结，后续调价不追溯；
+        # 未配单价（双 None）时快照与金额留空，费用查询按当时单价兜底
+        cost = None
+        if input_price is not None or output_price is not None:
+            cost = input_tokens / 1_000_000 * (input_price or 0) + \
+                output_tokens / 1_000_000 * (output_price or 0)
         try:
             # 火忘式写入：聊天热路径上的高频小写，入队即返回零等待，
             # 由单写线程串行落库，失败由写线程记日志
             self.db.execute_nowait(
                 "INSERT INTO token_usage(model_name,source,session_id,input_tokens,"
-                "output_tokens,trace_id,create_time) VALUES(?,?,?,?,?,?,?)",
+                "output_tokens,trace_id,create_time,input_price,output_price,cost) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (model_name, source, session_id, input_tokens, output_tokens,
-                 get_trace_id(), now_cst().isoformat(timespec="seconds")))
+                 get_trace_id(), now_cst().isoformat(timespec="seconds"),
+                 input_price, output_price, cost))
         except Exception:  # noqa: BLE001
             logger.exception("token_usage 记录失败")
 
@@ -271,7 +281,9 @@ class LLMClient:
                     outp = estimate_tokens("".join(full))
                     usage["input_tokens"], usage["output_tokens"] = inp, outp
                 self.recorder.record(snap.model_id, source,
-                                     inp, outp, session_id)
+                                     inp, outp, session_id,
+                                     input_price=snap.input_price,
+                                     output_price=snap.output_price)
             gen.end(output="".join(full), usage={
                 "input": usage["input_tokens"], "output": usage["output_tokens"],
                 "total": usage["input_tokens"] + usage["output_tokens"],
@@ -297,7 +309,9 @@ class LLMClient:
                     u = result["usage"]
                     self.recorder.record(snap.model_id, source,
                                          u.get("input_tokens", 0),
-                                         u.get("output_tokens", 0), session_id)
+                                         u.get("output_tokens", 0), session_id,
+                                         input_price=snap.input_price,
+                                         output_price=snap.output_price)
                 return result
             except Exception as e:  # noqa: BLE001
                 last = e

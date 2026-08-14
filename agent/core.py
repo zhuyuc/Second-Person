@@ -166,6 +166,23 @@ def _format_intent_thinking(intents) -> str:
     return "\n".join(lines) + "\n"
 
 
+# 策略/骨架方向中的"信息收集"类措辞：材料充实完成后这些方向一律作废
+# （策略决策与元认知在材料充实之前运行，看不到画像材料，会合理地判"先收集信息"）
+_COLLECT_DIRECTION_KEYS = (
+    "收集", "询问", "追问", "先问", "引导用户提供", "补充信息", "了解基本情况")
+
+
+def _has_collect_direction(strategy, skeleton) -> bool:
+    """检测策略角度/骨架重定义是否指向"先收集信息"（零 LLM 关键词匹配）。"""
+    text = ""
+    if strategy is not None:
+        text += getattr(strategy, "angle", "") or ""
+    if skeleton is not None:
+        reframe = getattr(skeleton, "reframe", None) or {}
+        text += reframe.get("real_question", "") or ""
+    return any(k in text for k in _COLLECT_DIRECTION_KEYS)
+
+
 class AgentCore:
     def __init__(self, *, db, config, session_store, context_entry, soul_manager,
                  profile_manager, retriever, tool_registry, tool_executor,
@@ -200,12 +217,12 @@ class AgentCore:
         self.image_kb_fn = None
         self.intent_parser = IntentParser(
             llm_client, lambda: self.providers.snapshot_for("intent"))
-        # 收敛式理解：注意力聚焦 + 缺口检测（LLM 调用走 convergence 槽位，
-        # 轻量分析任务，默认回退 intent→agent→chat）
+        # 收敛式理解：注意力聚焦 + 缺口检测（LLM 调用走 intent 槽位，
+        # 轻量分析任务，默认回退 agent→chat）
         self.attention_focuser = AttentionFocuser(
-            llm_client, lambda: self.providers.snapshot_for("convergence"))
+            llm_client, lambda: self.providers.snapshot_for("intent"))
         self.gap_detector = GapDetector(
-            llm_client, lambda: self.providers.snapshot_for("convergence"))
+            llm_client, lambda: self.providers.snapshot_for("intent"))
         # 响应策略引擎（v3 §四）：回答形态/角度/深度/语气的集中决策中枢；
         # 输入不含 memories（策略与记忆内容正交），先验全文注入自行匹配场景
         self.strategy_engine = StrategyEngine(
@@ -224,6 +241,9 @@ class AgentCore:
         self._session_locks: dict[str,
                                   asyncio.Lock] = defaultdict(asyncio.Lock)
         self._session_queue: dict[str, int] = defaultdict(int)
+        # 每会话进行中的流式增量（正文 buf + 思考 think_parts）：
+        # 任意阶段被取消时由 _pipeline 外层统一落库补救（会话锁保证单飞）
+        self._turn_partials: dict[str, dict] = {}
 
     # ---- 主入口：SSE 事件流（队列驱动，支持工具执行中途 emit） ------------
     async def run(self, session_id: str, message: str,
@@ -306,6 +326,14 @@ class AgentCore:
             await self._pipeline_impl(sid, message, emit, trace, images,
                                       regenerate, location,
                                       think_mode=think_mode)
+        except asyncio.CancelledError:
+            # 中断补救统一在此（覆盖思考/工具/合成所有阶段）：手动停止、
+            # 超时取消时把已流式产出部分（哪怕只有思考过程）落库标注未完成，
+            # 保证“屏上所见即 DB 所存”，停止/刷新后已输出内容不丢失
+            st = self._turn_partials.pop(sid, None)
+            if st:
+                self._save_partial_reply(sid, st["buf"], st["think_parts"])
+            raise
         except Exception as e:  # noqa: BLE001
             trace.update(metadata={"internal_trace_id": get_trace_id(),
                                    "images": len(images) if images else 0,
@@ -313,6 +341,7 @@ class AgentCore:
                                    "status": "error", "error": str(e)})
             raise
         finally:
+            self._turn_partials.pop(sid, None)
             trace.end()
 
     async def _pipeline_impl(self, sid: str, message: str, emit, trace,
@@ -327,6 +356,10 @@ class AgentCore:
         # 思考过程累积：透明拦截所有 thinking_delta 增量（意图理解/工具调用/
         # 模型原生推理），回复落库时随消息持久化，历史消息可回看
         think_parts: list[str] = []
+        # 流式增量缓冲提前定义（正文）：任意阶段取消都需读取已产出部分补救，
+        # 登记到 _turn_partials 供 _pipeline 外层 CancelledError 兜底
+        buf: list[str] = []
+        self._turn_partials[sid] = {"buf": buf, "think_parts": think_parts}
         _orig_emit = emit
 
         async def emit(event, data):  # noqa: F811 — 有意遮蔽，对下游透明
@@ -477,6 +510,8 @@ class AgentCore:
         # ---- 收敛环（§3.5）仅在 LLM 可用 + 需深度收敛时进入 ----
         self._elicitation_seed = None
         self._elicitation_from_gap = False
+        # 材料缺口（material_gap）透传：gap_detect 产出 → 下游材料充实节点消费
+        self._material_slots: list[str] = []
         max_rounds = self.config.get("convergence_max_rounds", 2)
         _convergence_done = False
         _conv_strategy_task = None
@@ -713,12 +748,29 @@ class AgentCore:
                     elif not it.tools_needed:
                         it.tools_needed = ["memory_save"]
 
+        # ---- 答案材料充实节点（意图产出后）：画像材料块零 LLM 同步构造
+        # （全维度，通用设计），二次检索与工具执行并行；追问挂起期间备料 ----
+        material_task = None
+        profile_block = ""
+        dimension_names: list[str] = []
+        if not onboarding and self._material_gate(message, quick_result, intents):
+            try:
+                profile_block = self.profile.material_block()
+                dimension_names = self.profile.dimension_names()
+            except Exception:  # noqa: BLE001
+                logger.warning("材料充实：画像材料块构造失败", exc_info=True)
+            material_task = asyncio.create_task(
+                self._run_material_enrichment(
+                    sid, message, intents, profile_block, dimension_names, emit))
+
         # ---- 追问式补充信息：elicitation 判定与触发（产品方案 §05/06） ----
         # 触发条件：(未 onboarding) AND (策略已产出) AND (置信度<阈值 OR gap检测到缺口)
         elicitation_triggered = False
+        force_clarify = False
+        force_clarify_gap = ""
         if (not onboarding and strategy is not None
                 and (intents or self._elicitation_from_gap)
-                and self.config.get("elicitation_confidence_threshold", -1) > 0):
+                and self.config.get("elicitation_confidence_threshold", 0.6) > 0):
             _elicit_sp = tracer.span_start("elicitation_check", input={
                 "session_id": sid,
                 "confidence": intents[0].confidence if intents else 1.0,
@@ -738,6 +790,28 @@ class AgentCore:
                 # ask_user 已触发并完成：将 tool_result 注入 tool_results，跳过正常工具执行
                 tool_results = [_elicitation]
                 elicitation_triggered = True
+
+        # 追问未触发且置信度低于阈值（或 gap 已判可枚举但执行失败）→
+        # 强制态二诚实澄清（2-3 句反问），禁止带着"信息不足"状态落回正常合成自由发挥
+        # （编造用户事实/开放式多问）。用户主动关闭过追问（blocked）时不强制，尊重用户意愿。
+        if (not onboarding and strategy is not None and intents
+                and _elicitation is None
+                and self.config.get("elicitation_confidence_threshold", 0.6) > 0):
+            _conf = getattr(intents[0], "confidence", 1.0)
+            _thr = self.config.get("elicitation_confidence_threshold", 0.6)
+            _blocked_row = self.db.query_one(
+                "SELECT elicitation_blocked FROM sessions WHERE session_id=?",
+                (sid,))
+            _blocked = bool(
+                _blocked_row and _blocked_row["elicitation_blocked"])
+            if not _blocked and (_conf < _thr or self._elicitation_from_gap) \
+                    and not profile_block:
+                # 画像材料块非空时视为已备料：不强制诚实澄清，走正常合成由
+                # 产出优先硬约束保证直接产出（诚实澄清的"系统缺少信息"与
+                # 已备料现实冲突）
+                force_clarify = True
+                force_clarify_gap = getattr(
+                    intents[0], "intent_summary", "") or ""
 
         # 第 5 步 流程编排
         shared = SharedState()
@@ -768,7 +842,7 @@ class AgentCore:
                 logger.warning("技能按需追加失败", exc_info=True)
                 if _skill_sp is not None:
                     _skill_sp.end(level="ERROR", status_message=str(e)[:500])
-            if not elicitation_triggered:
+            if not elicitation_triggered and not force_clarify:
                 dag = build_dag(list(intents), set(tool_names))
                 # DAG 环检测降级：向用户说明（thinking_delta 外露 + prompt 注入）
                 if dag.degraded:
@@ -809,8 +883,6 @@ class AgentCore:
 
         # 第 7 步 响应合成与输出（流式）
         assistant_text, citations = "", []
-        # 流式增量缓冲提前定义：中断补救（CancelledError）需读取已产出部分
-        buf: list[str] = []
         # 纯导出模式：已登记延迟导出文档 → 正文只写入文档，
         # 对话中不再重复展示，只回一句确认 + 下载卡片
         doc_only = bool(shared.deferred_docs)
@@ -861,7 +933,47 @@ class AgentCore:
                 # 不可用提示文案不应被导出成文档
                 doc_only = False
                 shared.deferred_docs.clear()
+            elif force_clarify:
+                # 态二：低置信度且追问未触发 → 强制诚实澄清（2-3 句反问），
+                # 不进入正常合成，杜绝自由发挥编造用户信息/开放式多问
+                _gr = GapResult(
+                    gaps=[{"type": "prerequisite_gap",
+                           "description": force_clarify_gap}],
+                    has_gaps=True, retarget_tasks=[], unresolvable=True)
+                assistant_text = await self._emit_honest_clarify(emit, _gr, sid) or ""
+                cited_ids = []
+                doc_only = False
+                shared.deferred_docs.clear()
+                # 材料任务已无消费方：收尾避免悬挂（结果丢弃，零阻塞）
+                if material_task is not None:
+                    try:
+                        await material_task
+                    except Exception:  # noqa: BLE001
+                        logger.debug("材料充实任务收尾失败", exc_info=True)
+                _sp.end(output=assistant_text)
             else:
+                # 材料充实结果合并（意图后、合成前）：二次检索记忆并入主检索
+                # 记忆（可引用溯源）；全异常静默（零阻塞）
+                if material_task is not None:
+                    try:
+                        extra_mems = await material_task
+                        if extra_mems:
+                            seen = {m.get("id") for m in memories if m.get("id")}
+                            for m in extra_mems:
+                                if m.get("id") and m["id"] not in seen:
+                                    memories.append(m)
+                                    seen.add(m["id"])
+                    except Exception:  # noqa: BLE001
+                        logger.warning("材料充实任务失败（静默降级）", exc_info=True)
+                # 方向修正外露：备料完成但策略/骨架方向指向"收集信息"时外露
+                # 修正，保证思考过程与最终行为一致（合成层会强制直接产出）
+                if profile_block and _has_collect_direction(strategy, skeleton):
+                    try:
+                        await emit("thinking_delta", {
+                            "text": "【方向修正】画像材料已备齐，策略/骨架中的"
+                                    "信息收集方向作废，直接基于材料产出\n"})
+                    except Exception:  # noqa: BLE001
+                        pass
                 # 场景篇幅档位（纯规则，零 LLM）：brief 寒暄 / normal 常规 / detailed 深度；
                 # 开关关闭时恒为 normal（不注入指令，行为与画像默认一致）
                 depth_level = "normal"
@@ -882,7 +994,8 @@ class AgentCore:
                                                   depth_level=depth_level,
                                                   strategy=strategy,
                                                   skeleton=skeleton,
-                                                  next_step_seeds=next_step_seeds)
+                                                  next_step_seeds=next_step_seeds,
+                                                  profile_material=profile_block)
                 # 关闭追问后新消息：注入临时决策指令
                 if not elicitation_triggered:
                     row = self.db.query_one(
@@ -997,9 +1110,8 @@ class AgentCore:
                     await emit("content_delta", {"text": _extra})
                 _sp.end(output=assistant_text)
         except asyncio.CancelledError:
-            # 中断补救：刷新/关页导致 SSE 断开取消、600s 超时取消时，
-            # 已流式产出的部分回复落库，刷新后历史仍可见（与 Langfuse 已记录内容一致）
-            self._save_partial_reply(sid, buf, think_parts)
+            # 中断补救（部分回复落库）统一由 _pipeline 外层处理，
+            # 覆盖思考阶段等第 7 步之前的取消；此处只收尾 span
             _sp.end(level="ERROR")
             raise
         except Exception:
@@ -1163,21 +1275,26 @@ class AgentCore:
     def _save_partial_reply(self, sid: str, buf: list[str],
                             think_parts: list[str]) -> None:
         """中断补救：把已流式产出的部分回复落库（标注未完成）。
+        只输出了思考过程（正文尚未开始）时同样落库，保证已输出内容可见。
         同步写入（无 await）：取消处理中不得再挂起，避免二次取消丢失。"""
         partial = "".join(buf).strip()
-        if not partial:
+        think = "".join(think_parts).strip()
+        if not partial and not think:
             return
         try:
-            # 清理可能已生成的 citations 尾部声明（中断场景不做引用登记）
-            partial, _ = rs.extract_citations(partial, set())
-            # 清理可能已产出的建议句分隔符（中断场景建议句不完整，剥离）
-            partial = strip_suggestion_from_partial(partial)
+            if partial:
+                # 清理可能已生成的 citations 尾部声明（中断场景不做引用登记）
+                partial, _ = rs.extract_citations(partial, set())
+                # 清理可能已产出的建议句分隔符（中断场景建议句不完整，剥离）
+                partial = strip_suggestion_from_partial(partial)
+                content = (partial +
+                           "\n\n> ⚠️ 本回复未完成：生成已中断，以上为已生成部分")
+            else:
+                content = "> ⚠️ 本回复未完成：生成已中断，仅输出了思考过程"
             self.sessions.append_message(
-                sid, "assistant",
-                partial + "\n\n> ⚠️ 本回复未完成：生成已中断，以上为已生成部分",
-                thinking="".join(think_parts) or None)
-            logger.info("中断补救：部分回复已落库 session=%s chars=%d",
-                        sid, len(partial))
+                sid, "assistant", content, thinking=think or None)
+            logger.info("中断补救：部分回复已落库 session=%s chars=%d think_chars=%d",
+                        sid, len(partial), len(think))
         except Exception:  # noqa: BLE001
             logger.warning("中断补救落库失败", exc_info=True)
 
@@ -1413,6 +1530,7 @@ class AgentCore:
             return None
 
         # 调用 clarification_router 判定可枚举性（零阻塞：异常跳过追问，主对话不受影响）
+        # 带画像摘要：已知信息中已存在的事实不进入追问（由材料充实节点回填）
         gap = getattr(first_intent, "intent_summary", "") or ""
         try:
             seed = await self.strategy_engine.clarification_router(
@@ -1420,7 +1538,8 @@ class AgentCore:
                 {k: self.config.get(k) for k in (
                     "elicitation_max_questions", "elicitation_max_per_session",
                     "elicitation_web_ttl_minutes", "elicitation_im_ttl_hours",
-                ) if self.config.get(k) is not None})
+                ) if self.config.get(k) is not None},
+                profile_summary=self.profile.summary_text())
         except Exception:  # noqa: BLE001 - 零阻塞：LLM 异常静默跳过追问
             logger.warning("clarification_router 异常，跳过追问", exc_info=True)
             return None
@@ -1437,6 +1556,83 @@ class AgentCore:
             return None
         # 返回 tool_result 格式（与正常工具执行一致的格式）
         return {"tool": "ask_user", "ok": True, "result": result.get("result", "")}
+
+    # ---- 答案材料充实节点（意图产出后：画像维度注入 + 定向二次检索） ----
+
+    def _material_gate(self, message: str, quick_result, intents: list) -> bool:
+        """材料收集闸门（零 LLM）：
+        1. material_enrichment_enabled 开关开启
+        2. 存在 chat 意图（答案与用户自身事实相关的任务型场景）
+        3. 非 brief 场景（快速通道+短消息+无工具+纯 chat/meta 寒暄跳过）
+        """
+        if not self.config.get("material_enrichment_enabled", True):
+            return False
+        if not intents:
+            return False
+        types = {getattr(i, "intent_type", "") for i in intents}
+        if types and not (types & {"chat"}):
+            return False
+        tools = {t for i in intents
+                 for t in (getattr(i, "tools_needed", None) or [])}
+        if (quick_result is not None and not quick_result.needs_convergence
+                and len(message) <= 20 and not tools
+                and types and types <= {"chat", "meta"}):
+            return False
+        return True
+
+    async def _run_material_enrichment(self, sid: str, message: str,
+                                       intents: list, profile_block: str,
+                                       dimension_names: list[str],
+                                       emit) -> list[dict]:
+        """材料充实节点：定向二次检索（复用检索器）+ 外露 + span。
+
+        profile_block（画像材料块，零 LLM）由主流程同步构造后传入。
+        返回 extra_memories。全异常静默降级（零阻塞铁律），失败时返回空列表，
+        主对话不受影响。追问挂起期间本任务并行完成备料。
+        """
+        extra_memories: list[dict] = []
+        intent_summary = getattr(
+            intents[0], "intent_summary", "") if intents else ""
+        # 1. 定向二次检索：query = 意图总结 + 画像材料块摘要 + 材料缺口描述。
+        # 用画像实际内容（而非维度名）做检索线索，才能命中用户的经历/技能/
+        # 知识库文档等材料记忆（语义上与原始提问“写简历”不相近）。
+        slots = [s for s in (self._material_slots or []) if s][:3]
+        query_parts: list[str] = []
+        if intent_summary:
+            query_parts.append(intent_summary[:100])
+        else:
+            query_parts.append(message[:80])
+        if profile_block:
+            query_parts.append(profile_block[:400])
+        query_parts += slots
+        query = " ".join(query_parts)
+        try:
+            retrieval = await self.retriever.retrieve(
+                query, llm_available=True, session_id=sid)
+            extra_memories = retrieval.hits + retrieval.related
+        except Exception:  # noqa: BLE001
+            logger.warning("材料充实：定向二次检索失败", exc_info=True)
+        # 2. 思考过程外露（与思考面板既有机制一致）
+        try:
+            if profile_block or extra_memories:
+                dim_txt = ("、".join(dimension_names))[:60] if dimension_names else "无"
+                await emit("thinking_delta", {
+                    "text": f"【材料充实】已聚合画像维度：{dim_txt}；"
+                            f"定向检索命中 {len(extra_memories)} 条记忆\n"})
+        except Exception:  # noqa: BLE001
+            pass
+        # 3. Langfuse span 埋点（失败不影响主流程）
+        try:
+            tracer = get_tracer()
+            sp = tracer.span_start("material_enrichment", input={
+                "message": message[:200], "intent_summary": intent_summary[:100],
+                "dimensions": dimension_names, "slots": slots,
+                "query": query[:200]})
+            sp.end(output={"profile_chars": len(profile_block),
+                           "extra_memory_count": len(extra_memories)})
+        except Exception:  # noqa: BLE001
+            logger.debug("材料充实 span 记录失败", exc_info=True)
+        return extra_memories
 
     async def _execute_tools(self, intents, dag, shared, message, emit, sid=None) -> list[dict]:
         tool_results: list[dict] = []
@@ -1690,12 +1886,13 @@ class AgentCore:
 
             # 低置信度快速通道：意图清晰但执行前提严重缺失 → 跳过缺口检测，
             # 直接退出收敛环让 _try_elicitation 接管（省 1-2 次 LLM 调用）
-            _conf = getattr(current_understanding.rich_intent, "confidence", 1.0)
+            _conf = getattr(current_understanding.rich_intent,
+                            "confidence", 1.0)
             if _conf < 0.4:
                 logger.info("收敛环第 %d 轮置信度极低（%.2f），跳过缺口检测直接退出",
                             round_num, _conf)
                 await emit("thinking_delta",
-                           {"text": f"【信息不足】置信度 {_conf:.1f}，需要补充信息…\n"})
+                           {"text": f"【信息不足】置信度 {_conf:.1f}，将尝试从画像与记忆中补齐回答材料…\n"})
                 round_sp.end(output={
                     "intent": current_understanding.rich_intent.intent_summary,
                     "has_gaps": True,
@@ -1703,7 +1900,7 @@ class AgentCore:
                 })
                 return current_understanding, all_mems
 
-            # 5. 缺口检测
+            # 5. 缺口检测（带画像摘要：已存在画像中的缺失信息不构成缺口）
             await emit("thinking_delta", {"text": "检测理解缺口…\n"})
             gd_sp = tracer.span_start(
                 "gap_detect",
@@ -1712,34 +1909,46 @@ class AgentCore:
             try:
                 gap_result = await self.gap_detector.detect(
                     current_understanding, message, session_id=sid,
-                    recent_history=recent_history)
+                    recent_history=recent_history,
+                    profile_summary=self.profile.summary_text())
                 gd_sp.end(output={
                     "has_gaps": gap_result.has_gaps,
                     "gap_count": len(gap_result.gaps),
                     "unresolvable": gap_result.unresolvable,
+                    "material_slots": len(gap_result.material_slots),
                 })
             except Exception as e:
                 gd_sp.end(level="ERROR", status_message=str(e))
                 gap_result = GapResult(
                     gaps=[], has_gaps=False, retarget_tasks=[])
 
-            # 无缺口 → 理解完整，退出
-            if not gap_result.has_gaps:
+            # 材料缺口（material_gap）与理解缺口分流：material_gap 由下游材料
+            # 充实节点消解（画像回填 + 定向二次检索），不触发追问与重收集；
+            # 其余缺口沿用原有理解收敛逻辑。
+            if gap_result.material_slots:
+                self._material_slots = [
+                    s for s in gap_result.material_slots if s][:3]
+            actionable_gaps = [
+                g for g in gap_result.gaps if g.get("type") != "material_gap"]
+
+            # 无理解缺口 → 理解完整，退出（material_slots 已透传下游）
+            if not actionable_gaps:
                 round_sp.end(output={
                     "intent": current_understanding.rich_intent.intent_summary,
                     "has_gaps": False,
+                    "material_slots": len(self._material_slots),
                 })
                 return current_understanding, all_mems
 
             # 缺口收敛停滞检测：当前缺口类型与上一轮无变化或为其子集 → 早停
-            cur_gap_types = {g.get("type", "") for g in gap_result.gaps}
+            cur_gap_types = {g.get("type", "") for g in actionable_gaps}
             if prev_gap_types and cur_gap_types and cur_gap_types.issubset(prev_gap_types):
                 logger.info(
                     "收敛环第 %d 轮缺口无改善（prev=%s cur=%s），提前退出",
                     round_num, prev_gap_types, cur_gap_types)
                 round_sp.end(output={
                     "intent": current_understanding.rich_intent.intent_summary,
-                    "has_gaps": gap_result.has_gaps,
+                    "has_gaps": bool(actionable_gaps),
                     "early_exit_reason": "gap_stagnation",
                 })
                 return current_understanding, all_mems
@@ -1753,7 +1962,7 @@ class AgentCore:
                     round_num)
                 round_sp.end(output={
                     "intent": current_understanding.rich_intent.intent_summary,
-                    "has_gaps": gap_result.has_gaps,
+                    "has_gaps": True,
                     "early_exit_reason": "focus_competition_inherent",
                 })
                 return current_understanding, all_mems
@@ -1767,14 +1976,15 @@ class AgentCore:
                     "has_gaps": True,
                     "early_exit_reason": "unresolvable",
                 })
-                # 尝试将缺口转为结构化追问
+                # 尝试将缺口转为结构化追问（带画像摘要：已知信息不问）
                 seed = await self.strategy_engine.clarification_router(
                     sid, message,
                     "；".join(g.get("description", "")
-                             for g in gap_result.gaps[:2]),
+                             for g in actionable_gaps[:2]),
                     {k: self.config.get(k) for k in (
                         "elicitation_max_questions",
-                    ) if self.config.get(k) is not None})
+                    ) if self.config.get(k) is not None},
+                    profile_summary=self.profile.summary_text())
                 if seed is not None:
                     # 可枚举：通过实例变量传递给外部 _try_elicitation
                     self._elicitation_seed = seed
@@ -1788,7 +1998,7 @@ class AgentCore:
                     failure_type=FailureType.CAPABILITY_BOUNDARY,
                 )
                 _decision.message = "；".join(
-                    g.get("description", "") for g in gap_result.gaps[:2])
+                    g.get("description", "") for g in actionable_gaps[:2])
                 tracer.record_degradation(_decision)
                 await self._emit_honest_clarify(
                     emit, gap_result, sid)
@@ -1801,7 +2011,7 @@ class AgentCore:
             })
             if round_num < max_rounds:
                 await emit("thinking_delta", {
-                    "text": f"【理解收敛】第 {round_num} 轮发现 {len(gap_result.gaps)} 个缺口，进入定向重收集…\n"})
+                    "text": f"【理解收敛】第 {round_num} 轮发现 {len(actionable_gaps)} 个缺口，进入定向重收集…\n"})
                 # 将缺口翻译为重收集任务，修改下一轮的检索查询
                 retarget_descs = "；".join(
                     t.get("description", "") for t in gap_result.retarget_tasks[:3])
@@ -1813,15 +2023,18 @@ class AgentCore:
         return current_understanding, all_mems
 
     async def _emit_honest_clarify(self, emit, gap_result: GapResult,
-                                   sid: str | None = None) -> None:
-        """态二：生成诚实澄清回复（LLM 基于缺口描述生成自然的反问）。"""
+                                   sid: str | None = None) -> str:
+        """态二：生成诚实澄清回复（LLM 基于缺口描述生成自然的反问）。
+
+        返回澄清文本（已 emit content_delta），供调用方落盘；失败时返回本地兜底文案。
+        """
         gap_desc = "；".join(
             g.get("description", "") for g in gap_result.gaps[:2])
         snap = self.providers.snapshot_for("chat")
         if snap is None:
-            await emit("content_delta",
-                       {"text": f"我需要确认一下：{gap_desc}，能再帮我说明一下吗？"})
-            return
+            text = f"我需要确认一下：{gap_desc}，能再帮我说明一下吗？"
+            await emit("content_delta", {"text": text})
+            return text
         try:
             system = PROMPTS.render(
                 "agent/prompts/honest_clarify", gap_description=gap_desc)
@@ -1831,10 +2044,13 @@ class AgentCore:
                  {"role": "user", "content": gap_desc}],
                 source="honest_clarify",
                 session_id=sid)
-            await emit("content_delta", {"text": resp["content"]})
+            text = resp.get("content", "") or ""
+            await emit("content_delta", {"text": text})
+            return text
         except Exception:
-            await emit("content_delta",
-                       {"text": f"关于这个问题，我需要确认一下：{gap_desc}"})
+            text = f"关于这个问题，我需要确认一下：{gap_desc}"
+            await emit("content_delta", {"text": text})
+            return text
 
     async def _compress_history(self, sid: str,
                                 history: list[dict]) -> tuple[list[dict], bool]:
@@ -2490,7 +2706,8 @@ class AgentCore:
                             depth_level: str = "normal",
                             strategy: ResponseStrategy | None = None,
                             skeleton: CognitiveSkeleton | None = None,
-                            next_step_seeds: list | None = None):
+                            next_step_seeds: list | None = None,
+                            profile_material: str = ""):
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
@@ -2516,13 +2733,36 @@ class AgentCore:
                 f"- 语气：{strategy.tone}\n"
                 f"- 洞察触发点：{hooks}\n"
                 "优先级：人格底线（诚实、不伪装身份）高于一切；本轮策略优先于"
-                "输出风格基线；两者冲突时以本轮策略为准，但不得突破人格底线。")
+                "输出风格基线；两者冲突时以本轮策略为准，但不得突破人格底线。"
+                "若已注入『用户画像材料』，策略中『先收集信息/引导提问』类角度"
+                "服从产出优先硬约束，以该约束为准。")
         # 思考骨架注入（v3 §六）：有则遵循，无则跳过
         if skeleton is not None:
             merged_system += (
                 "\n\n## 思考骨架（有则遵循）\n" + skeleton.to_prompt_text()
                 + "\n遵循规则：opening_move 与 closing_move 必须遵循；关键洞察"
-                "必须在回答中以某种形式呈现，不可稀释。")
+                "必须在回答中以某种形式呈现，不可稀释。若已注入『用户画像材料』"
+                "且骨架方向为引导提问/收集信息，该方向作废，服从产出优先硬约束。")
+        # 用户画像材料注入（答案材料充实层）：画像全部维度（通用设计，与当前
+        # 任务无关的维度由模型忽略），是系统已知的关于用户的事实；禁止编造
+        # 材料之外的用户信息；标注"（推断）"的内容使用时须注明推测性质。
+        # 附带"产出优先硬约束"：材料已备料，禁止策略/骨架把方向带偏为
+        # "先收集信息"（两者决策时看不到画像材料，与材料现实冲突时以后者为准）。
+        if profile_material:
+            merged_system += (
+                "\n\n## 用户画像材料（系统已知事实）\n"
+                "以下为画像中记录的用户信息（全部维度，与当前任务无关的维度忽略），"
+                "回答中可直接使用；禁止编造材料之外的用户信息；标注'（推断）'的"
+                "内容使用时注明推测性质：\n"
+                + profile_material
+                + "\n\n## 产出优先硬约束（最高优先级）\n"
+                "系统已完成备料（画像材料+检索记忆已注入本轮 prompt），必须"
+                "直接基于材料生成完整可用的成品答案。禁止以'信息不足''需要先"
+                "收集信息''需要确认'为由拒绝产出或发起开放式追问；材料缺失的"
+                "非关键字段用 [占位符] 标注，并在文末列出缺失清单。本条约束"
+                "优先级高于响应策略的'回答角度'与思考骨架的 opening_move/"
+                "closing_move（两者中'先引导用户补充信息'类方向一律作废），"
+                "冲突时以本条为准。")
         if skill_text:
             merged_system += "\n\n可参考的技能内容：" + skill_text
         if preload_text:
@@ -2613,7 +2853,7 @@ class AgentCore:
         if not self._should_judge_mood(user_msg):
             return
         try:
-            snap = self.providers.snapshot_for("mood")
+            snap = self.providers.snapshot_for("intent")
             if snap is None:
                 return
             from infrastructure.json_repair import repair_json

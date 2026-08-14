@@ -91,7 +91,7 @@ def mock_llm():
 
 @pytest.fixture
 def mock_providers():
-    """mock providers，convergence 槽位可用。"""
+    """mock providers，intent 槽位可用。"""
     providers = MagicMock()
     snap = {"provider_id": "test_conv", "model_id": "test-model"}
     providers.snapshot_for.return_value = snap

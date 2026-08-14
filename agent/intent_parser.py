@@ -105,6 +105,7 @@ class GapResult:
     has_gaps: bool
     retarget_tasks: list[dict]     # [{"target":"...", "description":"..."}]
     unresolvable: bool = False     # 缺口无法在系统内消解
+    material_slots: list[str] = field(default_factory=list)  # 材料缺口：下游材料充实环节消解
 
 
 @dataclass
@@ -181,8 +182,14 @@ class GapDetector:
     async def detect(self, understanding: Understanding,
                      user_message: str,
                      session_id: str | None = None,
-                     recent_history: str = "") -> GapResult:
-        """检测理解缺口并产出定向重收集任务。"""
+                     recent_history: str = "",
+                     profile_summary: str = "") -> GapResult:
+        """检测理解缺口并产出定向重收集任务。
+
+        profile_summary：用户画像全维度摘要（零 LLM 拼装）。缺口判定需先对照
+        画像——画像中已存在的缺失信息不构成缺口，写入 material_slots 由下游
+        材料充实环节回填。
+        """
         snap = self.snapshot_fn()
         if snap is None:
             return GapResult(gaps=[], has_gaps=False, retarget_tasks=[])
@@ -201,6 +208,9 @@ class GapDetector:
             ctx_parts.append(f"主要焦点：{understanding.focus.primary_focus}")
             ctx_parts.append(
                 f"焦点竞争：{'是' if understanding.focus.is_competitive else '否'}")
+        if profile_summary:
+            ctx_parts.append(
+                f"系统已知用户信息（画像）：\n{profile_summary}")
         ctx = "\n".join(ctx_parts)
 
         try:
@@ -217,6 +227,7 @@ class GapDetector:
                 has_gaps=data.get("has_gaps", False),
                 retarget_tasks=data.get("retarget_tasks", []),
                 unresolvable=data.get("unresolvable", False),
+                material_slots=data.get("material_slots", []),
             )
         except Exception:
             logger.warning("缺口检测失败，回退无缺口", exc_info=True)

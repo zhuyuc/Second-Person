@@ -124,16 +124,17 @@ const status = ref(null)
 const showAddProvider = ref(false)
 const newProvider = ref({ provider_type: 'openai_compatible', display_name: '', base_url: '', api_key: '', model_id: '', input_price: null, output_price: null, context_window: 128000 })
 
-async function loadProviders() { providers.value = await api.get('/settings/providers'); assignment.value = await api.get('/settings/model-assignment') }
+// 任务-模型分配：槽位清单由后端 /settings/task-slots 返回（单一事实来源），
+// 包含中文名、职责描述、回退链与轻量任务标记，前端不再硬编码
+const slots = ref([])
+function fallbackLabels(slot) {
+  return (slot.fallback || []).map(f => slots.value.find(s => s.key === f)?.label || f).join(' → ')
+}
 
-// 任务-模型分配：名称与说明（每个类型下展示用途解释）
-const TASK_NAMES = { chat: '对话模型', agent: '系统 Agent 模型', intent: '意图识别模型', embedding: 'Embedding 模型', vision: '视觉模型（图片解析）' }
-const TASK_DESC = {
-  chat: '负责日常对话的回复生成与文档撰写，直接决定回答质量与语言风格',
-  agent: '用于记忆蒸馏、上下文压缩、被动回顾、画像重建等系统后台任务',
-  intent: '留空则跟随系统 Agent/对话模型；建议配非推理小模型，可大幅降低每轮对话首响应延迟',
-  embedding: '将记忆与知识库内容向量化，支撑语义检索；切换后需重新向量化全部记忆',
-  vision: '留空则跟随对话模型；用于知识库图片/文档内嵌图解析',
+async function loadProviders() {
+  providers.value = await api.get('/settings/providers')
+  assignment.value = await api.get('/settings/model-assignment')
+  slots.value = await api.get('/settings/task-slots')
 }
 async function addProvider() {
   await api.post('/settings/providers', newProvider.value)
@@ -477,16 +478,19 @@ onActivated(() => selectTab(tab.value))
   <div v-if="tab === 0">
     <div class="section-title">任务-模型分配</div>
     <div class="cw">
-      <div v-for="task in ['chat', 'agent', 'intent', 'embedding', 'vision']" :key="task" class="row"
-        style="padding:8px 0;border-bottom:1px solid var(--bd)">
+      <div v-for="s in slots" :key="s.key" class="row" style="padding:10px 0;border-bottom:1px solid var(--bd)">
         <div style="flex:1;min-width:0;padding-right:16px">
-          <b>{{ TASK_NAMES[task] }}</b>
-          <div class="muted">{{ TASK_DESC[task] }}</div>
+          <b>{{ s.label }}</b>
+          <span v-if="s.lightweight" class="muted">· 轻量任务</span>
+          <div class="muted">{{ s.desc }}</div>
+          <div v-if="s.fallback && s.fallback.length" class="muted" style="font-size:12px">
+            未配置时自动回退：{{ fallbackLabels(s) }}
+          </div>
         </div>
-        <select :value="assignment[task + '_model']?.provider_id || ''"
-          @change="e => task === 'embedding' ? onEmbeddingChange(e.target.value) : setAssign(task, e.target.value)"
+        <select :value="assignment[s.key + '_model']?.provider_id || ''"
+          @change="e => s.key === 'embedding' ? onEmbeddingChange(e.target.value) : setAssign(s.key, e.target.value)"
           style="min-width:180px">
-          <option value="">未配置</option>
+          <option value="">{{ s.fallback && s.fallback.length ? '未配置（自动回退）' : '未配置' }}</option>
           <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.display_name }}</option>
         </select>
       </div>
@@ -500,7 +504,7 @@ onActivated(() => selectTab(tab.value))
           </div>
         </div>
         <div class="fg" style="gap:12px"><span class="muted">¥{{ p.input_price || 0 }}/M · ¥{{ p.output_price || 0
-            }}/M</span>
+        }}/M</span>
           <button class="btn-sm" :disabled="busy('editP' + p.id)"
             @click="run('editP' + p.id, () => openEdit(p))">编辑</button>
           <button class="btn-sm btn-danger" @click="delProvider(p.id)">删除</button>
@@ -553,8 +557,8 @@ onActivated(() => selectTab(tab.value))
         </div>
         <div class="fg" style="gap:8px">
           <span v-if="p.enabled" class="badge badge-g">已启用</span>
-          <button v-if="p.platform_type === 'weixin' && !p.bound" class="btn-sm"
-            :disabled="busy('wxBind')" @click="run('wxBind', openWeixinScan)">扫码绑定</button>
+          <button v-if="p.platform_type === 'weixin' && !p.bound" class="btn-sm" :disabled="busy('wxBind')"
+            @click="run('wxBind', openWeixinScan)">扫码绑定</button>
           <template v-else>
             <button v-if="p.id !== 'web_default'" class="btn-sm" :disabled="busy('editCh' + p.id)"
               @click="run('editCh' + p.id, () => openChannelEdit(p))">编辑</button>
@@ -571,8 +575,7 @@ onActivated(() => selectTab(tab.value))
     <div class="section-title mt">添加渠道</div>
     <div class="g3">
       <div v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom', 'weixin']" :key="pt" class="cw"
-        style="text-align:center;cursor:pointer;padding:20px"
-        @click="clickAddChannel(pt)">
+        style="text-align:center;cursor:pointer;padding:20px" @click="clickAddChannel(pt)">
         <i class="ti ti-plug" style="font-size:var(--icon-lg);color:var(--acctx)"></i>
         <div style="font-weight:500;margin-top:8px">{{ PLATFORM_MAP[pt] || pt }}</div>
         <div class="muted">{{ pt === 'weixin' ? 'ClawBot 扫码绑定' : 'Bot 私聊接入' }}</div>
@@ -690,15 +693,16 @@ onActivated(() => selectTab(tab.value))
           </g>
           <!-- hover 即时浮层（跟随柱子，pointer-events 关闭防闪烁，展示多模型明细；颜色全部走 token） -->
           <g v-if="hoverTip" pointer-events="none">
-            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" :height="hoverTip.h" rx="4" fill="var(--surface-3)"
-              opacity=".95" />
+            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" :height="hoverTip.h" rx="4"
+              fill="var(--surface-3)" opacity=".95" />
             <text :x="hoverTip.x + 8" :y="hoverTip.y + 14" font-size="10" fill="var(--fg)" font-weight="600">{{
               hoverTip.title }}</text>
             <g v-for="(r, ri) in hoverTip.rows" :key="ri">
               <rect :x="hoverTip.x + 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 2" width="7" height="7" rx="1.5"
                 :fill="r.color" />
-              <text :x="hoverTip.x + 19" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" font-size="9" fill="var(--sec)">{{
-                r.name }}</text>
+              <text :x="hoverTip.x + 19" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" font-size="9"
+                fill="var(--sec)">{{
+                  r.name }}</text>
               <text :x="hoverTip.x + hoverTip.w - 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" text-anchor="end"
                 font-size="9" fill="var(--fg)">{{ r.value }}</text>
             </g>
@@ -810,128 +814,129 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 添加 Provider 弹窗 -->
   <BaseModal v-if="showAddProvider" title="添加 LLM Provider" @close="showAddProvider = false">
-      <div class="form-group"><label class="label">显示名称</label><input v-model="newProvider.display_name" /></div>
-      <div class="form-group"><label class="label">类型</label>
-        <select v-model="newProvider.provider_type">
-          <option value="openai_compatible">OpenAI 兼容</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="google">Google</option>
-          <option value="custom">自定义</option>
-        </select>
+    <div class="form-group"><label class="label">显示名称</label><input v-model="newProvider.display_name" /></div>
+    <div class="form-group"><label class="label">类型</label>
+      <select v-model="newProvider.provider_type">
+        <option value="openai_compatible">OpenAI 兼容</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="google">Google</option>
+        <option value="custom">自定义</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="label">基础地址</label><input v-model="newProvider.base_url" /></div>
+    <div class="form-group"><label class="label">API Key</label>
+      <div class="input-affix">
+        <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'" />
+        <i :class="showAddKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+          @click="showAddKey = !showAddKey"></i>
       </div>
-      <div class="form-group"><label class="label">基础地址</label><input v-model="newProvider.base_url" /></div>
-      <div class="form-group"><label class="label">API Key</label>
-        <div class="input-affix">
-          <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'" />
-          <i :class="showAddKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-            @click="showAddKey = !showAddKey"></i>
-        </div>
-      </div>
-      <div class="form-group"><label class="label">模型 ID</label><input v-model="newProvider.model_id" /></div>
-      <div class="form-grid">
-        <div><label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" /></div>
-        <div><label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" /></div>
-      </div>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button @click="showAddProvider = false">取消</button>
-        <button :disabled="busy('testAdd')" @click="run('testAdd', () => testConn(newProvider))"><i
-            v-if="busy('testAdd')" class="ti ti-loader-2"></i> 测试连接</button>
-        <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)"><i v-if="busy('addP')"
-            class="ti ti-loader-2"></i> 保存</button>
-      </div>
+    </div>
+    <div class="form-group"><label class="label">模型 ID</label><input v-model="newProvider.model_id" /></div>
+    <div class="form-grid">
+      <div><label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" /></div>
+      <div><label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" /></div>
+    </div>
+    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+      <button @click="showAddProvider = false">取消</button>
+      <button :disabled="busy('testAdd')" @click="run('testAdd', () => testConn(newProvider))"><i v-if="busy('testAdd')"
+          class="ti ti-loader-2"></i> 测试连接</button>
+      <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)"><i v-if="busy('addP')"
+          class="ti ti-loader-2"></i> 保存</button>
+    </div>
   </BaseModal>
   <!-- Embedding 切换预估弹窗 -->
   <BaseModal v-if="embEstimate" title="Embedding 模型切换" @close="embEstimate = null">
     <p class="muted" style="margin-bottom:12px">切换后需重新向量化所有记忆（旧向量保留 30 天可回滚）。</p>
-      <div class="g2">
-        <div class="card">
-          <div class="label">需重跑</div>
-          <div class="val">{{ embEstimate.vector_count }} 条</div>
-        </div>
-        <div class="card">
-          <div class="label">预估耗时</div>
-          <div class="val">{{ embEstimate.estimated_minutes }} 分钟</div>
-        </div>
+    <div class="g2">
+      <div class="card">
+        <div class="label">需重跑</div>
+        <div class="val">{{ embEstimate.vector_count }} 条</div>
       </div>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button @click="embEstimate = null">取消</button>
-        <button class="btn-primary" :disabled="busy('migrate')" @click="run('migrate', confirmMigrate)"><i
-            v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换</button>
+      <div class="card">
+        <div class="label">预估耗时</div>
+        <div class="val">{{ embEstimate.estimated_minutes }} 分钟</div>
       </div>
+    </div>
+    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+      <button @click="embEstimate = null">取消</button>
+      <button class="btn-primary" :disabled="busy('migrate')" @click="run('migrate', confirmMigrate)"><i
+          v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换</button>
+    </div>
   </BaseModal>
 
   <!-- 定时任务日志弹窗 -->
   <BaseModal v-if="taskLogs" :title="'执行日志 · ' + taskLogs.id" size="lg" @close="taskLogs = null">
-      <div v-if="!taskLogs.logs.length" class="muted">该任务尚未执行过</div>
-      <div v-for="(l, i) in taskLogs.logs" :key="i" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
-        <div><b>{{ formatTime(l.run_time) }}</b>
-          <div class="muted">
-            <template v-if="l.result === 'skipped'">{{ l.fail_reason || '未执行' }}</template>
-            <template v-else>耗时 {{ formatDuration(l.duration_ms) }}
-              <span v-if="l.fail_reason" style="color:var(--dangtx)">· {{ l.fail_reason }}</span>
-            </template>
-          </div>
+    <div v-if="!taskLogs.logs.length" class="muted">该任务尚未执行过</div>
+    <div v-for="(l, i) in taskLogs.logs" :key="i" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
+      <div><b>{{ formatTime(l.run_time) }}</b>
+        <div class="muted">
+          <template v-if="l.result === 'skipped'">{{ l.fail_reason || '未执行' }}</template>
+          <template v-else>耗时 {{ formatDuration(l.duration_ms) }}
+            <span v-if="l.fail_reason" style="color:var(--dangtx)">· {{ l.fail_reason }}</span>
+          </template>
         </div>
-        <span class="badge" :class="taskBadge(l.result)">{{ taskLabel(l.result) }}</span>
       </div>
-      <div class="fg" style="justify-content:flex-end;margin-top:16px"><button @click="taskLogs = null">关闭</button>
-      </div>
+      <span class="badge" :class="taskBadge(l.result)">{{ taskLabel(l.result) }}</span>
+    </div>
+    <div class="fg" style="justify-content:flex-end;margin-top:16px"><button @click="taskLogs = null">关闭</button>
+    </div>
   </BaseModal>
 
   <!-- 添加连接器弹窗 -->
   <BaseModal v-if="showAddConn" title="添加 MCP 连接器" @close="showAddConn = false">
-      <div class="form-group"><label class="label">名称</label><input v-model="newConn.name" placeholder="如：GitHub" />
-      </div>
-      <div class="form-group"><label class="label">传输方式</label>
-        <select v-model="newConn.transport">
-          <option value="stdio">stdio — 本地子进程</option>
-          <option value="http">Streamable HTTP</option>
-        </select>
-      </div>
-      <template v-if="newConn.transport === 'stdio'">
-        <div class="form-group"><label class="label">启动命令</label><input v-model="newConn.command" /></div>
-        <div class="form-group"><label class="label">参数（JSON 数组）</label><input v-model="newConn.args"
-            placeholder='["-y","@modelcontextprotocol/server-github"]' /></div>
-        <div class="form-group"><label class="label">环境变量（JSON 对象）</label><input v-model="newConn.env"
-            placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' /></div>
-      </template>
-      <template v-else>
-        <div class="form-group"><label class="label">端点地址</label><input v-model="newConn.url" /></div>
-      </template>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button @click="showAddConn = false">取消</button>
-        <button :disabled="busy('testConn')" @click="run('testConn', testConnector)"><i v-if="busy('testConn')"
-            class="ti ti-loader-2"></i> 测试连接</button>
-        <button class="btn-primary" :disabled="busy('addConn')" @click="run('addConn', addConnector)"><i
-            v-if="busy('addConn')" class="ti ti-loader-2"></i> 保存</button>
-      </div>
+    <div class="form-group"><label class="label">名称</label><input v-model="newConn.name" placeholder="如：GitHub" />
+    </div>
+    <div class="form-group"><label class="label">传输方式</label>
+      <select v-model="newConn.transport">
+        <option value="stdio">stdio — 本地子进程</option>
+        <option value="http">Streamable HTTP</option>
+      </select>
+    </div>
+    <template v-if="newConn.transport === 'stdio'">
+      <div class="form-group"><label class="label">启动命令</label><input v-model="newConn.command" /></div>
+      <div class="form-group"><label class="label">参数（JSON 数组）</label><input v-model="newConn.args"
+          placeholder='["-y","@modelcontextprotocol/server-github"]' /></div>
+      <div class="form-group"><label class="label">环境变量（JSON 对象）</label><input v-model="newConn.env"
+          placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' /></div>
+    </template>
+    <template v-else>
+      <div class="form-group"><label class="label">端点地址</label><input v-model="newConn.url" /></div>
+    </template>
+    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+      <button @click="showAddConn = false">取消</button>
+      <button :disabled="busy('testConn')" @click="run('testConn', testConnector)"><i v-if="busy('testConn')"
+          class="ti ti-loader-2"></i> 测试连接</button>
+      <button class="btn-primary" :disabled="busy('addConn')" @click="run('addConn', addConnector)"><i
+          v-if="busy('addConn')" class="ti ti-loader-2"></i> 保存</button>
+    </div>
   </BaseModal>
 
   <!-- 接入渠道配置弹窗 -->
   <BaseModal v-if="showChannelCfg" title="配置接入渠道" @close="showChannelCfg = false">
-      <div class="form-group"><label class="label">平台</label>
-        <select v-model="newChannel.platform_type">
-          <option value="feishu">飞书</option>
-          <option value="telegram">Telegram</option>
-          <option value="dingtalk">钉钉</option>
-          <option value="wecom">企业微信</option>
-        </select>
-      </div>
-      <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="newChannel.bot_token" />
-      </div>
-      <div class="form-group"><label class="label">App Secret（部分平台）</label><input v-model="newChannel.app_secret"
-          type="password" /></div>
-      <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
-          v-model="newChannel.whitelist_user_id" /></div>
-      <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url" /></div>
-      <div class="muted" style="margin-bottom:12px">启用后会自动禁用当前已启用的 IM 平台。</div>
-      <div class="fg" style="justify-content:flex-end;gap:8px">
-        <button @click="showChannelCfg = false">取消</button>
-        <button :disabled="busy('testCh')" @click="run('testCh', testChannel)"><i v-if="busy('testCh')"
-            class="ti ti-loader-2"></i> 测试连接</button>
-        <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)"><i v-if="busy('addCh')"
-            class="ti ti-loader-2"></i> 启用</button>
-      </div>
+    <div class="form-group"><label class="label">平台</label>
+      <select v-model="newChannel.platform_type">
+        <option value="feishu">飞书</option>
+        <option value="telegram">Telegram</option>
+        <option value="dingtalk">钉钉</option>
+        <option value="wecom">企业微信</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="newChannel.bot_token" />
+    </div>
+    <div class="form-group"><label class="label">App Secret（部分平台）</label><input v-model="newChannel.app_secret"
+        type="password" /></div>
+    <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
+        v-model="newChannel.whitelist_user_id" />
+    </div>
+    <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url" /></div>
+    <div class="muted" style="margin-bottom:12px">启用后会自动禁用当前已启用的 IM 平台。</div>
+    <div class="fg" style="justify-content:flex-end;gap:8px">
+      <button @click="showChannelCfg = false">取消</button>
+      <button :disabled="busy('testCh')" @click="run('testCh', testChannel)"><i v-if="busy('testCh')"
+          class="ti ti-loader-2"></i> 测试连接</button>
+      <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)"><i v-if="busy('addCh')"
+          class="ti ti-loader-2"></i> 启用</button>
+    </div>
   </BaseModal>
 
   <!-- 微信扫码绑定弹窗（关闭需同步停轮询） -->
@@ -939,11 +944,13 @@ onActivated(() => selectTab(tab.value))
     <div style="text-align:center">
       <div class="muted" style="margin:8px 0">使用微信「我 → 设置 → 插件 → ClawBot」扫描下方二维码（需微信 8.0.70+ 且账号已开放 ClawBot 灰度）</div>
       <!-- 二维码背景强制白底：扫码识别对比度需求（例外登记 UI_UX_SPEC） -->
-      <div v-if="wxImgSrc()" style="margin:16px auto;width:220px;height:220px;background:#fff;padding:8px;border-radius:var(--radius-sm)">
+      <div v-if="wxImgSrc()"
+        style="margin:16px auto;width:220px;height:220px;background:#fff;padding:8px;border-radius:var(--radius-sm)">
         <img :src="wxImgSrc()" style="width:100%;height:100%;object-fit:contain" alt="微信扫码" />
       </div>
       <div v-else-if="wxScan.busy" class="muted">正在获取二维码…</div>
-      <div v-else-if="wxScan.url" class="muted" style="margin:12px 0;word-break:break-all">请复制下方链接，在微信中打开后扫码确认：<br />{{ wxScan.url }}</div>
+      <div v-else-if="wxScan.url" class="muted" style="margin:12px 0;word-break:break-all">请复制下方链接，在微信中打开后扫码确认：<br />{{
+        wxScan.url }}</div>
       <div class="fg" style="justify-content:center;gap:8px;margin-top:8px">
         <button v-if="!wxImgSrc() && wxScan.url" @click="copyWxUrl">复制链接</button>
       </div>
@@ -957,67 +964,68 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 编辑接入渠道弹窗 -->
   <BaseModal v-if="showChannelEdit" title="编辑接入渠道" @close="showChannelEdit = false">
-      <div class="form-group"><label class="label">平台</label>
-        <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled />
+    <div class="form-group"><label class="label">平台</label>
+      <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled />
+    </div>
+    <template v-if="editChannel.platform_type === 'weixin'">
+      <div class="muted" style="margin-bottom:12px">微信渠道凭证由扫码绑定流程管理（含会话 Token），此处仅可修改绑定账户与回调。</div>
+    </template>
+    <template v-else>
+      <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
       </div>
-      <template v-if="editChannel.platform_type === 'weixin'">
-        <div class="muted" style="margin-bottom:12px">微信渠道凭证由扫码绑定流程管理（含会话 Token），此处仅可修改绑定账户与回调。</div>
-      </template>
-      <template v-else>
-        <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
+      <div class="form-group"><label class="label">App Secret（部分平台）</label>
+        <div class="input-affix">
+          <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'" />
+          <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+            @click="showEditSecret = !showEditSecret"></i>
         </div>
-        <div class="form-group"><label class="label">App Secret（部分平台）</label>
-          <div class="input-affix">
-            <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'" />
-            <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-              @click="showEditSecret = !showEditSecret"></i>
-          </div>
-        </div>
-      </template>
-      <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
-          v-model="editChannel.whitelist_user_id" /></div>
-      <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="editChannel.callback_url" /></div>
-      <div class="fg" style="justify-content:flex-end;gap:8px">
-        <button @click="showChannelEdit = false">取消</button>
-        <button :disabled="busy('testChE')" @click="run('testChE', testEditChannel)"><i v-if="busy('testChE')"
-            class="ti ti-loader-2"></i> 测试连接</button>
-        <button class="btn-primary" :disabled="busy('saveChE')" @click="run('saveChE', saveChannelEdit)"><i
-            v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存</button>
       </div>
+    </template>
+    <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
+        v-model="editChannel.whitelist_user_id" />
+    </div>
+    <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="editChannel.callback_url" /></div>
+    <div class="fg" style="justify-content:flex-end;gap:8px">
+      <button @click="showChannelEdit = false">取消</button>
+      <button :disabled="busy('testChE')" @click="run('testChE', testEditChannel)"><i v-if="busy('testChE')"
+          class="ti ti-loader-2"></i> 测试连接</button>
+      <button class="btn-primary" :disabled="busy('saveChE')" @click="run('saveChE', saveChannelEdit)"><i
+          v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存</button>
+    </div>
   </BaseModal>
 
   <!-- 编辑 Provider 弹窗 -->
   <BaseModal v-if="showEdit" title="编辑 LLM Provider" @close="showEdit = false">
-      <div class="form-group"><label class="label">显示名称</label><input v-model="editData.display_name" /></div>
-      <div class="form-group"><label class="label">类型</label>
-        <select v-model="editData.provider_type">
-          <option value="openai_compatible">OpenAI 兼容</option>
-          <option value="anthropic">Anthropic</option>
-          <option value="google">Google</option>
-          <option value="custom">自定义</option>
-        </select>
+    <div class="form-group"><label class="label">显示名称</label><input v-model="editData.display_name" /></div>
+    <div class="form-group"><label class="label">类型</label>
+      <select v-model="editData.provider_type">
+        <option value="openai_compatible">OpenAI 兼容</option>
+        <option value="anthropic">Anthropic</option>
+        <option value="google">Google</option>
+        <option value="custom">自定义</option>
+      </select>
+    </div>
+    <div class="form-group"><label class="label">基础地址</label><input v-model="editData.base_url" /></div>
+    <div class="form-group"><label class="label">API Key</label>
+      <div class="input-affix">
+        <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'" />
+        <i :class="showEditKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
+          @click="showEditKey = !showEditKey"></i>
       </div>
-      <div class="form-group"><label class="label">基础地址</label><input v-model="editData.base_url" /></div>
-      <div class="form-group"><label class="label">API Key</label>
-        <div class="input-affix">
-          <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'" />
-          <i :class="showEditKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-            @click="showEditKey = !showEditKey"></i>
-        </div>
-      </div>
-      <div class="form-group"><label class="label">模型 ID</label><input v-model="editData.model_id" /></div>
-      <div class="form-grid">
-        <div><label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" /></div>
-        <div><label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" /></div>
-      </div>
-      <div class="form-group" style="margin-top:12px"><label class="label">上下文窗口</label><input
-          v-model.number="editData.context_window" /></div>
-      <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
-        <button @click="showEdit = false">取消</button>
-        <button :disabled="busy('testEdit')" @click="run('testEdit', () => testConn(editData))"><i
-            v-if="busy('testEdit')" class="ti ti-loader-2"></i> 测试连接</button>
-        <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)"><i
-            v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存</button>
-      </div>
+    </div>
+    <div class="form-group"><label class="label">模型 ID</label><input v-model="editData.model_id" /></div>
+    <div class="form-grid">
+      <div><label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" /></div>
+      <div><label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" /></div>
+    </div>
+    <div class="form-group" style="margin-top:12px"><label class="label">上下文窗口</label><input
+        v-model.number="editData.context_window" /></div>
+    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+      <button @click="showEdit = false">取消</button>
+      <button :disabled="busy('testEdit')" @click="run('testEdit', () => testConn(editData))"><i v-if="busy('testEdit')"
+          class="ti ti-loader-2"></i> 测试连接</button>
+      <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)"><i
+          v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存</button>
+    </div>
   </BaseModal>
 </template>

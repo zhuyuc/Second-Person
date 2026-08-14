@@ -242,14 +242,16 @@ class StrategyEngine:
     # ---- 追问式补充信息：clarification_router（elicitation §05 触发与门槛） ---
 
     async def clarification_router(self, session_id: str, message: str,
-                                   gap_description: str, config: dict) -> dict | None:
+                                   gap_description: str, config: dict,
+                                   profile_summary: str = "") -> dict | None:
         """判定缺失信息可枚举/发散 → 可枚举时返回 ask_user seed。
 
+        profile_summary：用户画像全维度摘要。缺失信息若已存在于画像中，
+        由 prompt 约束判定为无需追问（系统直接回填），返回 None 走正常合成。
         返回 None 表示不可枚举（走文字澄清），返回 dict 表示可枚举（走追问）。
         """
         from infrastructure.prompt_loader import PROMPTS
         from infrastructure.json_repair import repair_json
-        import json as _json
 
         snap = self.snapshot_fn()
         if not snap:
@@ -257,11 +259,16 @@ class StrategyEngine:
 
         system_prompt = PROMPTS.load_raw(
             "agent/prompts/elicitation_decision")
-        user_prompt = (
-            f"用户消息：{message}\n"
-            f"缺失信息：{gap_description}\n"
-            f"请判定上述缺失信息是否可枚举为 2-4 个选项。"
-        )
+        parts = [
+            f"用户消息：{message}",
+            f"缺失信息：{gap_description}",
+        ]
+        if profile_summary:
+            parts.append(f"系统已知用户信息（画像）：\n{profile_summary}")
+        parts.append(
+            "请判定上述缺失信息是否可枚举为 2-4 个选项。"
+            "已知信息中已存在的事实禁止进入追问。")
+        user_prompt = "\n".join(parts)
 
         try:
             resp = await self.llm.chat(snap, [

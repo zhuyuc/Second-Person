@@ -96,7 +96,14 @@ class AppContainer:
             self.bus.subscribe(_evt, _make_audit(_evt))
         self.oplog = OperationLogger(self.db)
         self.creds = CredentialStore(self.db, d)
-        self.providers = ProviderRegistry(self.db, self.creds)
+        self.providers = ProviderRegistry(
+            self.db, self.creds,
+            slow_model_ids=set(self.config.get_raw("slow_model_ids", [])))
+        # 槽位治理：缺失槽位幂等补齐（仅补缺失不覆盖用户配置）+ 启动健康检查
+        from infrastructure.provider_registry import (audit_slot_assignments,
+                                                      ensure_slot_assignments)
+        ensure_slot_assignments(self.providers)
+        audit_slot_assignments(self.providers)
         self.token_recorder = TokenRecorder(self.db)
         self.llm = LLMClient(self.token_recorder)
 
@@ -323,12 +330,14 @@ class AppContainer:
             if feedback_kind == "style" and canonical_dim and canonical_dim != "other":
                 import hashlib as _hashlib
                 style_key = f"style:{canonical_dim}:{proposed[:50].strip()}"
-                style_change_key = _hashlib.md5(style_key.encode()).hexdigest()[:16]
+                style_change_key = _hashlib.md5(
+                    style_key.encode()).hexdigest()[:16]
                 now_str = now_cst().isoformat(timespec="seconds")
                 if self.conflict_scanner.check_rejection_protection(style_change_key, now_str):
                     return
                 occ, newly_enqueued = self.conflict_scanner.accumulate_feedback(
-                    style_change_key, proposed, item.get("summary", ""), "style"
+                    style_change_key, proposed, item.get(
+                        "summary", ""), "style"
                 )
                 if newly_enqueued:
                     current_dialog = self.soul.read_style().get("对话风格", "")

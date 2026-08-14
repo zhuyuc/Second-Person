@@ -70,3 +70,41 @@ class ProfileManager:
             if name_keyword in dim["name"] or name_keyword.lower() in dim["name"].lower():
                 return dim
         return None
+
+    # ---- 答案材料充实层（零 LLM） ------------------------------------------
+
+    def summary_text(self, max_chars: int = 1200) -> str:
+        """画像全维度摘要：注入缺口判定站（gap_detect / clarification_router）。"""
+        parsed = self.parse()
+        lines = []
+        for dim in parsed["dimensions"]:
+            items = "；".join(i["text"] for i in dim["items"])
+            if items:
+                lines.append(f"{dim['name']}[{dim['status']}]：{items}")
+        return "\n".join(lines)[:max_chars]
+
+    def dimension_names(self) -> list[str]:
+        """全部维度名列表（材料充实外露用，零 LLM）。"""
+        return [d["name"] for d in self.parse()["dimensions"]]
+
+    def material_block(self, dimensions: list[str] | None = None,
+                       max_chars: int = 800) -> str:
+        """把画像维度拼装为回答材料块（带确认状态与推断标注），注入响应合成。
+
+        通用设计：dimensions 为 None 时注入画像全部维度，由合成模型按任务
+        自选使用（材料段附带"无关维度忽略"指令），不维护场景规则表。
+        """
+        by_name = {d["name"]: d for d in self.parse()["dimensions"]}
+        names = dimensions if dimensions is not None else list(by_name)
+        out = []
+        for name in names:
+            dim = by_name.get(name)
+            if not dim:
+                continue
+            items = []
+            for it in dim["items"]:
+                suffix = "（推断）" if it["inferred"] else ""
+                items.append(f"{it['text']}{suffix}")
+            if items:
+                out.append(f"- {name}[{dim['status']}]：{'；'.join(items)}")
+        return "\n".join(out)[:max_chars]

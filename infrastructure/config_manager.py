@@ -77,6 +77,11 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "default": 60, "effect": "immediate", "group": "conversation", "order": 14,
      "label": "追问弱信号窗口（秒）",
      "desc": "AI 回复后该时间窗内的用户追问计入弱负向反馈证据；初始值 60，上线后用间隔分布 P75 校准。"},
+    # -- 答案材料充实层（画像材料注入 + 定向二次检索） --
+    {"key": "material_enrichment_enabled", "type": "bool", "default": True,
+     "effect": "immediate", "group": "conversation", "order": 15,
+     "label": "答案材料充实",
+     "desc": "意图识别后按任务类型注入用户画像维度并做定向二次检索，把系统已知事实作为回答材料；关闭后仅保留原有记忆检索。"},
     # -- 情绪 --
     {"key": "mood_enabled", "type": "bool", "default": True,
      "effect": "next_turn", "group": "conversation", "order": 4,
@@ -511,5 +516,8 @@ def default_config() -> dict[str, Any]:
         "port": 8000,
         "workspace_whitelist": [],
         "allow_private_network_fetch": False,
+        # 慢模型清单：轻量槽位（intent/convergence/mood/elicitation）解析时
+        # 跳过这些 model_id 的候选，防止轻量任务耗时放大数倍
+        "slow_model_ids": ["mimo-v2.5"],
         "params": {p["key"]: p["default"] for p in PARAM_SCHEMA},
     }

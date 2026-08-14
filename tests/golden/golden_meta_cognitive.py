@@ -63,7 +63,8 @@ def main():
     cfg = LangfuseConfig.from_sources(cm.get)
     auth = HTTPBasicAuth(cfg.public_key, cfg.secret_key)
 
-    t0 = time.strftime("%Y-%m-%dT%H:%M:%S")
+    t0 = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+    # Langfuse startTime 为 UTC（Z 结尾），过滤口径必须同为 UTC，否则本地 CST 时间会把全部 span 滤掉
     fails = []
     for msg, should_trigger, note in cases:
         sid = requests.post(
@@ -79,14 +80,28 @@ def main():
                 break
         time.sleep(1)
     print(f"已发送 {len(cases)} 条，等待 Langfuse 上报…")
-    time.sleep(15)
-
-    r = requests.get(f"{cfg.host}/api/public/observations",
-                     params={"type": "SPAN", "limit": 300}, auth=auth, timeout=20)
-    obs = [o for o in r.json().get("data", []) if (
-        o.get("startTime") or "") >= t0]
-    skel = [o for o in obs if o.get("name") == "skeleton_extraction"]
-    strat = [o for o in obs if o.get("name") == "strategy_decision"]
+    # Langfuse 异步批量上报有延迟（实测约 1 分钟），轮询等待 span 到达，最多 300s。
+    # 注意：observations API limit 上限 100，超限返回 400 空数据，故用 name 过滤 + 分页
+    skel, strat = [], []
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        skel, strat = [], []
+        for page in range(1, 6):
+            r = requests.get(f"{cfg.host}/api/public/observations",
+                             params={"type": "SPAN", "limit": 50, "page": page,
+                                     "name": "skeleton_extraction"},
+                             auth=auth, timeout=20)
+            skel.extend(o for o in r.json().get("data", [])
+                        if (o.get("startTime") or "") >= t0)
+            r2 = requests.get(f"{cfg.host}/api/public/observations",
+                              params={"type": "SPAN", "limit": 50, "page": page,
+                                      "name": "strategy_decision"},
+                              auth=auth, timeout=20)
+            strat.extend(o for o in r2.json().get("data", [])
+                         if (o.get("startTime") or "") >= t0)
+        if strat:
+            break
+        time.sleep(10)
 
     # 断言 1：排除用例零 skeleton span（按会话 trace 对齐较复杂，用总量上界）
     n_expect_trigger = sum(1 for _, t, _ in cases if t)

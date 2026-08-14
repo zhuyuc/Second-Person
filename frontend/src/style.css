@@ -1716,7 +1716,9 @@ code {
     position: absolute;
     right: 8px;
     top: 34px;
-    z-index: var(--z-menu);
+    /* 必须高于“点击外部关闭”的全屏遮罩（var(--z-menu)），否则同层级时遮罩 DOM 靠后会盖住菜单，
+       导致菜单项点击全部被遮罩吞掉（删除/重命名/置顶失效） */
+    z-index: calc(var(--z-menu) + 1);
     background: var(--surface);
     border: 1px solid var(--bd);
     border-radius: 12px;

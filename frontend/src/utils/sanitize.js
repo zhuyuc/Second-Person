@@ -2,7 +2,10 @@
 const ALLOWED_TAGS = new Set([
     'A', 'P', 'BR', 'HR', 'BLOCKQUOTE', 'PRE', 'CODE', 'SPAN', 'DIV', 'SECTION',
     'UL', 'OL', 'LI', 'STRONG', 'B', 'EM', 'I', 'S', 'DEL', 'TABLE', 'THEAD', 'TBODY',
-    'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'IMG'
+    'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'IMG',
+    // 代码块操作条按钮（预览/下载/复制/源码/图片）：由前端渲染器生成，
+    // 事件属性已被下方过滤，放行 BUTTON 才能让 handleMermaidActions 委派生效
+    'BUTTON'
 ])
 
 const ALLOWED_ATTRS = new Set([

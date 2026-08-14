@@ -15,6 +15,9 @@ logger = logging.getLogger("second_person.elicitation_schema")
 
 # ---- 问答题 Schema ---------------------------------------------------------
 
+# 内部判定字段（双自检中间产物）不向前端透出：
+# counterfactual = 反事实分叉结论；answer_branches = 逐选项答案分支预演。
+# 二者为闭环闸门依据，由 schema 校验强制执行（写不出分支 → 拒绝 → 降级文字澄清）。
 QUESTION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -23,10 +26,13 @@ QUESTION_SCHEMA = {
         "description":  {"type": "string", "maxLength": 120},
         "options":      {"type": "array", "minItems": 2, "maxItems": 4,
                          "items": {"type": "string", "maxLength": 20}},
+        "counterfactual": {"type": "string", "maxLength": 60},
+        "answer_branches": {"type": "array", "minItems": 2, "maxItems": 4,
+                            "items": {"type": "string", "maxLength": 30}},
         "allow_custom": {"type": "boolean", "default": True},
         "required":     {"type": "boolean", "default": True},
     },
-    "required": ["id", "question", "options"],
+    "required": ["id", "question", "options", "counterfactual", "answer_branches"],
 }
 
 # ---- ask_user 完整入参 Schema ----------------------------------------------
@@ -160,6 +166,23 @@ def validate_ask_user(payload: dict | str, config: dict | None = None) -> tuple[
                 if isinstance(opt, str) and len(opt) > option_max:
                     errors.append(
                         f"questions[{i}].options[{j}]: max {option_max} chars")
+        # counterfactual（反事实分叉结论）
+        if not q.get("counterfactual"):
+            errors.append(f"questions[{i}].counterfactual: required")
+        # answer_branches（逐选项答案分支预演）：与 options 一一对应、逐项非空
+        branches = q.get("answer_branches")
+        if not isinstance(branches, list) or not branches:
+            errors.append(
+                f"questions[{i}].answer_branches: must be a non-empty array")
+        elif isinstance(opts, list):
+            if len(branches) != len(opts):
+                errors.append(
+                    f"questions[{i}].answer_branches: must match options count "
+                    f"({len(opts)}), got {len(branches)}")
+            for j, b in enumerate(branches):
+                if not isinstance(b, str) or not b.strip():
+                    errors.append(
+                        f"questions[{i}].answer_branches[{j}]: must be non-empty string")
 
     # --- reason 校验 ---
     reason = payload.get("reason")
@@ -171,6 +194,23 @@ def validate_ask_user(payload: dict | str, config: dict | None = None) -> tuple[
     if errors:
         return False, errors, None
     return True, [], payload
+
+
+def strip_internal_fields(payload: dict) -> dict:
+    """剥离内部判定字段（counterfactual/answer_branches），仅向前端透出展示字段。
+
+    三自检中间产物仅供闭环闸门校验使用，不应出现在 elicit 卡片数据中。
+    """
+    questions = []
+    for q in (payload.get("questions") or []):
+        if not isinstance(q, dict):
+            continue
+        cleaned = {k: v for k, v in q.items()
+                   if k not in ("counterfactual", "answer_branches")}
+        questions.append(cleaned)
+    out = dict(payload)
+    out["questions"] = questions
+    return out
 
 
 def build_tool_result_error(error_type: str = "schema_invalid") -> dict:

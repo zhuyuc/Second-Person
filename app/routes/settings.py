@@ -1,5 +1,7 @@
 """系统设置接口（开发文档 §三）。"""
 from __future__ import annotations
+from infrastructure.timeutil import now_cst, now_iso
+from fastapi import APIRouter, Request, UploadFile, File
 
 import asyncio
 import logging
@@ -7,9 +9,6 @@ from datetime import timedelta
 
 logger = logging.getLogger("second_person.settings")
 
-from fastapi import APIRouter, Request, UploadFile, File
-
-from infrastructure.timeutil import now_cst, now_iso
 
 router = APIRouter()
 
@@ -153,31 +152,56 @@ async def _probe_snapshot(c, snap) -> dict:
 
 
 # ---- 3.2 任务-模型分配 ----------------------------------------------------
+@router.get("/settings/task-slots")
+async def get_task_slots():
+    """槽位元数据清单（id/中文名/职责描述/回退链/当前配置），供设置页动态渲染。"""
+    from infrastructure.provider_registry import TASK_SLOTS
+    c = _c()
+    data = []
+    for slot in TASK_SLOTS.values():
+        pid = c.providers.assignment(slot.key)
+        model = None
+        if pid:
+            row = c.db.query_one(
+                "SELECT display_name, model_id, status FROM providers WHERE id=?",
+                (pid,))
+            model = ({"provider_id": pid, "display_name": row["display_name"],
+                      "model_id": row["model_id"], "status": row["status"]}
+                     if row else {"provider_id": pid, "display_name": "",
+                                  "model_id": "", "status": "unknown"})
+        data.append({"key": slot.key, "label": slot.label, "desc": slot.desc,
+                     "fallback": list(slot.fallback),
+                     "lightweight": slot.lightweight, "model": model})
+    return {"code": 200, "data": data}
+
+
 @router.get("/settings/model-assignment")
 async def get_assignment():
+    from infrastructure.provider_registry import TASK_SLOTS
     c = _c()
     out = {}
-    for task in ("chat", "agent", "intent", "embedding", "vision"):
-        pid = c.providers.assignment(task)
+    for slot in TASK_SLOTS.values():
+        pid = c.providers.assignment(slot.key)
         if pid:
             row = c.db.query_one(
                 "SELECT display_name,status FROM providers WHERE id=?", (pid,))
-            out[f"{task}_model"] = {"provider_id": pid,
-                                    "display_name": row["display_name"] if row else "",
-                                    "status": row["status"] if row else "unknown"}
+            out[f"{slot.key}_model"] = {"provider_id": pid,
+                                        "display_name": row["display_name"] if row else "",
+                                        "status": row["status"] if row else "unknown"}
         else:
-            out[f"{task}_model"] = None
+            out[f"{slot.key}_model"] = None
     return {"code": 200, "data": out}
 
 
 @router.put("/settings/model-assignment")
 async def set_assignment(request: Request):
+    from infrastructure.provider_registry import TASK_SLOTS
     body = await request.json()
     c = _c()
-    for task in ("chat", "agent", "intent", "embedding", "vision"):
-        key = f"{task}_model"
+    for slot in TASK_SLOTS.values():
+        key = f"{slot.key}_model"
         if body.get(key):
-            c.providers.set_assignment(task, body[key])
+            c.providers.set_assignment(slot.key, body[key])
     return {"code": 200, "data": {}}
 
 
@@ -407,22 +431,31 @@ async def usage_trend(period: str = "30d", source: str = "", model: str = ""):
 
 @router.get("/settings/usage/month-cost")
 async def usage_month_cost():
-    """本月费用：当月 1 日至今各模型实际消耗 token × 单价，每次请求实时计算。未配单价不计入。"""
+    """本月费用：优先累加用量落库时冻结的金额（调价不追溯）；
+    无快照的历史行按当前单价兜底折算，未配单价不计入，不做外推。"""
     c = _c()
     since = now_cst().strftime("%Y-%m-01")
     rows = c.db.query_all(
-        "SELECT model_name, SUM(input_tokens) i, SUM(output_tokens) o FROM token_usage "
-        "WHERE create_time >= ? GROUP BY model_name", (f"{since}",))
+        "SELECT model_name, "
+        "SUM(CASE WHEN cost IS NOT NULL THEN cost ELSE 0 END) frozen, "
+        "SUM(CASE WHEN cost IS NULL THEN input_tokens ELSE 0 END) i, "
+        "SUM(CASE WHEN cost IS NULL THEN output_tokens ELSE 0 END) o "
+        "FROM token_usage WHERE create_time >= ? GROUP BY model_name",
+        (f"{since}",))
     prices = {p["model_id"]: p for p in c.providers.list_providers()}
     total = 0.0
     detail = []
     for r in rows:
-        p = prices.get(r["model_name"])
-        if not p or (not p.get("input_price") and not p.get("output_price")):
-            continue
-        # 单价 ¥/M tokens，直接按本月实际用量折算，不做外推
-        cost = (r["i"] or 0) / 1_000_000 * (p.get("input_price") or 0) + \
-            (r["o"] or 0) / 1_000_000 * (p.get("output_price") or 0)
+        cost = r["frozen"] or 0.0
+        # 无金额快照的历史行（迁移前数据）：按当前单价兜底折算
+        if (r["i"] or 0) or (r["o"] or 0):
+            p = prices.get(r["model_name"])
+            if not p or (not p.get("input_price") and not p.get("output_price")):
+                if not cost:
+                    continue   # 无快照且未配单价，不计入
+            else:
+                cost += (r["i"] or 0) / 1_000_000 * (p.get("input_price") or 0) + \
+                    (r["o"] or 0) / 1_000_000 * (p.get("output_price") or 0)
         total += cost
         detail.append({"model": r["model_name"],
                       "month_cost": round(cost, 2)})
@@ -660,6 +693,7 @@ async def platform_detail(pid: str):
                 app_secret = d.get("app_secret", "")
             except Exception:  # noqa: BLE001 - 换机后解密失败则留空引导重填
                 pass
+
     def _mask(s: str) -> str:
         return s[:3] + "****" + s[-4:] if len(s) > 8 else "****" if s else ""
     return {"code": 200, "data": {

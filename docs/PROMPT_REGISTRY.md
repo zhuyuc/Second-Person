@@ -58,7 +58,7 @@
 | 29 | agent/prompts/quick_intent.md | 快速预判 system（§3.1） | agent/intent_parser.py | 惰性 | - | A |
 | 30 | agent/prompts/converge_intent.md | 意图收敛 system（§3.3） | agent/intent_parser.py | 惰性 | intent_shared,tool_names | A |
 | 31 | agent/prompts/attention_focus.md | 注意力聚焦 system（§3.4） | agent/intent_parser.py | 惰性 | - | A |
-| 32 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1） | agent/intent_parser.py | 惰性 | - | A |
+| 32 | agent/prompts/gap_detect.md | 缺口检测 system（§4.1；含 material_gap 材料缺口与画像已知信息对照判定） | agent/intent_parser.py | 惰性 | - | A |
 | 33 | agent/prompts/honest_clarify.md | 诚实澄清输出模板（§5.2 态二） | agent/core.py | 惰性 | gap_description | A |
 | 34 | agent/prompts/response_depth.md | 场景化回复篇幅档位指令（按场景注入） | agent/response_synthesizer.py | 惰性 | - | A |
 | 35 | agent/prompts/strategy_decide.md | 响应策略决策 system（v3 §四） | agent/strategy_engine.py | 惰性 | - | A |
@@ -70,8 +70,9 @@
 | 41 | app/prompts/format_skeleton.md | 文档格式骨架提取 system（格式绑定） | tools/builtin.py | 惰性 | - | A |
 | 42 | agent/prompts/format_scenario.md | 格式绑定适用场景提取 system | agent/core.py | 惰性 | - | A |
 | 43 | agent/prompts/next_step_suggest.md | 下一步建议指令（评分规则/禁词/句式/分隔符，条件注入） | agent/response_synthesizer.py | 惰性 | seeds_text | A |
-| 44 | agent/prompts/elicitation_decision.md | 追问判定（clarification_router 可枚举/发散二分） | agent/strategy_engine.py | 惰性 | - | A |
+| 44 | agent/prompts/elicitation_decision.md | 追问判定（clarification_router 可枚举/发散二分；注入画像摘要，已知信息不追问） | agent/strategy_engine.py | 惰性 | - | A |
 | 45 | agent/prompts/elicitation_supplement.md | 关闭追问后新消息临时决策指令 | agent/core.py | 惰性 | - | A |
+| 46 | agent/prompts/synth_elicitation_answered.md | 追问已作答闭环约束（已确认事实回填/推断注明/仅未知占位，条件注入） | agent/response_synthesizer.py | 惰性 | - | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -117,5 +118,5 @@
 | 31 | agent/strategy_engine.py::clarification_router | chat | elicitation_decision | agent/prompts/elicitation_decision.md | 追问可枚举/发散二分判定 |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
-synth_doc_export 不是独立调用点，其合成结果经 `_build_final_prompt` 并入
+synth_doc_export/synth_elicitation_answered 不是独立调用点，其合成结果经 `_build_final_prompt` 并入
 调用点 2；md 存在性由上方 md 文件层对账覆盖。

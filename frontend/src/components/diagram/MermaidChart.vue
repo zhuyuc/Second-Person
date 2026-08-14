@@ -8,6 +8,7 @@ import mermaid from 'mermaid'
 import { useToast } from '@/stores/toast'
 import { usePanZoom } from '@/composables/usePanZoom'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
+import { svgToPngBlob } from '@/utils/svgExport'
 
 const toast = useToast()
 
@@ -68,13 +69,6 @@ function zoomCenter(factor) {
 // 渲染竞态防护：每次 render 递增，回调中比对是否仍是最新请求
 let renderId = 0
 
-// 读取 CSS 变量（PNG 导出背景色用；getComputedStyle 天然跟随深浅色切换）
-function readVar(name, fallback) {
-    const style = getComputedStyle(document.documentElement)
-    const val = style.getPropertyValue(name).trim()
-    return val || fallback
-}
-
 // SVG 后处理：字体兜底 + 节点圆角统一（Mermaid 的部分属性无法通过 CSS 覆盖）
 function postProcess(svgEl) {
     // 字体兜底
@@ -132,32 +126,8 @@ function copySrc() {
     toast.push('success', '源码已复制')
 }
 
-// 公共函数：SVG → PNG Blob（含背景色填充）
-function svgToPngBlob(svg, scale = 2) {
-    return new Promise((resolve, reject) => {
-        const svgData = new XMLSerializer().serializeToString(svg)
-        const url = URL.createObjectURL(new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' }))
-        const img = new Image()
-        img.onload = () => {
-            const canvas = document.createElement('canvas')
-            canvas.width = img.naturalWidth * scale
-            canvas.height = img.naturalHeight * scale
-            const ctx = canvas.getContext('2d')
-            // 填充背景色，避免暗色模式导出透明
-            ctx.fillStyle = readVar('--surface', '#ffffff')
-            ctx.fillRect(0, 0, canvas.width, canvas.height)
-            ctx.scale(scale, scale)
-            ctx.drawImage(img, 0, 0)
-            URL.revokeObjectURL(url)
-            canvas.toBlob((blob) => {
-                if (blob) resolve(blob)
-                else reject(new Error('Canvas toBlob failed'))
-            }, 'image/png')
-        }
-        img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image load failed')) }
-        img.src = url
-    })
-}
+// 公共函数：SVG → PNG Blob（含背景色填充，自动剥离 foreignObject 防 tainted canvas）
+// 由 utils/svgExport.js 提供，与 ChatView 内联图表共用同一实现
 
 async function copyImage() {
     const svg = container.value?.querySelector('svg')

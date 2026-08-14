@@ -35,7 +35,7 @@ class ProfileConflictScanner:
         if not old_content or not new_content:
             return 0
 
-        snap = self.providers.snapshot_for("convergence")
+        snap = self.providers.snapshot_for("intent")
         if snap is None:
             return 0
 
