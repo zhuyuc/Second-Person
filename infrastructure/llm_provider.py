@@ -159,11 +159,13 @@ class LLMClient:
     async def chat(self, snap: ProviderSnapshot, messages: list[dict],
                    source: str = "main_chat", session_id: str | None = None,
                    tools: list[dict] | None = None, images: list[str] | None = None,
-                   extra_body: dict | None = None,
+                   extra_body: dict | None = None, json_mode: bool = False,
                    **kw) -> dict[str, Any]:
         """返回 {content, tool_calls, usage}。
 
         images：可选图片 dataURL 列表（多模态）。
+        json_mode：启用 Provider 原生 JSON 输出保证（OpenAI 兼容 →
+          response_format={"type":"json_object"}）。Anthropic/Google 不支持时静默降级。
         extra_body：透传至 API 请求体的额外字段（如 {"thinking_enabled": false}
           对推理模型禁用思考模式）。收敛分析等轻量结构化任务建议传
           extra_body={"thinking_enabled": False} 以避免思考令牌拖慢响应。
@@ -178,6 +180,8 @@ class LLMClient:
         try:
             if extra_body:
                 kw["extra_body"] = extra_body
+            if json_mode:
+                kw["json_mode"] = True
             res = await self._call_with_retry(
                 snap, source, session_id,
                 lambda: self._do_chat(snap, messages, tools, images=images, **kw))
@@ -336,8 +340,10 @@ class LLMClient:
     # ---- 具体 Provider 实现 ----------------------------------------------
     async def _do_chat(self, snap, messages, tools, images=None, **kw) -> dict[str, Any]:
         if snap.provider_type == "anthropic":
+            kw.pop("json_mode", None)
             return await self._anthropic_chat(snap, messages, tools, **kw)
         if snap.provider_type == "google":
+            kw.pop("json_mode", None)
             return await self._google_chat(snap, messages, **kw)
         return await self._openai_chat(snap, _inject_images(messages, images), tools, **kw)
 
@@ -347,6 +353,8 @@ class LLMClient:
             body["tools"] = tools
         body.update({k: v for k, v in kw.items()
                     if k in ("temperature", "max_tokens")})
+        if kw.get("json_mode"):
+            body["response_format"] = {"type": "json_object"}
         # extra_body：透传至请求体的额外字段（如 thinking_enabled=False 禁用思考模式）
         if "extra_body" in kw and isinstance(kw["extra_body"], dict):
             body.update(kw["extra_body"])

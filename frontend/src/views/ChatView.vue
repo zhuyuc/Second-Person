@@ -13,7 +13,7 @@ import HandoffAttachment from '@/components/HandoffAttachment.vue'
 import ElicitationCard from '@/components/ElicitationCard.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
-import { formatRelative, formatTimeFull, fmtSize, nowLocalIso } from '@/utils/format'
+import { formatRelative, formatTimeFull, fmtSize, nowLocalIso, friendlyError } from '@/utils/format'
 import { confidenceLabel, lifecycleLabel, TOAST_ONLY_NOTIF } from '@/utils/enumLabel'
 import { withQuery } from '@/utils/query'
 import { sanitizeHtml } from '@/utils/sanitize'
@@ -179,7 +179,7 @@ async function tryReattach(sid) {
     await sse.send({
       sessionId: sid, message: '', clientRequestId: crid,
       onEvent: (ev, data) => handleEvent(ev, data),
-      onError: () => { toast.push('error', '生成失败'); finishStream() },
+      onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
     })
     // 兜底：重挂流异常断开（无终止事件）时同样保留已输出内容
     if (generating.value) finishStream()
@@ -471,7 +471,7 @@ async function send() {
     handoffPath: hPath,
     thinkMode: thinkMode.value,
     onEvent: (ev, data) => handleEvent(ev, data),
-    onError: () => { toast.push('error', '生成失败'); finishStream() },
+    onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
   })
   // 兜底：始终未收到 turn_completed/error（服务重启等异常断开）时，
   // 同样保留已输出内容并释放输入锁，避免 UI 卡在生成中
@@ -504,7 +504,7 @@ function handleEvent(ev, data) {
   else if (ev === 'elicitation_status') {
     if (data.status === 'done' || data.status === 'closed' || data.status === 'expired') activeElicitation.value = null
   }
-  else if (ev === 'error') { toast.push('error', data.message || '出错'); finishStream() }
+  else if (ev === 'error') { toast.push('error', friendlyError(data.message)); finishStream() }
   // handoff 摘要就绪（会话上下文管理方案 v2）
   else if (ev === 'handoff_ready') {
     handoffStatus.value = data.status
@@ -534,7 +534,6 @@ function handleThreshold(threshold) {
 }
 
 let lastCitations = []
-let regenAt = null   // 原位重生成时新回复的插入位置（null = 正常追加到末尾）
 function finishStream(msgId) {
   // 跨会话保护：用户已切到其他会话时不把回复插进当前列表
   //（回复已按 session 落库，切回原会话时 openSession 会重新加载）
@@ -551,11 +550,8 @@ function finishStream(msgId) {
       thinking: thinkText.value || '', thinkOpen: false,
       visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
     }
-    // 原位重生成：新回复插回被移除回复的位置，而非追加新对话
-    if (regenAt !== null && regenAt <= messages.value.length) messages.value.splice(regenAt, 0, m)
-    else messages.value.push(m)
+    messages.value.push(m)
   }
-  regenAt = null
   streamText.value = ''
   thinkText.value = ''
   streamVisuals.value = []
@@ -636,19 +632,101 @@ async function submitFeedback() {
   toast.push('success', '反馈已记录')
 }
 
-// 原位重新生成：后端先删除旧的一轮（回复+对应提问）再重新生成落库，
-// 前端移除当前回复气泡后重发同一条提问，不追加新的对话轮次
+// ---- 消息编辑 ----
+const editingId = ref(null)
+const editText = ref('')
+
+function startEdit(msg) {
+  if (generating.value) return
+  editingId.value = msg.id
+  editText.value = msg.content
+  nextTick(() => {
+    const el = document.querySelector('.edit-textarea')
+    if (el) { el.focus(); el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 200) + 'px' }
+  })
+}
+function cancelEdit() { editingId.value = null; editText.value = '' }
+
+async function submitEdit(msg) {
+  const text = editText.value.trim()
+  if (!text || text === msg.content) { cancelEdit(); return }
+  const editMsgId = msg.id
+  editingId.value = null
+  editText.value = ''
+  // 立即更新 UI：移除被编辑消息及其后续所有消息，插入编辑后的用户消息
+  const idx = messages.value.findIndex(m => m.id === editMsgId)
+  if (idx !== -1) messages.value.splice(idx)
+  messages.value.push({
+    id: -1, role: 'user', content: text,
+    message_type: 'normal', citations: [], feedback: 0,
+    create_time: nowLocalIso(), images: msg.images || [],
+    atts: msg.atts || [], has_branches: false
+  })
+  generating.value = true
+  streamSid.value = sessStore.currentSid
+  streamText.value = ''
+  thinkText.value = ''
+  thinkOpen.value = true
+  maybeScroll()
+  await sse.send({
+    sessionId: sessStore.currentSid, message: text,
+    editMessageId: editMsgId,
+    location: geoEnabled.value ? cachedLocation() : undefined,
+    thinkMode: thinkMode.value,
+    onEvent: (ev, data) => handleEvent(ev, data),
+    onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
+  })
+  if (generating.value) finishStream()
+  await reloadMessages(sessStore.currentSid)
+}
+
+// ---- 版本切换 ----
+async function switchVersion(msg, direction) {
+  if (generating.value) return
+  const siblings = await api.post('/chat/switch-version', {
+    session_id: sessStore.currentSid,
+    version_group_id: msg.version_group_id,
+    // direction: +1 → 下一个兄弟, -1 → 上一个兄弟
+    // 后端需要 target_message_id，前端需要计算
+    target_message_id: await getSiblingId(msg, direction)
+  })
+  if (siblings && siblings.messages) {
+    // 历史消息：附件还原
+    for (const m of siblings.messages) {
+      if (m.role === 'user' && typeof m.content === 'string'
+        && m.content.includes('\n---\n') && m.content.includes('【附件：')) {
+        m.atts = extractAttachments(m.content)
+        m.content = m.content.split('\n---\n').pop()
+      }
+    }
+    messages.value = stripToastNotifs(siblings.messages)
+  }
+}
+
+async function getSiblingId(msg, direction) {
+  // 从当前消息列表的版本信息推断目标兄弟 ID
+  // 需要查询所有兄弟消息的 ID 列表
+  const resp = await api.get(withQuery('/chat/version-siblings', {
+    version_group_id: msg.version_group_id
+  }))
+  if (resp && resp.length) {
+    const idx = resp.findIndex(s => s.id === msg.id)
+    const targetIdx = idx + direction
+    if (targetIdx >= 0 && targetIdx < resp.length) return resp[targetIdx].id
+  }
+  return msg.id
+}
+
+// 重新生成（分支化）：旧回复保留，创建 assistant 兄弟节点
 async function regenerate(msg) {
   if (generating.value || !sessStore.currentSid) return
   if (!msg.id) { toast.push('warning', '该消息暂不支持重新生成'); return }
-  const idx = messages.value.indexOf(msg)
   let userMsg = null
+  const idx = messages.value.indexOf(msg)
   for (let j = idx - 1; j >= 0; j--) {
     if (messages.value[j].role === 'user') { userMsg = messages.value[j]; break }
   }
   if (!userMsg || !userMsg.content) { toast.push('warning', '未找到对应的提问，无法重新生成'); return }
-  regenAt = idx
-  messages.value.splice(idx, 1)
   generating.value = true
   streamSid.value = sessStore.currentSid
   streamText.value = ''
@@ -661,10 +739,11 @@ async function regenerate(msg) {
     location: geoEnabled.value ? cachedLocation() : undefined,
     thinkMode: thinkMode.value,
     onEvent: (ev, data) => handleEvent(ev, data),
-    onError: () => { toast.push('error', '生成失败'); finishStream() },
+    onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
   })
-  // 兜底：异常断开（无终止事件）时同样保留已输出内容并释放输入锁
   if (generating.value) finishStream()
+  // 重新加载消息列表以获取更新后的分支信息
+  await reloadMessages(sessStore.currentSid)
 }
 
 function copyText(msg) { navigator.clipboard.writeText(msg.content); toast.push('success', '已复制') }
@@ -675,7 +754,7 @@ async function openMemory(id) {
   try { memDetail.value = await api.get(withQuery('/memory/detail', { id })) } catch { /* api 层已提示 */ }
 }
 function stripTail(t, visuals) {
-  // 剔除模型在正文末尾泄漏的 {"citations":[...]} / {"memory_confirm":...} JSON 声明
+  // 兼容兜底：后端已改为确定性提取，但旧模型缓存可能仍输出嵌入式 JSON 声明
   let s = (t || '').replace(/\s*\{\s*"citations"\s*:\s*\[[^\]]*\]\s*\}\s*/g, '\n')
   s = s.replace(/\s*\{\s*"memory_confirm"\s*:\s*\{[^}]*\}\s*\}\s*/g, '\n')
   // 声明被挖走后残留的空代码围栏（如 ```json\n```）会渲染成空白块，一并清理
@@ -684,8 +763,9 @@ function stripTail(t, visuals) {
   // 注意：围栏必须独占一行，前后补换行，避免与正文同行导致 markdown 不识别
   s = s.replace(/<antartifact[^>]*type=["']text\/html["'][^>]*>([\s\S]*?)<\/antartifact>/gi,
     (_, content) => '\n\n```html\n' + content.trim() + '\n```\n')
-  // 剔除 <tool_call>...</tool_call> 块（模型内部工具调用不应展示给用户）
+  // 剔除模型内部工具调用块（不应展示给用户）：英文 <tool_call> 和中文 <工具调用> 两种格式
   s = s.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '')
+  s = s.replace(/<工具调用>[\s\S]*?<\/工具调用>/g, '')
   // 仅当 tool_visual 已产出图表时才剥离 Mermaid 代码块，避免重复渲染；
   // 若 visuals 为空（工具未调用/失败），保留原文由 marked → mermaid.run() 兜底
   const hasVisual = Array.isArray(visuals) && visuals.length > 0
@@ -935,7 +1015,17 @@ onUnmounted(() => {
           <div v-for="(m, i) in messages" :key="i">
             <!-- 用户气泡 -->
             <div v-if="m.role === 'user'" class="msg-user">
-              <div style="max-width:78%">
+              <div :style="editingId === m.id ? { width: '78%' } : { maxWidth: '78%' }">
+                <!-- 版本翻页器（用户消息有多版本时显示） -->
+                <div v-if="m.has_branches" class="version-nav" style="justify-content:flex-end">
+                  <button class="ver-btn" :disabled="m.sibling_index === 0" @click="switchVersion(m, -1)">
+                    <i class="ti ti-chevron-left"></i>
+                  </button>
+                  <span class="ver-indicator">{{ m.sibling_index + 1 }} / {{ m.sibling_count }}</span>
+                  <button class="ver-btn" :disabled="m.sibling_index === m.sibling_count - 1" @click="switchVersion(m, 1)">
+                    <i class="ti ti-chevron-right"></i>
+                  </button>
+                </div>
                 <div v-if="m.atts && m.atts.length"
                   style="display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;margin-bottom:6px">
                   <span v-for="(f, fi) in m.atts" :key="fi" class="attach-chip attach-click"
@@ -948,11 +1038,27 @@ onUnmounted(() => {
                   <img v-for="(im, ii) in m.images" :key="ii" :src="im" class="bubble-img"
                     @click="openBubbleImage(im)" />
                 </div>
-                <div v-if="m.content" class="bubble" style="max-width:100%" v-html="renderUser(m.content)"></div>
+                <!-- 编辑态：textarea + 提交/取消 -->
+                <div v-if="editingId === m.id" style="max-width:100%">
+                  <textarea class="edit-textarea" v-model="editText" rows="2"
+                    @input="e => { e.target.style.height = 'auto'; e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px' }"
+                    @keydown.enter.exact.prevent="submitEdit(m)"
+                    @keydown.escape="cancelEdit"></textarea>
+                  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:6px">
+                    <button class="edit-cancel-btn" @click="cancelEdit">取消</button>
+                    <button class="edit-submit-btn" @click="submitEdit(m)">提交修改</button>
+                  </div>
+                </div>
+                <!-- 普通态 -->
+                <div v-else>
+                  <div v-if="m.content" class="bubble" style="max-width:100%" v-html="renderUser(m.content)"></div>
+                </div>
                 <div class="msg-actions user-actions"
                   style="display:flex;justify-content:flex-end;gap:2px;margin-top:4px">
                   <span class="msg-time">{{ formatTimeFull(m.create_time) }}</span>
                   <i class="ti ti-copy" title="复制" @click="copyText(m)"></i>
+                  <i v-if="m.id && !generating && editingId !== m.id"
+                    class="ti ti-edit" title="编辑" @click="startEdit(m)"></i>
                 </div>
               </div>
             </div>
@@ -990,14 +1096,23 @@ onUnmounted(() => {
                     title="点击查看记忆详情" @click="openMemory(c.id)">[{{ ci + 1 }}] {{
                       c.title || c.id }} </span>
                 </div>
+                <!-- 版本翻页器（AI 回复有多版本时显示） -->
+                <div v-if="m.has_branches" class="version-nav">
+                  <button class="ver-btn" :disabled="m.sibling_index === 0" @click="switchVersion(m, -1)">
+                    <i class="ti ti-chevron-left"></i>
+                  </button>
+                  <span class="ver-indicator">{{ m.sibling_index + 1 }} / {{ m.sibling_count }}</span>
+                  <button class="ver-btn" :disabled="m.sibling_index === m.sibling_count - 1" @click="switchVersion(m, 1)">
+                    <i class="ti ti-chevron-right"></i>
+                  </button>
+                </div>
                 <div class="msg-actions" style="margin-top:8px;display:flex;gap:2px">
                   <i class="ti ti-thumb-up" title="点赞" :style="{ color: m.feedback === 1 ? 'var(--succtx)' : '' }"
                     @click="feedback(m, 1)"></i>
                   <i class="ti ti-thumb-down" title="点踩" :style="{ color: m.feedback === 2 ? 'var(--dangtx)' : '' }"
                     @click="feedback(m, 2)"></i>
                   <i class="ti ti-copy" title="复制" @click="copyText(m)"></i>
-                  <!-- 仅最后一条回复可重新生成：中途轮次重生成会导致会话上下文顺序错乱 -->
-                  <i v-if="i === messages.length - 1" class="ti ti-refresh" title="重新生成" @click="regenerate(m)"></i>
+                  <i v-if="m.id && !generating" class="ti ti-refresh" title="重新生成" @click="regenerate(m)"></i>
                   <span class="msg-time">{{ formatTimeFull(m.create_time) }}</span>
                 </div>
               </div>
@@ -1111,7 +1226,7 @@ onUnmounted(() => {
               <div class="think-mode-wrap">
                 <button type="button" class="think-mode-btn" :title="'思考模式：' + thinkModeLabel" @mousedown.prevent
                   @click.stop="thinkMenuOpen = !thinkMenuOpen">
-                  <i class="ti" :class="thinkMode === 'deep' ? 'ti-bulb' : 'ti-zap'"></i>
+                  <i class="ti" :class="thinkMode === 'deep' ? 'ti-bulb' : 'ti-bolt'"></i>
                   <span>{{ thinkModeLabel }}</span>
                   <i class="ti think-mode-arrow" :class="thinkMenuOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </button>

@@ -10,7 +10,7 @@ import { parseSSE } from '@/composables/useSSE'
 import KnowledgeGraph from '@/components/graph/KnowledgeGraph.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import { domainLabel, loadDomainLabels } from '@/utils/domainLabel'
-import { formatTimeFull, fmtSize as fmtSizeBase } from '@/utils/format'
+import { formatTimeFull, fmtSize as fmtSizeBase, friendlyError } from '@/utils/format'
 import { CONF_MAP, LIFE_MAP, SRC_MAP, ATTR_MAP, EVT_MAP, DEDUCT_MAP, eventLabel, dimStatusLabel } from '@/utils/enumLabel'
 
 const router = useRouter()
@@ -309,7 +309,7 @@ async function refreshMemoryViews() {
 const dimDetail = ref(null)
 function openDimDetail(d) { dimDetail.value = d }
 function dimText(d) {
-  if (!d.items || !d.items.length) return '（暂无内容，可点“手动提炼”生成）'
+  if (!d.items || !d.items.length) return '（暂无内容，可点"手动提炼"生成）'
   return d.items.map(it => it.text).join('；')
 }
 
@@ -393,7 +393,7 @@ async function uploadDocs(fileList) {
             result = data
           } else if (event === 'error') {
             errored = true
-            toast.push('error', data.message || '导入失败')
+            toast.push('error', friendlyError(data.message, '导入失败'))
           }
         })
       } catch { errored = true }
@@ -521,7 +521,7 @@ async function openLocalDirFiles(dir) {
 }
 function localDirSummary(dir) {
   const s = dir.summary || {}
-  if (!dir.last_scan_at) return '尚未扫描，可点“立即扫描”手动触发'
+  if (!dir.last_scan_at) return '尚未扫描，可点"立即扫描"手动触发'
   let t = `上次扫描 ${formatTimeFull(dir.last_scan_at)}`
   if (s.processed) t += ` · 最近一轮：导入 ${s.imported || 0} 个 / 提炼 ${s.memories || 0} 条`
   if (s.failed) t += ` / 失败 ${s.failed} 个`
@@ -557,7 +557,7 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 记忆列表 -->
   <div v-else-if="tab === 1">
-    <div class="g4" style="margin-bottom:12px">
+    <div class="g4 mb-3">
       <div class="card">
         <div class="label">记忆总数</div>
         <div class="val">{{ stats.total_active + stats.total_stable + stats.total_stale || 0 }}</div>
@@ -576,7 +576,7 @@ onActivated(() => selectTab(tab.value))
         <div class="val" style="color:var(--succtx)">{{ stats.health_score || 0 }}</div>
       </div>
     </div>
-    <div class="fg" style="gap:8px;margin-bottom:12px;flex-wrap:wrap">
+    <div class="filter-bar">
       <input v-model="keyword" placeholder="搜索记忆内容…" style="flex:1;min-width:180px" @keyup.enter="loadList" />
       <select v-model="domainFilter" @change="loadList">
         <option value="">全部领域</option>
@@ -596,12 +596,12 @@ onActivated(() => selectTab(tab.value))
       </label>
     </div>
     <div v-if="!memList.length" class="empty"><i class="ti ti-brain"></i>还没有记忆<br>对话中系统会自动沉淀记忆</div>
-    <div v-for="m in memList" :key="m.id" class="cw" style="cursor:pointer" @click="openDetail(m.id)">
+    <div v-for="m in memList" :key="m.id" class="cw list-row" @click="openDetail(m.id)">
       <div class="row">
         <div>
-          <div style="font-weight:500">{{ m.title }}</div>
-          <div class="muted">{{ m.summary }}</div>
-          <div v-if="m.lifecycle === 'missing'" style="font-size:var(--fs-sm);color:var(--warntx);margin-top:4px">
+          <div class="list-title">{{ m.title }}</div>
+          <div class="list-sub">{{ m.summary }}</div>
+          <div v-if="m.lifecycle === 'missing'" class="list-sub" style="color:var(--warntx);margin-top:4px">
             <i class="ti ti-alert-triangle"></i> 文件丢失，可从备份恢复文件后自动重建，或删除此索引
           </div>
         </div>
@@ -609,7 +609,7 @@ onActivated(() => selectTab(tab.value))
           <span class="badge" style="opacity:.75">{{ domainLabel(m.domain) }}</span>
           <span v-if="m.is_important" class="badge badge-g">重要</span>
           <span class="badge badge-a">{{ CONF_MAP[m.confidence] || m.confidence }}</span>
-          <span class="badge" :style="m.lifecycle === 'missing' ? 'color:var(--warntx)' : ''">{{ LIFE_MAP[m.lifecycle]
+          <span class="badge" :class="m.lifecycle === 'missing' ? 'badge-r' : ''">{{ LIFE_MAP[m.lifecycle]
             || m.lifecycle }}</span>
           <span class="muted">{{ m.access_count }}次</span>
         </div>
@@ -619,7 +619,7 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 时间线 -->
   <div v-else-if="tab === 2">
-    <div class="fg" style="gap:8px;margin-bottom:12px;flex-wrap:wrap">
+    <div class="filter-bar">
       <button class="chip" :class="{ active: tlType === '' }" @click="tlType = ''; loadTimeline()">全部</button>
       <button v-for="(label, key) in EVT_MAP" :key="key" class="chip" :class="{ active: tlType === key }"
         @click="tlType = key; loadTimeline()">{{ label }}</button>
@@ -631,13 +631,12 @@ onActivated(() => selectTab(tab.value))
     </div>
     <div v-if="!timeline.length" class="empty"><i class="ti ti-timeline"></i>还没有变更记录<br>记忆的新建、更新、合并等操作将显示在这里</div>
     <div v-for="g in timelineGroups" :key="g.day">
-      <div class="muted" style="font-weight:600;margin:14px 0 6px">{{ g.day }}</div>
-      <div v-for="(t, i) in g.items" :key="i" class="cw" style="cursor:pointer" @click="openDetail(t.memory_id)">
-        <div style="font-weight:500">{{ t.title || t.memory_id }}</div>
-        <div class="row" style="margin-top:4px">
+      <div class="tl-day">{{ g.day }}</div>
+      <div v-for="(t, i) in g.items" :key="i" class="cw list-row" @click="openDetail(t.memory_id)">
+        <div class="list-title">{{ t.title || t.memory_id }}</div>
+        <div class="row mt-1">
           <span class="badge badge-a">{{ eventLabel(t.event_type) }}</span>
-          <span class="muted" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ t.summary ||
-            t.detail }}</span>
+          <span class="tl-summary">{{ t.summary || t.detail }}</span>
           <button v-if="tlLinkTarget(t)" class="btn-xs" style="flex-shrink:0"
             @click.stop="openDetail(tlLinkTarget(t))"><i class="ti ti-link"></i> 查看关联</button>
           <span class="muted">{{ formatTimeFull(t.event_time) }}</span>
@@ -648,25 +647,25 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 用户画像 -->
   <div v-else-if="tab === 3">
-    <div class="row" style="margin-bottom:10px">
-      <div class="section-sub" style="margin-bottom:0">区一 · 用户画像</div>
+    <div class="section-row">
+      <div class="section-sub">区一 · 用户画像</div>
       <button class="btn-sm" @click="buildProfile">手动提炼</button>
     </div>
     <div v-if="!profile.dimensions.length" class="empty"><i class="ti ti-user"></i>用户画像积累中<br>系统在观察你的偏好</div>
     <div class="g2">
-      <div v-for="(d, i) in profile.dimensions" :key="i" class="cw" style="cursor:pointer" @click="openDimDetail(d)">
-        <div class="row"><b>{{ d.name }}</b><span class="badge badge-g">{{ dimStatusLabel(d.status) }}</span></div>
+      <div v-for="(d, i) in profile.dimensions" :key="i" class="cw list-row" @click="openDimDetail(d)">
+        <div class="dim-header"><b>{{ d.name }}</b><span class="badge badge-g">{{ dimStatusLabel(d.status) }}</span></div>
         <div class="dim-preview">{{ dimText(d) }}</div>
       </div>
     </div>
     <div class="sep"></div>
     <div class="section-sub">区二 · AI 人格</div>
-    <div v-if="pendings.length" class="cw" style="border:1px solid var(--warntx);background:var(--warnbg)">
-      <b style="color:var(--warntx)">待确认风格调整</b>
-      <div v-for="p in pendings" :key="p.id" style="margin-top:8px">
-        <div class="muted">触发：{{ p.original_text }}</div>
-        <div style="font-size:var(--fs-base)">提议：{{ p.proposed_change }}</div>
-        <div class="fg" style="gap:6px;margin-top:6px">
+    <div v-if="pendings.length" class="cw card-warn">
+      <b>待确认风格调整</b>
+      <div v-for="p in pendings" :key="p.id" class="pending-item">
+        <div class="pending-trigger">触发：{{ p.original_text }}</div>
+        <div class="pending-proposal">提议：{{ p.proposed_change }}</div>
+        <div class="fg mt-2" style="gap:6px">
           <button class="btn-xs" :disabled="busy('pend' + p.id)"
             @click="run('pend' + p.id, () => confirmPending(p.id, true))">确认</button>
           <button class="btn-xs" :disabled="busy('pend' + p.id)"
@@ -682,26 +681,24 @@ onActivated(() => selectTab(tab.value))
               v-if="busy('resetSoul')" class="ti ti-loader-2"></i> 恢复默认</button>
         </div>
       </div>
-      <pre style="white-space:pre-wrap;margin-top:8px">{{ soul.soul_core }}</pre>
+      <pre class="mt-2" style="white-space:pre-wrap">{{ soul.soul_core }}</pre>
     </div>
     <div class="cw">
-      <div class="tabs" style="margin-bottom:12px">
+      <div class="tabs mb-3">
         <button class="tab" :class="{ active: soulSource === 'dialog' }"
           @click="switchSoulSource('dialog')">对话确认</button>
         <button class="tab" :class="{ active: soulSource === 'auto' }" @click="switchSoulSource('auto')">自动演化</button>
       </div>
-      <!-- 当前序列实际内容：有则展示，无则明确告知暂无 -->
-      <div style="margin-bottom:14px">
-        <div v-for="s in currentStyleSections" :key="s.name" style="margin-bottom:10px">
-          <div class="muted" style="font-weight:500;margin-bottom:4px">{{ s.name }}</div>
+      <div class="mb-3">
+        <div v-for="s in currentStyleSections" :key="s.name" class="mb-3">
+          <div class="style-section-label">{{ s.name }}</div>
           <pre v-if="s.text"
             style="white-space:pre-wrap;font-size:var(--fs-base);color:var(--sec);margin:0">{{ s.text }}</pre>
-          <div v-else class="muted" style="font-size:var(--fs-base)">还没有内容</div>
+          <div v-else class="muted">还没有内容</div>
         </div>
       </div>
       <div v-if="!soulHistory.length" class="muted">还没有版本历史</div>
-      <div v-for="h in soulHistory" :key="h.version" class="row"
-        style="padding:8px 0;border-bottom:1px solid var(--bd)">
+      <div v-for="h in soulHistory" :key="h.version" class="version-row">
         <div><b>v{{ h.version }}</b> <span v-if="h.current" class="badge badge-a">当前</span>
           <div class="muted">{{ h.diff_summary }}</div>
         </div>
@@ -726,10 +723,9 @@ onActivated(() => selectTab(tab.value))
           <button class="btn-sm" @click="openOutputStyleEdit"><i class="ti ti-edit"></i> 编辑</button>
         </div>
       </div>
-      <div style="margin-top:8px;color:var(--sec)">{{ outputStyle.profile_text || '（积累中，信号数 ' +
+      <div class="mt-2" style="color:var(--sec)">{{ outputStyle.profile_text || '（积累中，信号数 ' +
         (outputStyle.signal_count || 0) + '/50）' }}</div>
-      <!-- 信号积累进度：已采集 / 上次提炼 / 下次触发条件 -->
-      <div class="muted" style="margin-top:10px;font-size:var(--fs-sm)">
+      <div class="muted mt-3" style="font-size:var(--fs-sm)">
         已采集 {{ outputStyle.signal_count || 0 }} 条信号
         <template v-if="outputStyle.last_built"> · 上次提炼 {{ formatTimeFull(outputStyle.last_built) }}</template>
         <template v-if="outputStyle.is_cold_start"> · 首次提炼需满 50 条</template>
@@ -740,13 +736,12 @@ onActivated(() => selectTab(tab.value))
     </div>
     <div class="sep"></div>
     <div class="section-sub">区四 · 响应策略偏好</div>
-    <div v-if="respStrategy.candidates.length" class="cw"
-      style="border:1px solid var(--warntx);background:var(--warnbg)">
-      <b style="color:var(--warntx)">待确认策略偏好</b>
-      <div v-for="p in respStrategy.candidates" :key="p.id" style="margin-top:8px">
-        <div style="font-size:var(--fs-base);font-weight:500">{{ p.title }}</div>
-        <div class="muted" style="margin-top:2px">建议：{{ p.proposed_content }}</div>
-        <div class="fg" style="gap:6px;margin-top:6px">
+    <div v-if="respStrategy.candidates.length" class="cw card-warn">
+      <b>待确认策略偏好</b>
+      <div v-for="p in respStrategy.candidates" :key="p.id" class="pending-item">
+        <div class="pending-proposal" style="font-weight:500">{{ p.title }}</div>
+        <div class="pending-trigger mt-1">建议：{{ p.proposed_content }}</div>
+        <div class="fg mt-2" style="gap:6px">
           <button class="btn-xs" :disabled="busy('sc' + p.id)"
             @click="run('sc' + p.id, () => confirmStrategyCand(p.id))">确认</button>
           <button class="btn-xs" :disabled="busy('sc' + p.id)"
@@ -756,16 +751,15 @@ onActivated(() => selectTab(tab.value))
     </div>
     <div class="cw">
       <div class="row"><b>已确认的策略偏好</b></div>
-      <pre v-if="respStrategy.content" style="white-space:pre-wrap;margin-top:8px">{{ respStrategy.content }}</pre>
-      <div v-else class="muted" style="margin-top:8px">暂无已确认偏好，系统正从你的赞踩反馈中积累（期间以行业通用默认策略兜底）</div>
+      <pre v-if="respStrategy.content" class="mt-2" style="white-space:pre-wrap">{{ respStrategy.content }}</pre>
+      <div v-else class="muted mt-2">暂无已确认偏好，系统正从你的赞踩反馈中积累（期间以行业通用默认策略兜底）</div>
     </div>
   </div>
 
   <!-- 健康度 -->
   <div v-else-if="tab === 4">
-    <div v-if="health" class="g4" style="margin-bottom:16px">
+    <div v-if="health" class="g4 mb-4">
       <div class="card" style="text-align:center">
-        <!-- 健康分环形图 -->
         <svg width="84" height="84" viewBox="0 0 84 84" style="margin:0 auto;display:block">
           <circle cx="42" cy="42" r="36" fill="none" stroke="var(--bd)" stroke-width="8" />
           <circle cx="42" cy="42" r="36" fill="none"
@@ -777,14 +771,12 @@ onActivated(() => selectTab(tab.value))
             :fill="health.health_score >= 90 ? 'var(--succtx)' : health.health_score >= 70 ? 'var(--warntx)' : 'var(--dangtx)'">{{
               health.health_score }}</text>
         </svg>
-        <div class="muted">健康度</div>
-        <button class="btn-sm" style="margin-top:8px" :disabled="lintRunning" @click="runLint">
+        <div class="muted mt-2">健康度</div>
+        <button class="btn-sm mt-2" :disabled="lintRunning" @click="runLint">
           <i v-if="lintRunning" class="ti ti-loader-2"></i> {{ lintRunning ? '检查中…' : '立即检查' }}</button>
-        <!-- 扣分原因：不满 100 分时明示哪一项在扣分，消除“不知道哪里有问题” -->
         <div v-if="health.health_score < 100 && (health.score_breakdown || []).some(b => b.deduct > 0)"
-          style="margin-top:8px;font-size:var(--fs-xs);line-height:1.6">
-          <div v-for="b in health.score_breakdown.filter(b => b.deduct > 0)" :key="b.reason"
-            style="color:var(--warntx)">
+          class="score-breakdown">
+          <div v-for="b in health.score_breakdown.filter(b => b.deduct > 0)" :key="b.reason">
             {{ DEDUCT_MAP[b.reason] || b.reason }} {{ b.count }} 条，扣 {{ b.deduct }} 分
           </div>
         </div>
@@ -806,61 +798,53 @@ onActivated(() => selectTab(tab.value))
     </div>
     <!-- 矛盾处理 -->
     <div v-if="conflicts.length" class="cw">
-      <div class="row" style="justify-content:space-between;align-items:center">
-        <b>矛盾记忆</b>
-        <span class="muted" style="font-size:var(--fs-sm)">{{ conflicts.length }} 条待处理</span>
-      </div>
-      <div v-for="cf in conflicts" :key="cf.conflict_id" class="cw" style="margin-top:8px">
-        <div class="row" style="justify-content:space-between;align-items:center">
-          <div style="font-weight:500;cursor:pointer;flex:1;min-width:0" @click="openConflictCompare(cf)">
-            {{ cf.title }}
-            <span class="muted" style="font-size:var(--fs-xs);margin-left:8px"><i class="ti ti-columns"></i> 查看对比</span>
-          </div>
+      <div class="cw-heading">矛盾记忆 <span class="muted">{{ conflicts.length }} 条待处理</span></div>
+      <div v-for="cf in conflicts" :key="cf.conflict_id" class="cw mt-2">
+        <div class="list-row" @click="openConflictCompare(cf)">
+          <span class="list-title">{{ cf.title }}</span>
+          <span class="muted" style="font-size:var(--fs-xs);margin-left:8px"><i class="ti ti-columns"></i> 查看对比</span>
         </div>
       </div>
     </div>
-    <!-- Lint 检查明细：完整列表，可操作项带建议卡 -->
+    <!-- Lint 检查明细 -->
     <div v-if="health" class="cw">
-      <b>Lint 检查明细</b>
-      <div v-for="chk in health.lint_details.filter(c => !c.actionable)" :key="chk.check" class="row"
-        style="padding:6px 0;border-bottom:1px solid var(--bd)">
+      <div class="cw-heading">Lint 检查明细</div>
+      <div v-for="chk in health.lint_details.filter(c => !c.actionable)" :key="chk.check" class="version-row">
         <span>{{ chk.check }} <span class="muted">· {{ chk.desc }}</span></span>
-        <span class="badge" :class="chk.status === 'ok' ? 'badge-g' : ''"
-          :style="chk.status === 'warning' && chk.count ? 'color:var(--warntx)' : ''">{{ chk.count }}</span>
+        <span class="badge" :class="[chk.status === 'ok' ? 'badge-g' : '', chk.status === 'warning' && chk.count ? 'badge-y' : '']">{{ chk.count }}</span>
       </div>
     </div>
     <div v-if="health" v-for="chk in health.lint_details.filter(c => c.actionable)" :key="chk.check" class="cw">
-      <b>{{ chk.check }}</b> <span class="muted">{{ chk.desc }}（{{ chk.count }}）</span>
-      <div v-for="sug in (chk.suggestion_ids || [])" :key="sug.id || sug" class="fg" style="gap:6px;margin-top:8px">
-        <span class="muted" style="flex:1">
+      <div class="cw-heading">{{ chk.check }} <span class="muted">{{ chk.desc }}（{{ chk.count }}）</span></div>
+      <div v-for="sug in (chk.suggestion_ids || [])" :key="sug.id || sug" class="lint-sug-row">
+        <span class="lint-sug-label">
           <template v-if="chk.check === '孤立检测'">{{ sug.title || sug }}</template>
           <template v-else-if="chk.check === '重复检测'">{{ sug.memory_a?.title || sug.memory_a?.id }} ↔ {{
             sug.memory_b?.title || sug.memory_b?.id }}</template>
           <template v-else>{{ sug.id || sug }}</template>
         </span>
-        <button v-if="chk.check === '孤立检测'" class="btn-xs" @click="openDetail(sug.memory_id, sug)"><i
-            class="ti ti-eye"></i>
-          查看</button>
-        <!-- 重复检测：列表行仅入口按钮，四选一裁决在对比弹窗内完成 -->
-        <template v-if="chk.check === '重复检测'">
-          <button class="btn-xs" @click="openDupCompare(sug)"><i class="ti ti-columns"></i> 对比查看</button>
-        </template>
-        <template v-else>
-          <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
-            @click="run('sug' + (sug.id || sug), () => acceptSug(sug.id || sug))">采纳</button>
-          <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
-            @click="run('sug' + (sug.id || sug), () => dismissSug(sug.id || sug))">忽略</button>
-        </template>
+        <div class="lint-sug-actions">
+          <button v-if="chk.check === '孤立检测'" class="btn-xs" @click="openDetail(sug.memory_id, sug)"><i
+              class="ti ti-eye"></i> 查看</button>
+          <template v-if="chk.check === '重复检测'">
+            <button class="btn-xs" @click="openDupCompare(sug)"><i class="ti ti-columns"></i> 对比查看</button>
+          </template>
+          <template v-else>
+            <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
+              @click="run('sug' + (sug.id || sug), () => acceptSug(sug.id || sug))">采纳</button>
+            <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
+              @click="run('sug' + (sug.id || sug), () => dismissSug(sug.id || sug))">忽略</button>
+          </template>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- 知识库 -->
   <div v-else-if="tab === 5">
-    <!-- 本地目录接入：把常用资料目录自动纳入知识库 -->
-    <div class="cw" style="margin-bottom:16px">
-      <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
-        <span class="mt" style="margin:0;font-size:var(--fs-md)">
+    <div class="cw mb-4">
+      <div class="section-row mb-2">
+        <span class="section-sub" style="margin:0">
           <i class="ti ti-folder" style="margin-right:6px;color:var(--acctx)"></i>本地目录
         </span>
         <button class="btn-sm" :disabled="localDirScanning" @click="scanLocalDirs">
@@ -868,11 +852,11 @@ onActivated(() => selectTab(tab.value))
           {{ localDirScanning ? '扫描中…' : '立即扫描' }}
         </button>
       </div>
-      <div class="muted" style="font-size:var(--fs-sm);margin-bottom:10px">
+      <div class="muted mb-3">
         接入常用资料目录（笔记 / PDF / 文档等），系统按扫描间隔自动提炼为知识库记忆；
         源文件只读不修改，图片默认不扫描。
       </div>
-      <div class="fg" style="gap:8px">
+      <div class="filter-bar" style="margin-bottom:0">
         <input v-model="localDirPath" placeholder="输入本地目录绝对路径，如 D:\Documents"
           style="flex:1" @keyup.enter="addLocalDir" />
         <label class="fg" style="gap:4px;font-size:var(--fs-base);flex-shrink:0;cursor:pointer">
@@ -880,15 +864,14 @@ onActivated(() => selectTab(tab.value))
         </label>
         <button class="btn-primary" @click="addLocalDir"><i class="ti ti-plus"></i> 添加</button>
       </div>
-      <div v-for="dir in localDirs" :key="dir.id"
-        style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--bd)">
+      <div v-for="dir in localDirs" :key="dir.id" class="dir-row">
         <div style="min-width:0;flex:1">
-          <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          <div class="doc-name">
             {{ dir.path }}
             <span class="badge" :class="dir.enabled ? 'badge-g' : ''">{{ dir.enabled ? '启用' : '已暂停' }}</span>
             <span v-if="dir.recursive" class="badge">含子目录</span>
           </div>
-          <div class="muted" style="margin-top:3px;font-size:var(--fs-sm)">
+          <div class="doc-meta">
             {{ localDirSummary(dir) }} · 已导入 {{ dir.imported_count }}/{{ dir.file_count }} 个文件
           </div>
         </div>
@@ -898,21 +881,19 @@ onActivated(() => selectTab(tab.value))
           <button class="btn-xs btn-danger" @click="removeLocalDir(dir)"><i class="ti ti-trash"></i></button>
         </div>
       </div>
-      <div v-if="!localDirs.length" class="muted"
-        style="font-size:var(--fs-base);padding:12px 0 2px;text-align:center">尚未接入本地目录</div>
+      <div v-if="!localDirs.length" class="muted" style="padding:var(--sp-3) 0 var(--sp-1);text-align:center">尚未接入本地目录</div>
     </div>
     <div class="doc-drop" :class="{ uploading: docUploading }" @click="triggerDocPick" @dragover.prevent
       @drop.prevent="uploadDocs($event.dataTransfer.files)">
       <i class="ti" :class="docUploading ? 'ti-loader-2' : 'ti-cloud-upload'"></i>
       <template v-if="docProgress">
-        <div style="font-weight:500;margin-top:6px">
+        <div class="list-title mt-2">
           正在导入「{{ docProgress.filename }}」<template v-if="docProgress.totalFiles > 1">（{{ docProgress.index }}/{{
             docProgress.totalFiles }}）</template>
         </div>
-        <div class="muted" style="margin-top:4px">{{ docStageLabel(docProgress) }}</div>
-        <!-- 多文件：总进度条 + 逐文件状态队列 -->
+        <div class="muted mt-1">{{ docStageLabel(docProgress) }}</div>
         <template v-if="docProgress.totalFiles > 1">
-          <div style="margin:12px auto 0;max-width:320px;display:flex;align-items:center;gap:8px">
+          <div style="margin:var(--sp-3) auto 0;max-width:320px;display:flex;align-items:center;gap:8px">
             <div class="progress" style="flex:1">
               <div :style="{ width: docOverallPct + '%', background: 'var(--acctx)' }"></div>
             </div>
@@ -927,27 +908,26 @@ onActivated(() => selectTab(tab.value))
           </div>
         </template>
         <div v-else-if="docProgress.stage === 'distilling' && docProgress.total" class="progress"
-          style="margin:10px auto 0;max-width:280px">
+          style="margin:var(--sp-3) auto 0;max-width:280px">
           <div :style="{ width: (docProgress.current / docProgress.total * 100) + '%', background: 'var(--acctx)' }">
           </div>
         </div>
       </template>
       <template v-else>
-        <div style="font-weight:500;margin-top:6px">点击或拖拽文件到此上传</div>
+        <div class="list-title mt-2">点击或拖拽文件到此上传</div>
         <div class="muted">支持 PDF / DOCX / TXT / MD / 图片（PNG、JPG 等，经 VLM/OCR 提取），自动解析并提炼为知识库记忆</div>
       </template>
       <input ref="docFileInput" type="file" multiple style="display:none" @change="onDocPick" />
     </div>
-    <div v-if="!docs.length" class="empty" style="margin-top:16px"><i
+    <div v-if="!docs.length" class="empty mt-4"><i
         class="ti ti-files"></i>知识库还没有文档<br>上传文档后系统会自动解析并提炼记忆
     </div>
-    <div v-for="d in docs" :key="d.id" class="cw"
-      style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px">
+    <div v-for="d in docs" :key="d.id" class="cw doc-row mt-3">
       <div style="min-width:0;flex:1">
-        <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        <div class="doc-name">
           <i class="ti ti-file-text" style="margin-right:6px;color:var(--acctx)"></i>{{ d.filename }}
         </div>
-        <div class="muted" style="margin-top:4px">{{ fmtSize(d.size) }} · 提炼 {{ d.memory_count }} 条记忆 · {{
+        <div class="doc-meta">{{ fmtSize(d.size) }} · 提炼 {{ d.memory_count }} 条记忆 · {{
           formatTimeFull(d.imported_at) }}</div>
       </div>
       <div class="fg" style="gap:6px;flex-shrink:0">
@@ -995,11 +975,11 @@ onActivated(() => selectTab(tab.value))
         </template>
       </dl>
       <div class="label">摘要</div>
-      <p style="color:var(--sec);margin-bottom:12px">{{ detail.summary }}</p>
+      <p class="mb-3" style="color:var(--sec)">{{ detail.summary }}</p>
       <div class="label">详情</div>
-      <p style="color:var(--sec);margin-bottom:12px;white-space:pre-wrap;max-height:280px;overflow-y:auto">{{
+      <p class="mb-3" style="color:var(--sec);white-space:pre-wrap;max-height:280px;overflow-y:auto">{{
         detail.detail }}</p>
-      <div class="fg" style="gap:12px;margin-bottom:12px;flex-wrap:wrap;align-items:center">
+      <div class="filter-bar mb-3">
         <select @change="e => saveAttr('confidence', e.target.value)" :value="detail.frontmatter?.confidence">
           <option value="strong">强</option>
           <option value="medium">中</option>
@@ -1016,37 +996,33 @@ onActivated(() => selectTab(tab.value))
             @change="e => saveAttr('is_important', e.target.checked)" /> 重要记忆
         </label>
       </div>
-      <!-- 关联记忆（交叉引用） -->
       <div v-if="detail.linked_memories && detail.linked_memories.length">
         <div class="label">关联记忆（{{ detail.linked_memories.length }}）</div>
-        <div class="fg" style="gap:6px;flex-wrap:wrap;margin-bottom:12px">
-          <span v-for="lk in detail.linked_memories" :key="lk.id" class="badge" style="cursor:pointer"
+        <div class="fg mb-3" style="gap:6px;flex-wrap:wrap">
+          <span v-for="lk in detail.linked_memories" :key="lk.id" class="badge list-row"
             @click="openDetail(lk.id)">{{ lk.type }} · {{ lk.title }}</span>
         </div>
       </div>
-      <!-- 变更历史：记忆的演变轨迹（创建/演变/合并/流转，倒序） -->
       <div v-if="detail.change_history && detail.change_history.length">
         <div class="label">变更历史（{{ detail.change_history.length }}）</div>
-        <div style="max-height:150px;overflow-y:auto;margin-bottom:12px">
-          <div v-for="(h, hi) in detail.change_history" :key="hi" class="muted"
-            style="font-size:var(--fs-base);padding:4px 0;border-bottom:1px solid var(--bd)">{{ h }}</div>
+        <div class="history-scroll" style="max-height:150px">
+          <div v-for="(h, hi) in detail.change_history" :key="hi" class="citation-row"
+            style="font-size:var(--fs-base)">{{ h }}</div>
         </div>
       </div>
-      <!-- 被引用记录：记忆资产的使用凭证（可跳转回引用它的对话） -->
       <div v-if="detail.citations && detail.citations.length">
         <div class="label">被引用记录（{{ detail.citations.length }}）</div>
-        <div style="max-height:180px;overflow-y:auto;margin-bottom:12px">
-          <div v-for="(ct, ci) in detail.citations" :key="ci" class="fg"
-            style="gap:8px;padding:6px 0;font-size:var(--fs-base);border-bottom:1px solid var(--bd)">
+        <div class="history-scroll">
+          <div v-for="(ct, ci) in detail.citations" :key="ci" class="citation-row">
             <span class="muted" style="flex-shrink:0">{{ formatTimeFull(ct.cited_at) }}</span>
-            <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" :title="ct.session_title">{{
+            <span class="citation-title" :title="ct.session_title">{{
               ct.session_title }}</span>
             <button class="btn-xs" style="flex-shrink:0" @click="jumpToSession(ct.session_id)">
               <i class="ti ti-message"></i> 查看对话</button>
           </div>
         </div>
       </div>
-      <div class="fg" style="justify-content:flex-end;gap:8px">
+      <div class="action-footer">
         <!-- 从 Lint 建议打开时：支持在详情内直接采纳/忽略该建议 -->
         <button @click="detail = null">关闭</button>
         <template v-if="detailSug">
@@ -1064,12 +1040,11 @@ onActivated(() => selectTab(tab.value))
           ? '删除索引' : '删除' }}</button>
       </div>
   </BaseModal>
-  <!-- 导入预览确认弹窗（silent_doc_import=false；需明确抉择，禁用遮罩/ESC/X 关闭） -->
   <BaseModal v-if="importPreview" title="确认导入内容" size="lg" :show-close="false" :close-on-overlay="false"
     :close-on-esc="false">
-      <div class="muted" style="margin-bottom:10px">「{{ importPreview.filename }}」提炼出 {{ importPreview.items.length
+      <div class="muted mb-3">「{{ importPreview.filename }}」提炼出 {{ importPreview.items.length
       }} 条候选记忆，勾选需要写入的条目（未勾选的将丢弃）：</div>
-      <div style="max-height:360px;overflow-y:auto;margin-bottom:14px">
+      <div style="max-height:360px;overflow-y:auto" class="mb-3">
         <label v-for="(it, i) in importPreview.items" :key="i" class="fg"
           style="gap:8px;padding:8px 0;border-bottom:1px solid var(--bd);cursor:pointer;align-items:flex-start">
           <input type="checkbox" v-model="importPreview.checked[i]" style="margin-top:3px" />
@@ -1082,25 +1057,23 @@ onActivated(() => selectTab(tab.value))
         </label>
         <div v-if="!importPreview.items.length" class="empty" style="padding:20px">本文档未提炼出可入库的内容</div>
       </div>
-      <div class="fg" style="justify-content:flex-end;gap:8px">
+      <div class="action-footer">
         <button class="dang" :disabled="previewSubmitting" @click="submitImportPreview(true)">全部丢弃</button>
         <button class="btn-primary" :disabled="previewSubmitting" @click="submitImportPreview(false)">
           写入勾选的 {{ previewCheckedCount() }} 条</button>
       </div>
   </BaseModal>
-  <!-- SOUL diff 弹窗 -->
   <BaseModal v-if="diffData" title="版本对比" @close="diffData = null">
     <div class="label">旧版</div>
-    <pre style="white-space:pre-wrap;max-height:200px;overflow:auto">{{ diffData.from }}</pre>
-    <div class="label" style="margin-top:10px">新版</div>
-    <pre style="white-space:pre-wrap;max-height:200px;overflow:auto">{{ diffData.to }}</pre>
+    <pre class="pre-block" style="max-height:200px">{{ diffData.from }}</pre>
+    <div class="label mt-3">新版</div>
+    <pre class="pre-block" style="max-height:200px">{{ diffData.to }}</pre>
     <template #footer>
       <button @click="diffData = null">关闭</button>
     </template>
   </BaseModal>
-  <!-- SOUL_CORE 编辑弹窗 -->
   <BaseModal v-if="showSoulCoreEdit" title="编辑 SOUL_CORE 核心人格" @close="showSoulCoreEdit = false">
-    <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 核心人格影响全局行为，保存前会二次确认，下次会话生效。</div>
+    <div class="muted mb-2" style="color:var(--warntx)">⚠ 核心人格影响全局行为，保存前会二次确认，下次会话生效。</div>
     <textarea v-model="soulCoreDraft"
       style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
     <template #footer>
@@ -1109,9 +1082,8 @@ onActivated(() => selectTab(tab.value))
           v-if="busy('saveSoul')" class="ti ti-loader-2"></i> 保存</button>
     </template>
   </BaseModal>
-  <!-- 输出样式画像编辑弹窗 -->
   <BaseModal v-if="showOutputStyleEdit" title="编辑输出样式画像" @close="showOutputStyleEdit = false">
-    <div class="muted" style="margin-bottom:8px;color:var(--warntx)">⚠ 将覆盖当前画像内容，保存前会二次确认，下次会话生效。</div>
+    <div class="muted mb-2" style="color:var(--warntx)">⚠ 将覆盖当前画像内容，保存前会二次确认，下次会话生效。</div>
     <textarea v-model="outputStyleDraft"
       style="width:100%;height:280px;font-family:var(--mono);font-size:var(--fs-sm)"></textarea>
     <template #footer>
@@ -1120,69 +1092,58 @@ onActivated(() => selectTab(tab.value))
           v-if="busy('saveOut')" class="ti ti-loader-2"></i> 保存</button>
     </template>
   </BaseModal>
-  <!-- 知识库文档详情弹窗 -->
   <BaseModal v-if="docDetail" title="文档详情" @close="docDetail = null">
     <h3 class="modal-subtitle">
       <i class="ti ti-file-text" style="margin-right:6px;color:var(--acctx)"></i>{{ docDetail.filename }}
     </h3>
-      <div class="muted" style="margin-bottom:12px">{{ fmtSize(docDetail.size) }} · 提炼 {{ docDetail.memory_count }} 条记忆
+      <div class="muted mb-3">{{ fmtSize(docDetail.size) }} · 提炼 {{ docDetail.memory_count }} 条记忆
         ·
         {{ formatTimeFull(docDetail.imported_at) }}</div>
       <div class="label">文档正文</div>
-      <pre
-        style="white-space:pre-wrap;max-height:280px;overflow:auto;margin-bottom:12px;background:var(--surface-2);padding:12px;border-radius:var(--radius-sm);font-family:var(--mono);font-size:var(--fs-sm)">
-      {{ docDetail.content || '（无法解析正文或内容为空）' }}</pre>
+      <pre class="pre-block">{{ docDetail.content || '（无法解析正文或内容为空）' }}</pre>
       <div class="label">提炼的记忆（{{ docDetail.memories.length }}）</div>
-      <div v-for="m in docDetail.memories" :key="m.id" class="cw" style="cursor:pointer;padding:12px"
+      <div v-for="m in docDetail.memories" :key="m.id" class="cw list-row" style="padding:var(--sp-3)"
         @click="openDetail(m.id)">
         <b>{{ m.title }}</b>
         <div class="muted">{{ m.summary }}</div>
       </div>
-      <div v-if="!docDetail.memories.length" class="empty" style="padding:20px 12px">该文档还没有提炼记忆</div>
-      <!-- 被引用记录：该文档提炼的记忆被对话引用的明细 -->
+      <div v-if="!docDetail.memories.length" class="empty" style="padding:20px var(--sp-3)">该文档还没有提炼记忆</div>
       <div v-if="docDetail.citations && docDetail.citations.length">
-        <div class="label" style="margin-top:12px">被引用记录（{{ docDetail.citations.length }}）</div>
-        <div style="max-height:180px;overflow-y:auto">
-          <div v-for="(ct, ci) in docDetail.citations" :key="ci" class="fg"
-            style="gap:8px;padding:6px 0;font-size:var(--fs-base);border-bottom:1px solid var(--bd)">
+        <div class="label mt-3">被引用记录（{{ docDetail.citations.length }}）</div>
+        <div class="history-scroll">
+          <div v-for="(ct, ci) in docDetail.citations" :key="ci" class="citation-row">
             <span class="muted" style="flex-shrink:0">{{ formatTimeFull(ct.cited_at) }}</span>
-            <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
+            <span class="citation-title"
               :title="ct.memory_title + ' · ' + ct.session_title">{{ ct.memory_title }} · {{ ct.session_title }}</span>
             <button class="btn-xs" style="flex-shrink:0" @click="jumpToSession(ct.session_id)">
               <i class="ti ti-message"></i> 查看对话</button>
           </div>
         </div>
       </div>
-      <div class="fg" style="justify-content:flex-end;margin-top:16px">
+      <div class="action-footer">
         <button @click="docDetail = null">关闭</button>
       </div>
   </BaseModal>
-  <!-- 本地目录文件详情弹窗 -->
   <BaseModal v-if="localDirFiles" title="目录文件" @close="localDirFiles = null">
     <h3 class="modal-subtitle">{{ localDirFiles.dir.path }}</h3>
-      <div class="muted" style="margin-bottom:12px">
+      <div class="muted mb-3">
         已导入 {{ localDirFiles.files.filter(f => f.status === 'imported').length }}/{{ localDirFiles.files.length }} 个文件
       </div>
-      <div style="max-height:360px;overflow-y:auto;margin-bottom:12px">
-        <div v-for="(f, i) in localDirFiles.files" :key="i"
-          style="padding:8px 0;border-bottom:1px solid var(--bd);font-size:var(--fs-base)">
-          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
-            <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"
-              :title="f.path">{{ f.path }}</span>
-            <span class="badge" :class="f.status === 'imported' ? 'badge-g' : (f.status === 'failed' ? 'badge-a' : '')">{{
-              LOCAL_FILE_STATUS[f.status] || f.status }}</span>
-          </div>
-          <div v-if="f.fail_reason" class="muted" style="margin-top:2px;font-size:var(--fs-xs)">{{ f.fail_reason }}</div>
+      <div style="max-height:360px;overflow-y:auto" class="mb-3">
+        <div v-for="(f, i) in localDirFiles.files" :key="i" class="version-row" style="font-size:var(--fs-base)">
+          <span class="citation-title" :title="f.path">{{ f.path }}</span>
+          <span class="badge" :class="f.status === 'imported' ? 'badge-g' : (f.status === 'failed' ? 'badge-r' : '')">{{
+            LOCAL_FILE_STATUS[f.status] || f.status }}</span>
+          <div v-if="f.fail_reason" class="muted mt-1" style="font-size:var(--fs-xs);width:100%">{{ f.fail_reason }}</div>
         </div>
         <div v-if="!localDirFiles.files.length" class="empty" style="padding:20px">还没有文件记录<br>接入后扫描即可生成</div>
       </div>
-      <div class="fg" style="justify-content:flex-end">
+      <div class="action-footer">
         <button @click="localDirFiles = null">关闭</button>
       </div>
   </BaseModal>
-  <!-- 重复检测：并排对比弹窗（裁决按钮与信息维度均与矛盾对比弹窗对齐；统一走 BaseModal） -->
   <BaseModal v-if="dupCompare" title="疑似重复对比" size="xl" @close="dupCompare = null">
-    <div class="fg" style="gap:6px;justify-content:flex-end;margin-bottom:14px">
+    <div class="action-footer mb-3" style="margin-top:0">
       <button class="btn-xs" :disabled="busy('dup')"
         @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_a'))">保留 A</button>
       <button class="btn-xs" :disabled="busy('dup')"
@@ -1192,19 +1153,18 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-xs btn-danger" :disabled="busy('dup')"
         @click="run('dup', () => resolveDup(dupCompare.sug, 'delete_both'))">全部删除</button>
     </div>
-      <div class="g2" style="gap:16px;align-items:stretch">
+      <div class="g2" style="gap:var(--sp-4);align-items:stretch">
         <div v-for="(m, k) in [dupCompare.a, dupCompare.b]" :key="k" class="cw"
           style="margin:0;display:flex;flex-direction:column;min-height:0">
-          <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
+          <div class="row mb-2">
             <b :style="{ color: k === 0 ? 'var(--acctx)' : 'var(--warntx)' }">记忆 {{ k === 0 ? 'A' : 'B' }}</b>
             <button v-if="m" class="btn-xs" @click.stop="openDetail(m.id); dupCompare = null">
               <i class="ti ti-external-link"></i> 查看来源
             </button>
           </div>
           <template v-if="m">
-            <div style="font-weight:500;font-size:var(--fs-md);margin-bottom:8px">{{ m.frontmatter?.title || m.id }}
-            </div>
-            <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:var(--fs-xs)">
+            <div class="list-title mb-2">{{ m.frontmatter?.title || m.id }}</div>
+            <div class="compare-meta">
               <span class="badge">{{ CONF_MAP[m.frontmatter?.confidence] || m.frontmatter?.confidence }}</span>
               <span class="badge">{{ LIFE_MAP[m.frontmatter?.lifecycle] || m.frontmatter?.lifecycle }}</span>
               <span v-if="m.frontmatter?.domain" class="badge">{{ domainLabel(m.frontmatter.domain) }}</span>
@@ -1213,20 +1173,18 @@ onActivated(() => selectTab(tab.value))
               <span class="muted">{{ m.frontmatter?.created_at }}</span>
               <span class="muted">引用 {{ m.access_count || 0 }} 次</span>
             </div>
-            <p
-              style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">{{
+            <p class="compare-body">{{
               [m.summary, m.detail].filter(Boolean).join('\n\n') }}</p>
           </template>
-          <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">记忆不存在</div>
+          <div v-else class="muted" style="padding:20px 0;text-align:center">记忆不存在</div>
         </div>
       </div>
-      <div class="fg" style="justify-content:flex-end;margin-top:16px">
+      <div class="action-footer">
         <button @click="dupCompare = null">关闭</button>
       </div>
   </BaseModal>
-  <!-- 矛盾记忆：左右对比弹窗 -->
   <BaseModal v-if="conflictCompare" title="矛盾记忆对比" size="xl" @close="conflictCompare = null">
-    <div class="fg" style="gap:6px;justify-content:flex-end;margin-bottom:14px">
+    <div class="action-footer mb-3" style="margin-top:0">
       <button class="btn-xs" :disabled="busy('conf')"
         @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_a'))">保留 A</button>
       <button class="btn-xs" :disabled="busy('conf')"
@@ -1236,91 +1194,57 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-xs btn-danger" :disabled="busy('conf')"
         @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'delete_both'))">全部删除</button>
     </div>
-      <div v-if="conflictCompare.detectedAt" class="muted" style="font-size:var(--fs-sm);margin-bottom:12px">检测于 {{
+      <div v-if="conflictCompare.detectedAt" class="muted mb-3">检测于 {{
         conflictCompare.detectedAt }}</div>
       <div v-if="conflictCompare.loading" class="muted" style="text-align:center;padding:40px 0">加载中…</div>
       <template v-else>
-        <div class="g2" style="gap:16px;align-items:stretch">
-          <!-- 左侧：记忆 A -->
-          <div class="cw" style="margin:0;display:flex;flex-direction:column;min-height:0">
-            <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
-              <b style="color:var(--acctx)">记忆 A</b>
-              <button v-if="conflictCompare.detailA" class="btn-xs"
-                @click.stop="openDetail(conflictCompare.detailA.id); conflictCompare = null">
+        <div class="g2" style="gap:var(--sp-4);align-items:stretch">
+          <div v-for="(side, k) in ['A', 'B']" :key="k" class="cw"
+            style="margin:0;display:flex;flex-direction:column;min-height:0">
+            <div class="row mb-2">
+              <b :style="{ color: k === 0 ? 'var(--acctx)' : 'var(--warntx)' }">记忆 {{ side }}</b>
+              <button v-if="k === 0 ? conflictCompare.detailA : conflictCompare.detailB" class="btn-xs"
+                @click.stop="openDetail((k === 0 ? conflictCompare.detailA : conflictCompare.detailB).id); conflictCompare = null">
                 <i class="ti ti-external-link"></i> 查看来源
               </button>
             </div>
-            <template v-if="conflictCompare.detailA">
-              <div style="font-weight:500;font-size:var(--fs-md);margin-bottom:8px">{{
-                conflictCompare.detailA.frontmatter?.title || conflictCompare.detailA.id }}</div>
-              <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:var(--fs-xs)">
-                <span class="badge">{{ CONF_MAP[conflictCompare.detailA.frontmatter?.confidence] ||
-                  conflictCompare.detailA.frontmatter?.confidence }}</span>
-                <span class="badge">{{ LIFE_MAP[conflictCompare.detailA.frontmatter?.lifecycle] ||
-                  conflictCompare.detailA.frontmatter?.lifecycle }}</span>
-                <span v-if="conflictCompare.detailA.frontmatter?.domain" class="badge">{{
-                  domainLabel(conflictCompare.detailA.frontmatter.domain) }}</span>
-                <span v-if="conflictCompare.detailA.frontmatter?.source_type" class="badge">{{
-                  SRC_MAP[conflictCompare.detailA.frontmatter.source_type] ||
-                  conflictCompare.detailA.frontmatter.source_type }}</span>
-                <span class="muted">{{ conflictCompare.detailA.frontmatter?.created_at }}</span>
-                <span class="muted">引用 {{ conflictCompare.detailA.access_count || 0 }} 次</span>
+            <template v-if="k === 0 ? conflictCompare.detailA : conflictCompare.detailB">
+              <div class="list-title mb-2">{{
+                (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.title || (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).id }}</div>
+              <div class="compare-meta">
+                <span class="badge">{{ CONF_MAP[(k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.confidence] ||
+                  (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.confidence }}</span>
+                <span class="badge">{{ LIFE_MAP[(k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.lifecycle] ||
+                  (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.lifecycle }}</span>
+                <span v-if="(k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.domain" class="badge">{{
+                  domainLabel((k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter.domain) }}</span>
+                <span v-if="(k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.source_type" class="badge">{{
+                  SRC_MAP[(k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter.source_type] ||
+                  (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter.source_type }}</span>
+                <span class="muted">{{ (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).frontmatter?.created_at }}</span>
+                <span class="muted">引用 {{ (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).access_count || 0 }} 次</span>
               </div>
-              <p
-                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">{{
-                [conflictCompare.detailA.summary, conflictCompare.detailA.detail].filter(Boolean).join('\n\n') }}</p>
+              <p class="compare-body">{{
+                [(k === 0 ? conflictCompare.detailA : conflictCompare.detailB).summary, (k === 0 ? conflictCompare.detailA : conflictCompare.detailB).detail].filter(Boolean).join('\n\n') }}</p>
             </template>
-            <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">{{
-              conflictCompare.sourceA?.content || '记忆不存在' }}</div>
-          </div>
-          <!-- 右侧：记忆 B -->
-          <div class="cw" style="margin:0;display:flex;flex-direction:column;min-height:0">
-            <div class="row" style="margin-bottom:8px;justify-content:space-between;align-items:center">
-              <b style="color:var(--warntx)">记忆 B</b>
-              <button v-if="conflictCompare.detailB" class="btn-xs"
-                @click.stop="openDetail(conflictCompare.detailB.id); conflictCompare = null">
-                <i class="ti ti-external-link"></i> 查看来源
-              </button>
-            </div>
-            <template v-if="conflictCompare.detailB">
-              <div style="font-weight:500;font-size:var(--fs-md);margin-bottom:8px">{{
-                conflictCompare.detailB.frontmatter?.title || conflictCompare.detailB.id }}</div>
-              <div class="fg" style="gap:4px;margin-bottom:8px;flex-wrap:wrap;font-size:var(--fs-xs)">
-                <span class="badge">{{ CONF_MAP[conflictCompare.detailB.frontmatter?.confidence] ||
-                  conflictCompare.detailB.frontmatter?.confidence }}</span>
-                <span class="badge">{{ LIFE_MAP[conflictCompare.detailB.frontmatter?.lifecycle] ||
-                  conflictCompare.detailB.frontmatter?.lifecycle }}</span>
-                <span v-if="conflictCompare.detailB.frontmatter?.domain" class="badge">{{
-                  domainLabel(conflictCompare.detailB.frontmatter.domain) }}</span>
-                <span v-if="conflictCompare.detailB.frontmatter?.source_type" class="badge">{{
-                  SRC_MAP[conflictCompare.detailB.frontmatter.source_type] ||
-                  conflictCompare.detailB.frontmatter.source_type }}</span>
-                <span class="muted">{{ conflictCompare.detailB.frontmatter?.created_at }}</span>
-                <span class="muted">引用 {{ conflictCompare.detailB.access_count || 0 }} 次</span>
-              </div>
-              <p
-                style="color:var(--sec);font-size:var(--fs-base);line-height:1.7;white-space:pre-wrap;max-height:300px;overflow-y:auto;flex:1;margin:0">{{
-                [conflictCompare.detailB.summary, conflictCompare.detailB.detail].filter(Boolean).join('\n\n') }}</p>
-            </template>
-            <div v-else class="muted" style="font-size:var(--fs-base);padding:20px 0;text-align:center">{{
-              conflictCompare.sourceB?.content || '记忆不存在' }}</div>
+            <div v-else class="muted" style="padding:20px 0;text-align:center">{{
+              (k === 0 ? conflictCompare.sourceA : conflictCompare.sourceB)?.content || '记忆不存在' }}</div>
           </div>
         </div>
       </template>
-      <div class="fg" style="justify-content:flex-end;margin-top:12px;gap:8px">
+      <div class="action-footer">
         <button @click="conflictCompare = null">关闭</button>
       </div>
   </BaseModal>
-  <!-- 用户画像维度详情弹窗 -->
   <BaseModal v-if="dimDetail" @close="dimDetail = null">
     <template #header>
       {{ dimDetail.name }} <span class="badge badge-g" style="margin-left:8px">{{ dimStatusLabel(dimDetail.status) }}</span>
     </template>
     <div v-for="(it, j) in dimDetail.items" :key="j"
-      style="margin-bottom:10px;color:var(--sec);font-size:var(--fs-md);line-height:1.6">
+      class="mb-3" style="color:var(--sec);font-size:var(--fs-md);line-height:1.6">
       · {{ it.text }} <span v-if="it.inferred" class="muted">[推断]</span>
     </div>
-    <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:24px 12px">该维度还没有内容</div>
+    <div v-if="!dimDetail.items || !dimDetail.items.length" class="empty" style="padding:var(--sp-6) var(--sp-3)">该维度还没有内容</div>
     <template #footer>
       <button @click="dimDetail = null">关闭</button>
     </template>

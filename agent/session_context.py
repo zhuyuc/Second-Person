@@ -20,6 +20,8 @@ from memory.naming import session_id as make_session_id
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
 
+_UNSET = object()
+
 
 def _now() -> str:
     return now_cst().isoformat(timespec="seconds")
@@ -130,18 +132,27 @@ class SessionStore:
                        visuals: list | None = None,
                        strategy_snapshot: dict | None = None,
                        skeleton_snapshot: dict | None = None,
-                       next_step_shown: dict | None = None) -> int:
+                       next_step_shown: dict | None = None,
+                       parent_id: int | None = _UNSET,
+                       version_group_id: int | None = None,
+                       is_active: int = 1) -> int:
         # readonly 写入保护（会话上下文管理方案 v2 §旧会话状态管理）
         row = self.db.query_one(
             "SELECT readonly FROM sessions WHERE session_id=?", (sid,))
         if row and row["readonly"]:
             raise ValueError("会话已结束，不可写入新消息")
+        # parent_id 未指定时自动推断：指向同 session 最新一条消息
+        if parent_id is _UNSET:
+            prev = self.db.query_one(
+                "SELECT id FROM conversations WHERE session_id=? "
+                "ORDER BY id DESC LIMIT 1", (sid,))
+            parent_id = prev["id"] if prev else None
         cur = self.db.execute(
             "INSERT INTO conversations(session_id,role,message_type,notification_type,"
             "content,citations,feedback,create_time,thinking,images,visuals,"
             "response_strategy_json,cognitive_skeleton_json,protected_from_compression,"
-            "next_step_shown) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?)",
+            "next_step_shown,parent_id,version_group_id,is_active) "
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
@@ -153,45 +164,122 @@ class SessionStore:
                         ensure_ascii=False) if skeleton_snapshot else None,
              int(self._should_protect(role, content)),
              json.dumps(next_step_shown,
-                        ensure_ascii=False) if next_step_shown else None)
+                        ensure_ascii=False) if next_step_shown else None,
+             parent_id, version_group_id, is_active)
         )
+        msg_id = cur.lastrowid
+        # version_group_id 未指定时默认为自身 id（首次创建，无兄弟版本）
+        if version_group_id is None:
+            self.db.execute(
+                "UPDATE conversations SET version_group_id=? WHERE id=?",
+                (msg_id, msg_id))
         self.db.execute(
             "UPDATE sessions SET last_active=?, message_count=message_count+1 "
             "WHERE session_id=?", (_now(), sid))
-        return cur.lastrowid
+        return msg_id
 
     def get_messages(self, sid: str, before_id: int = None, limit: int = 50) -> list[dict]:
+        # 仅加载活跃分支（is_active=1 或 NULL 兼容未迁移数据）
         if before_id:
             rows = self.db.query_all(
                 "SELECT * FROM conversations WHERE session_id=? AND id<? "
+                "AND (is_active=1 OR is_active IS NULL) "
                 "ORDER BY id DESC LIMIT ?", (sid, before_id, limit))
         else:
             rows = self.db.query_all(
-                "SELECT * FROM conversations WHERE session_id=? ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM conversations WHERE session_id=? "
+                "AND (is_active=1 OR is_active IS NULL) "
+                "ORDER BY id DESC LIMIT ?",
                 (sid, limit))
         rows = list(reversed(rows))
         out = []
         for r in rows:
             cites = json.loads(r["citations"]) if r["citations"] else []
-            # 历史引用只存 id：补充记忆标题，前端可直接展示/点击查详情
             for cit in cites:
                 if cit.get("id") and not cit.get("title"):
                     mrow = self.db.query_one(
                         "SELECT title FROM memories WHERE id=?", (cit["id"],))
                     if mrow:
                         cit["title"] = mrow["title"]
+            # 版本信息：同组兄弟数量和当前索引
+            vgroup = r["version_group_id"] or r["id"]
+            siblings = self.db.query_all(
+                "SELECT id FROM conversations WHERE version_group_id=? ORDER BY id",
+                (vgroup,))
+            sibling_ids = [s["id"] for s in siblings]
+            sibling_count = len(sibling_ids)
+            sibling_index = sibling_ids.index(r["id"]) if r["id"] in sibling_ids else 0
             out.append({"id": r["id"], "role": r["role"],
                         "message_type": r["message_type"],
                         "notification_type": r["notification_type"],
                         "content": r["content"], "citations": cites,
                         "feedback": r["feedback"], "create_time": r["create_time"],
                         "thinking": r["thinking"],
-                        # 持久化图片：文件名转为可访问 URL，刷新后历史消息可回看
                         "images": [f"/chat-images/{f}" for f in
                                    json.loads(r["images"])] if r["images"] else [],
-                        # 持久化图形：刷新后历史消息可恢复图表渲染
-                        "visuals": json.loads(r["visuals"]) if r["visuals"] else []})
+                        "visuals": json.loads(r["visuals"]) if r["visuals"] else [],
+                        "parent_id": r["parent_id"],
+                        "version_group_id": vgroup,
+                        "sibling_count": sibling_count,
+                        "sibling_index": sibling_index,
+                        "has_branches": sibling_count > 1})
         return out
+
+    def switch_version(self, sid: str, version_group_id: int,
+                       target_message_id: int) -> None:
+        """切换版本：同组全部 is_active=0，目标 is_active=1，
+        并递归激活目标下游最新的活跃子节点链。"""
+        # 同组全部停用
+        self.db.execute(
+            "UPDATE conversations SET is_active=0 "
+            "WHERE version_group_id=? AND session_id=?",
+            (version_group_id, sid))
+        # 目标激活
+        self.db.execute(
+            "UPDATE conversations SET is_active=1 WHERE id=? AND session_id=?",
+            (target_message_id, sid))
+        # 旧活跃版本的下游链全部停用
+        # （同组其他兄弟的子孙树需要停用，避免和新分支的下游混淆）
+        siblings = self.db.query_all(
+            "SELECT id FROM conversations WHERE version_group_id=? AND id!=?",
+            (version_group_id, target_message_id))
+        for sib in siblings:
+            self._deactivate_downstream(sib["id"])
+        # 递归激活目标的下游链（每个分叉点选择最近一次活跃的子节点）
+        self._activate_downstream(target_message_id, sid)
+
+    def _deactivate_downstream(self, parent_id: int) -> None:
+        """递归停用某节点的所有子孙。"""
+        children = self.db.query_all(
+            "SELECT id FROM conversations WHERE parent_id=?", (parent_id,))
+        for c in children:
+            self.db.execute(
+                "UPDATE conversations SET is_active=0 WHERE id=?", (c["id"],))
+            self._deactivate_downstream(c["id"])
+
+    def _activate_downstream(self, parent_id: int, sid: str) -> None:
+        """递归激活下游链：每个分叉点选择 id 最大（最新）的子节点。"""
+        children = self.db.query_all(
+            "SELECT id, version_group_id FROM conversations "
+            "WHERE parent_id=? AND session_id=? ORDER BY id DESC",
+            (parent_id, sid))
+        if not children:
+            return
+        # 按 version_group 分组，每组选最新的一条激活
+        seen_groups = set()
+        for c in children:
+            vg = c["version_group_id"] or c["id"]
+            if vg in seen_groups:
+                continue
+            seen_groups.add(vg)
+            # 同组全部停用再激活最新的
+            self.db.execute(
+                "UPDATE conversations SET is_active=0 "
+                "WHERE version_group_id=?", (vg,))
+            self.db.execute(
+                "UPDATE conversations SET is_active=1 WHERE id=?", (c["id"],))
+            self._activate_downstream(c["id"], sid)
+            break  # 每个分叉点只走一条路径
 
     def set_feedback(self, message_id: int, feedback: int) -> None:
         self.db.execute("UPDATE conversations SET feedback=? WHERE id=?",
@@ -246,9 +334,9 @@ class SessionStore:
                               head_protected_rounds: int = 2) -> list[dict]:
         """返回消息列表（含 id 字段供压缩水位推进，送 LLM 前需剔除）。
 
+        仅加载当前活跃分支的消息（is_active=1）。
         Head：会话最初 head_protected_rounds 轮（存在压缩摘要时才拼入）；
         Summary：压缩摘要（有则拼入）；Tail：水位之后的全部原文。
-        水位后原文数量由压缩节奏保证不会过多（达 compression_trigger_rounds 即被收走）。
         """
         row = self.db.query_one(
             "SELECT compressed_summary_path,last_compressed_message_id FROM sessions "
@@ -264,33 +352,35 @@ class SessionStore:
         watermark = row["last_compressed_message_id"]
         head_msgs = head_protected_rounds * 2  # 轮 → 条
 
-        # Tail：水位之后的全部原文
+        # 活跃分支过滤条件
+        active_filter = "AND (is_active=1 OR is_active IS NULL)"
+
+        # Tail：水位之后的全部活跃原文
         if watermark:
             tail_rows = self.db.query_all(
                 "SELECT id,role,content FROM conversations "
-                "WHERE session_id=? AND id>? AND message_type='normal' ORDER BY id",
+                f"WHERE session_id=? AND id>? AND message_type='normal' {active_filter} ORDER BY id",
                 (sid, watermark))
         else:
             tail_rows = self.db.query_all(
                 "SELECT id,role,content FROM conversations "
-                "WHERE session_id=? AND message_type='normal' ORDER BY id",
+                f"WHERE session_id=? AND message_type='normal' {active_filter} ORDER BY id",
                 (sid,))
         msgs = []
-        # 第一优先级：protected 消息完整原文（始终加载，不受 watermark 限制）
+        # 第一优先级：protected + 活跃的消息完整原文
         protected_rows = self.db.query_all(
             "SELECT id,role,content FROM conversations "
             "WHERE session_id=? AND message_type='normal' "
-            "AND protected_from_compression=1 ORDER BY id",
+            f"AND protected_from_compression=1 {active_filter} ORDER BY id",
             (sid,))
         for r in protected_rows:
             if r["role"] in ("user", "assistant"):
                 msgs.append({"role": r["role"], "content": r["content"],
                              "id": r["id"]})
         if summary_text:
-            # Protected Head：已被压缩覆盖的最初几条原文保留不动（水位之前）
             head_rows = self.db.query_all(
                 "SELECT id,role,content FROM conversations WHERE session_id=? "
-                "AND id<=? AND message_type='normal' ORDER BY id LIMIT ?",
+                f"AND id<=? AND message_type='normal' {active_filter} ORDER BY id LIMIT ?",
                 (sid, watermark or 0, head_msgs)) if watermark else []
             for r in head_rows:
                 if r["role"] in ("user", "assistant"):

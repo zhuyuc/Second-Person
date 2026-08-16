@@ -47,6 +47,24 @@ class SessionPinRequest(BaseModel):
     pinned: bool = False
 
 
+def _load_images_as_data_uri(data_dir, filenames: list[str]) -> list[str]:
+    """将已持久化的图片文件名加载为 dataURI，用于编辑消息时继承原图。"""
+    import base64
+    from pathlib import Path
+    out = []
+    img_dir = Path(data_dir) / "chat_images"
+    ext_mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
+    for fname in filenames:
+        p = img_dir / fname
+        if not p.exists():
+            continue
+        mime = ext_mime.get(p.suffix.lower(), "image/png")
+        b64 = base64.b64encode(p.read_bytes()).decode()
+        out.append(f"data:{mime};base64,{b64}")
+    return out or None
+
+
 # client_request_id -> {events, dropped, done, started, finished, size, sid, task}
 _BUFFERS: dict[str, dict] = {}
 BUFFER_TTL = 300        # 生成完成后缓冲保留 5 分钟供断线重连
@@ -128,6 +146,7 @@ async def chat_send(request: Request):
     crid = body.get("client_request_id")
     images = body.get("images") or None
     regen_id = body.get("regenerate_message_id")
+    edit_message_id = body.get("edit_message_id")
     # 浏览器定位（可选）：前端 Geolocation + 逆地理编码后随消息携带
     location = (body.get("location") or "").strip()[:60] or None
     # handoff 摘要附件路径（会话上下文管理方案 v2）
@@ -154,10 +173,71 @@ async def chat_send(request: Request):
     if crid:
         _BUFFERS[crid] = buf
 
-    # 重新生成语义：先删除被重生成的 assistant 回复及其对应用户消息，
-    # 再按正常流程生成（新的一轮重新落库），避免会话里留下重复轮次
-    if regen_id:
-        c.sessions.delete_turn(sid, int(regen_id))
+    # 编辑消息分支化：创建新版本节点，旧版本停用但保留
+    edit_parent_id = None
+    edit_version_group_id = None
+    if edit_message_id:
+        orig = c.db.query_one(
+            "SELECT id, parent_id, version_group_id, images, content FROM conversations WHERE id=?",
+            (int(edit_message_id),))
+        if orig:
+            edit_parent_id = orig["parent_id"]
+            edit_version_group_id = orig["version_group_id"] or orig["id"]
+            # 编辑时继承附件：当前版本可能无附件（修复前创建），
+            # 从同 version_group 所有兄弟版本中查找有附件的记录
+            if not images:
+                img_row = c.db.query_one(
+                    "SELECT images FROM conversations "
+                    "WHERE version_group_id=? AND images IS NOT NULL "
+                    "ORDER BY id LIMIT 1",
+                    (edit_version_group_id,))
+                if img_row and img_row["images"]:
+                    images = _load_images_as_data_uri(
+                        c.sessions.data_dir, json.loads(img_row["images"]))
+            # 编辑时继承文档附件上下文（【附件：...】前缀）
+            att_content = orig["content"] or ""
+            if "\n---\n" not in att_content or "【附件：" not in att_content:
+                att_row = c.db.query_one(
+                    "SELECT content FROM conversations "
+                    "WHERE version_group_id=? AND content LIKE '%【附件：%' "
+                    "ORDER BY id LIMIT 1",
+                    (edit_version_group_id,))
+                if att_row:
+                    att_content = att_row["content"] or ""
+            if "\n---\n" in att_content and "【附件：" in att_content:
+                att_prefix = att_content.rsplit("\n---\n", 1)[0]
+                message = att_prefix + "\n---\n" + message
+            # 同组旧版本停用
+            c.db.execute(
+                "UPDATE conversations SET is_active=0 WHERE version_group_id=?",
+                (edit_version_group_id,))
+            # 旧版本的下游链也需停用
+            siblings = c.db.query_all(
+                "SELECT id FROM conversations WHERE version_group_id=?",
+                (edit_version_group_id,))
+            for sib in siblings:
+                c.sessions._deactivate_downstream(sib["id"])
+
+    # 重新生成分支化：旧回复保留，创建 assistant 兄弟节点
+    regen_parent_id = None
+    regen_version_group_id = None
+    if regen_id and not edit_message_id:
+        orig = c.db.query_one(
+            "SELECT id, parent_id, version_group_id FROM conversations WHERE id=?",
+            (int(regen_id),))
+        if orig:
+            regen_parent_id = orig["parent_id"]
+            regen_version_group_id = orig["version_group_id"] or orig["id"]
+            # 同组旧版本停用
+            c.db.execute(
+                "UPDATE conversations SET is_active=0 WHERE version_group_id=?",
+                (regen_version_group_id,))
+            # 旧版本的下游链也停用
+            siblings = c.db.query_all(
+                "SELECT id FROM conversations WHERE version_group_id=?",
+                (regen_version_group_id,))
+            for sib in siblings:
+                c.sessions._deactivate_downstream(sib["id"])
 
     # 首条消息后异步生成标题
     row = c.db.query_one(
@@ -170,12 +250,23 @@ async def chat_send(request: Request):
         """后台消费 Agent 事件流写入缓冲：SSE 断开不影响生成，
         仅 /chat/cancel（用户手动停止）可取消。"""
         try:
+            # 编辑模式：edit_parent_id/edit_version_group_id 传入管线，
+            # 管线写入用户消息时使用这些字段建立树关系
+            _ep = edit_parent_id
+            _evg = edit_version_group_id
+            # 重新生成模式：用户消息不重写（已存在），只重新生成 assistant 回复
+            # 传入 regen_parent_id 让新 assistant 回复挂到正确的 parent
+            if regen_id and not edit_message_id:
+                _ep = regen_parent_id
+                _evg = regen_version_group_id
             async for evt in c.core.run(sid, message, crid, images=images,
                                         regenerate=bool(regen_id),
                                         regenerate_message_id=regen_id,
                                         location=location,
                                         handoff_path=handoff_path,
-                                        think_mode=think_mode):
+                                        think_mode=think_mode,
+                                        edit_parent_id=_ep,
+                                        edit_version_group_id=_evg):
                 buf["events"].append(evt)
                 buf["size"] += len(json.dumps(evt.get("data", {})))
                 if buf["size"] > BUFFER_MAX:
@@ -195,6 +286,36 @@ async def chat_send(request: Request):
 
     buf["task"] = asyncio.create_task(produce())
     return EventSourceResponse(_follow(buf), ping=5)
+
+
+class SwitchVersionRequest(BaseModel):
+    session_id: str
+    version_group_id: int
+    target_message_id: int
+
+
+@router.post("/chat/switch-version")
+async def switch_version(body: SwitchVersionRequest):
+    """切换消息版本：同组全部停用 → 目标激活 → 递归激活下游链。
+    返回更新后的活跃分支消息列表。"""
+    c = _c()
+    c.sessions.switch_version(body.session_id, body.version_group_id,
+                               body.target_message_id)
+    msgs = c.sessions.get_messages(body.session_id)
+    return {"code": 200, "data": {"messages": msgs}}
+
+
+@router.get("/chat/version-siblings")
+async def version_siblings(version_group_id: int):
+    """返回同一版本组的所有兄弟消息 ID 列表（按创建顺序）。"""
+    c = _c()
+    rows = c.db.query_all(
+        "SELECT id, content, create_time FROM conversations "
+        "WHERE version_group_id=? ORDER BY id",
+        (version_group_id,))
+    return {"code": 200, "data": [
+        {"id": r["id"], "content": (r["content"] or "")[:80],
+         "create_time": r["create_time"]} for r in rows]}
 
 
 @router.post("/chat/cancel")
@@ -255,12 +376,18 @@ async def _gen_title(c, sid: str, message: str):
         if snap:
             async def _call_llm():
                 try:
+                    from infrastructure.json_repair import repair_json
                     resp = await c.llm.chat(snap, [
                         {"role": "system", "content": PROMPTS.load_raw(
                             "app/prompts/title_gen")},
                         {"role": "user", "content": q}], source="title_gen",
-                        session_id=sid)
-                    return resp["content"].strip()[:15]
+                        session_id=sid, json_mode=True)
+                    raw = resp["content"].strip()
+                    try:
+                        obj = repair_json(raw)
+                        return (obj.get("title") or "")[:15]
+                    except (ValueError, AttributeError):
+                        return raw[:15]
                 except Exception:  # noqa: BLE001
                     return None
 

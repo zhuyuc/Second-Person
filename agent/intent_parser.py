@@ -154,6 +154,8 @@ class AttentionFocuser:
                  {"role": "user", "content": user_content}],
                 source="attention_focus",
                 session_id=session_id,
+                json_mode=True,
+                extra_body={"thinking_enabled": False},
             )
             data = repair_json(resp["content"]) or {}
             return FocusResult(
@@ -220,6 +222,8 @@ class GapDetector:
                  {"role": "user", "content": ctx}],
                 source="gap_detect",
                 session_id=session_id,
+                json_mode=True,
+                extra_body={"thinking_enabled": False},
             )
             data = repair_json(resp["content"]) or {}
             return GapResult(
@@ -292,6 +296,8 @@ class IntentParser:
                  {"role": "user", "content": user_content}],
                 source="quick_intent",
                 session_id=session_id,
+                json_mode=True,
+                extra_body={"thinking_enabled": False},
             )
             data = repair_json(resp["content"]) or {}
             result = QuickIntentResult(
@@ -382,6 +388,8 @@ class IntentParser:
                  {"role": "user", "content": user_content}],
                 source="converge_intent",
                 session_id=session_id,
+                json_mode=True,
+                extra_body={"thinking_enabled": False},
             )
             data = repair_json(resp["content"]) or {}
             intents = self._to_intents(data)
@@ -441,7 +449,8 @@ class IntentParser:
 
             try:
                 resp = await self.llm.chat(snap, messages,
-                                           source="intent_parse", session_id=session_id)
+                                           source="intent_parse", session_id=session_id,
+                                           json_mode=True)
                 raw_content = resp["content"]
                 data = repair_json(raw_content)
                 result = self._to_intents(data)
@@ -529,7 +538,8 @@ class IntentParser:
                 itype = "chat"
             raw_conf = it.get("confidence")
             try:
-                conf = max(0.0, min(1.0, float(raw_conf))) if raw_conf is not None else 1.0
+                conf = max(0.0, min(1.0, float(raw_conf))
+                           ) if raw_conf is not None else 1.0
             except (TypeError, ValueError):
                 conf = 1.0
             out.append(Intent(

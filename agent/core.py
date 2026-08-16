@@ -244,6 +244,7 @@ class AgentCore:
         # 每会话进行中的流式增量（正文 buf + 思考 think_parts）：
         # 任意阶段被取消时由 _pipeline 外层统一落库补救（会话锁保证单飞）
         self._turn_partials: dict[str, dict] = {}
+        self._pending_low_confirm: dict | None = None
 
     # ---- 主入口：SSE 事件流（队列驱动，支持工具执行中途 emit） ------------
     async def run(self, session_id: str, message: str,
@@ -253,7 +254,9 @@ class AgentCore:
                   location: str | None = None,
                   regenerate_message_id: str | None = None,
                   handoff_path: str | None = None,
-                  think_mode: str = "auto") -> AsyncIterator[dict]:
+                  think_mode: str = "auto",
+                  edit_parent_id: int | None = None,
+                  edit_version_group_id: int | None = None) -> AsyncIterator[dict]:
         limit = self.config.get("session_queue_limit", 3)
         if self._session_queue[session_id] >= limit:
             yield {"event": "error", "data": {"code": 429, "message": "会话繁忙，请稍后再试"}}
@@ -278,14 +281,19 @@ class AgentCore:
                                        regenerate, location,
                                        regenerate_message_id,
                                        handoff_path=handoff_path,
-                                       think_mode=think_mode),
+                                       think_mode=think_mode,
+                                       edit_parent_id=edit_parent_id,
+                                       edit_version_group_id=edit_version_group_id),
                         timeout=600)
                 except asyncio.TimeoutError:
                     logger.warning("请求超时（600s）：session=%s", session_id)
                     await emit("error", {"code": 504, "message": "处理超时，请重试"})
                 except Exception as e:  # noqa: BLE001
                     logger.exception("流水线异常")
-                    await emit("error", {"code": 500, "message": str(e)})
+                    raw = str(e)
+                    if len(raw) > 120:
+                        raw = raw[:120]
+                    await emit("error", {"code": 500, "message": raw})
                 finally:
                     self._session_queue[session_id] -= 1
                     await queue.put(_SENTINEL)
@@ -310,7 +318,9 @@ class AgentCore:
                         regenerate=False, location=None,
                         regenerate_message_id: str | None = None,
                         handoff_path: str | None = None,
-                        think_mode: str = "auto") -> None:
+                        think_mode: str = "auto",
+                        edit_parent_id: int | None = None,
+                        edit_version_group_id: int | None = None) -> None:
         """包一层 Langfuse trace，内部实现不变（步骤 span 在 _pipeline_impl 中）。"""
         tracer = get_tracer()
         trace = tracer.trace_start(
@@ -325,7 +335,9 @@ class AgentCore:
         try:
             await self._pipeline_impl(sid, message, emit, trace, images,
                                       regenerate, location,
-                                      think_mode=think_mode)
+                                      think_mode=think_mode,
+                                      edit_parent_id=edit_parent_id,
+                                      edit_version_group_id=edit_version_group_id)
         except asyncio.CancelledError:
             # 中断补救统一在此（覆盖思考/工具/合成所有阶段）：手动停止、
             # 超时取消时把已流式产出部分（哪怕只有思考过程）落库标注未完成，
@@ -335,6 +347,9 @@ class AgentCore:
                 self._save_partial_reply(sid, st["buf"], st["think_parts"])
             raise
         except Exception as e:  # noqa: BLE001
+            st = self._turn_partials.pop(sid, None)
+            if st:
+                self._save_partial_reply(sid, st["buf"], st["think_parts"])
             trace.update(metadata={"internal_trace_id": get_trace_id(),
                                    "images": len(images) if images else 0,
                                    "regenerate": regenerate,
@@ -346,7 +361,9 @@ class AgentCore:
 
     async def _pipeline_impl(self, sid: str, message: str, emit, trace,
                              images=None, regenerate=False, location=None,
-                             think_mode: str = "auto") -> None:
+                             think_mode: str = "auto",
+                             edit_parent_id: int | None = None,
+                             edit_version_group_id: int | None = None) -> None:
         tracer = get_tracer()
         onboarding = not self.config.get_raw("onboarding_completed", False)
         _start_time = time.monotonic()
@@ -381,7 +398,9 @@ class AgentCore:
         # 图片落盘含 base64 解码 + 写盘（可达数十毫秒），丢工作线程避免阻塞事件循环
         persisted_imgs = await asyncio.to_thread(self._persist_images, images)
         user_msg_id = self.sessions.append_message(
-            sid, "user", message, images=persisted_imgs)
+            sid, "user", message, images=persisted_imgs,
+            parent_id=edit_parent_id,
+            version_group_id=edit_version_group_id)
 
         # v2 情绪触发检测（规则通道，零 LLM）：在意图识别前采集本轮触发事件
         self._detect_emotion_triggers(sid, message, user_msg_id)
@@ -1077,16 +1096,32 @@ class AgentCore:
                     doc_only = False
                     shared.deferred_docs.clear()
                 raw = "".join(buf)
+                raw = rs.strip_tool_call_blocks(raw)
                 # 建议句解析：从 LLM 输出中分离正文与分隔符后的建议句
                 raw, _suggestion_text = parse_suggestion(raw)
                 _next_step_shown = None
                 if _suggestion_text:
                     _next_step_shown = {"text": _suggestion_text}
-                assistant_text, citations = rs.extract_citations(
+                # 兼容旧格式：若 LLM 仍输出了嵌入式 citations JSON，先剥离
+                assistant_text, legacy_citations = rs.extract_citations(
                     raw, valid_ids)
-                # low 待确认声明：用户在本轮明确确认/否认早前推断 → 升级/记录
+                # 确定性引用检测：基于内容匹配判断实际引用
+                detected = rs.detect_citations(assistant_text, memories)
+                # 合并：旧格式优先（保序），再追加确定性检测的增量
+                seen = set(legacy_citations)
+                citations = list(legacy_citations)
+                for mid in detected:
+                    if mid not in seen:
+                        seen.add(mid)
+                        citations.append(mid)
+                # 兼容旧格式：若 LLM 仍输出了嵌入式 memory_confirm JSON，先剥离
                 assistant_text, mem_confirm = rs.extract_memory_confirm(
                     assistant_text)
+                # 确定性检测：基于关键词匹配判断用户确认/否认
+                if not mem_confirm:
+                    _low_cand = getattr(self, "_pending_low_confirm", None)
+                    mem_confirm = rs.detect_memory_confirm(
+                        message, assistant_text, _low_cand)
                 if mem_confirm:
                     try:
                         await self.lifecycle.confirm_low(
@@ -1214,7 +1249,9 @@ class AgentCore:
                                                   skeleton_snapshot=(
                                                       skeleton.to_dict()
                                                       if skeleton else None),
-                                                  next_step_shown=_next_step_shown)
+                                                  next_step_shown=_next_step_shown,
+                                                  parent_id=user_msg_id)
+            self._turn_partials.pop(sid, None)
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
                                                      message, onboarding, user_msg_id=user_msg_id, intents=intents)
             _sp.end(output={"message_id": msg_id, "cited": cited_ids,
@@ -2188,7 +2225,8 @@ class AgentCore:
                    PROMPTS.load_raw("agent/prompts/replan")},
                   {"role": "user", "content":
                    f"意图：{intent_summary}\n失败工具：{tool_name}\n错误：{error}"}]
-        resp = await self.llm.chat(snap, prompt, source="replan", session_id=sid)
+        resp = await self.llm.chat(snap, prompt, source="replan", session_id=sid,
+                                   json_mode=True)
         return repair_json(resp["content"])
 
     async def _memory_save_params(self, message: str, sid: str | None = None) -> dict:
@@ -2202,7 +2240,8 @@ class AgentCore:
             prompt = [{"role": "system",
                        "content": PROMPTS.load_raw("agent/prompts/memory_card")},
                       {"role": "user", "content": message}]
-            resp = await self.llm.chat(snap, prompt, source="system_agent", session_id=sid)
+            resp = await self.llm.chat(snap, prompt, source="system_agent",
+                                       session_id=sid, json_mode=True)
             data = repair_json(resp["content"]) or {}
             title = str(data.get("title") or "").strip()
             summary = str(data.get("summary") or "").strip()
@@ -2241,9 +2280,14 @@ class AgentCore:
                     snap, [{"role": "system", "content":
                             PROMPTS.load_raw("agent/prompts/format_scenario")},
                            {"role": "user", "content": question}],
-                    source="intent", session_id=sid)
-                scenario = (resp.get("content")
-                            or "").strip().strip('"\'`')[:12]
+                    source="intent", session_id=sid, json_mode=True)
+                raw = (resp.get("content") or "").strip()
+                try:
+                    from infrastructure.json_repair import repair_json
+                    obj = repair_json(raw)
+                    scenario = (obj.get("scenario") or "")[:12]
+                except (ValueError, AttributeError):
+                    scenario = raw.strip('"\'`')[:12]
             except Exception:  # noqa: BLE001
                 logger.warning("格式绑定场景提取失败，回退意图摘要", exc_info=True)
         if not scenario:
@@ -2618,12 +2662,11 @@ class AgentCore:
         cand = self.lifecycle.next_low_confirm_candidate()
         if cand:
             self.lifecycle.mark_low_confirm_asked(cand["id"])
+            self._pending_low_confirm = cand
             parts.append(
                 f"（本轮回复末尾请自然地向用户确认一条早前的推断是否属实："
                 f"「{cand['title']}——{cand.get('summary') or ''}」。"
-                f"若用户在本轮消息中已明确表态，则在回复最末尾另起一行输出 "
-                f'{{"memory_confirm":{{"id":"{cand["id"]}","confirmed":true或false}}}} '
-                f"声明；用户未表态则不输出该声明。）")
+                f"无需输出任何 JSON 声明，用自然语言确认即可。）")
         # draft 技能待确认：AI 主动向用户提议启用
         try:
             drafts = self.skills.list_drafts()
@@ -2885,7 +2928,8 @@ class AgentCore:
                 user_message=str(user_msg or "")[:800],
                 assistant_reply=str(ai_reply or "")[:800])}]
 
-            resp = await self.llm.chat(snap, prompt, source="mood", session_id=sid)
+            resp = await self.llm.chat(snap, prompt, source="mood", session_id=sid,
+                                      json_mode=True)
             data = repair_json(resp["content"]) or {}
 
             result = self.mood.apply_v2(

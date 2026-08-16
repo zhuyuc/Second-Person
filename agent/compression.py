@@ -121,7 +121,7 @@ class Compressor:
                   {"role": "user", "content": convo}]
         try:
             resp = await self.llm.chat(snap, prompt, source="system_agent",
-                                       session_id=session_id)
+                                       session_id=session_id, json_mode=True)
             summary = repair_json(resp["content"])
             return (summary, True) if isinstance(summary, dict) and summary \
                 else (None, False)

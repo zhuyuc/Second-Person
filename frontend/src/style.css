@@ -132,8 +132,8 @@
         --bd: rgba(255, 255, 255, .06);
         --bd-strong: rgba(255, 255, 255, .11);
         --fg: #f3f3f3;
-        --sec: #a0a0a5;
-        --muted: #6e6e73;
+        --sec: #b0b0b5;
+        --muted: #7a7a80;
         --succbg: #0f2a1c;
         --succtx: #5fd08a;
         --warnbg: #2c2410;
@@ -467,19 +467,21 @@ a:hover {
 }
 
 h1 {
-    font-size: 20px;
-    font-weight: 600;
-    margin-bottom: 20px
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -.01em;
+    line-height: 1.3;
+    margin-bottom: var(--sp-5)
 }
 
 /* ---- Tabs ---- */
 .tabs {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     margin-bottom: 24px;
     flex-wrap: wrap;
     background: var(--surface-2);
-    padding: 5px;
+    padding: 4px;
     border-radius: var(--radius-pill);
     width: fit-content;
     max-width: 100%
@@ -491,8 +493,8 @@ h1 {
     top: -28px;
     z-index: var(--z-sticky);
     background: var(--bg);
-    padding: 8px 0 10px;
-    margin-bottom: 14px
+    padding: var(--sp-2) 0 var(--sp-3);
+    margin-bottom: var(--sp-4)
 }
 
 .tabs-sticky .tabs {
@@ -500,15 +502,16 @@ h1 {
 }
 
 .tab {
-    padding: 8px 18px;
+    padding: 7px 16px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: var(--fs-base);
     font-weight: 500;
     color: var(--sec);
     background: none;
     border: none;
     border-radius: var(--radius-pill);
-    transition: var(--dur-fast)
+    transition: color var(--dur-fast), background var(--dur-fast), box-shadow var(--dur-fast);
+    line-height: 1.4
 }
 
 .tab:hover {
@@ -517,6 +520,7 @@ h1 {
 
 .tab.active {
     color: var(--acctx);
+    font-weight: 600;
     background: var(--surface);
     box-shadow: var(--shadow-1)
 }
@@ -526,10 +530,10 @@ h1 {
 .cw {
     background: var(--surface);
     border-radius: var(--radius);
-    padding: 18px 22px;
-    margin-bottom: 14px;
+    padding: var(--sp-4) var(--sp-5);
+    margin-bottom: var(--sp-4);
     border: 1px solid var(--bd);
-    transition: border-color .18s, box-shadow .18s
+    transition: border-color var(--dur-fast), box-shadow var(--dur-fast)
 }
 
 .cw:hover {
@@ -546,39 +550,44 @@ h1 {
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    gap: 8px
+    gap: var(--sp-2)
 }
 
 .fg {
     display: flex;
     align-items: center;
-    gap: 8px
+    gap: var(--sp-2)
 }
 
 .label {
-    font-size: 12px;
+    font-size: var(--fs-sm);
     color: var(--muted);
-    margin-bottom: 5px;
-    font-weight: 500
+    margin-bottom: var(--sp-2);
+    font-weight: 500;
+    letter-spacing: .02em
 }
 
 .val {
-    font-size: 22px;
-    font-weight: 600;
-    color: var(--fg)
+    font-size: var(--fs-3xl);
+    font-weight: 700;
+    color: var(--fg);
+    line-height: 1.2;
+    margin-bottom: var(--sp-1)
 }
 
 .muted {
-    font-size: 12px;
-    color: var(--muted)
+    font-size: var(--fs-sm);
+    color: var(--muted);
+    line-height: 1.5
 }
 
 .badge {
-    font-size: 11px;
+    font-size: var(--fs-xs);
     padding: 3px 10px;
     border-radius: var(--radius-pill);
     display: inline-block;
-    font-weight: 600
+    font-weight: 600;
+    line-height: 1.3
 }
 
 .badge-g {
@@ -609,19 +618,19 @@ h1 {
 .g2 {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 14px
+    gap: var(--sp-3)
 }
 
 .g3 {
     display: grid;
     grid-template-columns: 1fr 1fr 1fr;
-    gap: 14px
+    gap: var(--sp-3)
 }
 
 .g4 {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 14px
+    gap: var(--sp-4)
 }
 
 .dot {
@@ -634,7 +643,7 @@ h1 {
 
 .sep {
     border-top: 1px solid var(--bd);
-    margin: 20px 0
+    margin: var(--sp-5) 0
 }
 
 .dang {
@@ -1234,6 +1243,10 @@ code {
     opacity: 1
 }
 
+.msg-user:hover .msg-actions i {
+    opacity: 1
+}
+
 .status-chip {
     display: inline-flex;
     align-items: center;
@@ -1423,7 +1436,7 @@ code {
     position: sticky;
     bottom: 20px;
     /* 负上边距抵消自身高度：按钮出现/消失不改变 scrollHeight，
-       避免与 atBottom 判定形成“按钮显隐↔滚动高度变化”的振荡闪烁 */
+       避免与 atBottom 判定形成"按钮显隐↔滚动高度变化"的振荡闪烁 */
     margin: -38px auto 0;
     z-index: var(--z-sticky);
     width: 38px;
@@ -1620,9 +1633,9 @@ code {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
-    margin-bottom: 2px;
-    font-size: 11px;
+    padding: 8px 12px;
+    margin-bottom: 4px;
+    font-size: 11.5px;
     font-weight: 600;
     letter-spacing: .04em;
     text-transform: uppercase;
@@ -1674,11 +1687,33 @@ code {
 }
 
 .sess-item {
-    padding: 11px 14px;
-    border-radius: 12px;
+    padding: 7px 12px;
+    border-radius: 10px;
     cursor: pointer;
-    margin-bottom: 3px;
+    margin-bottom: 0;
     transition: var(--dur-fast)
+}
+
+.sess-icon {
+    font-size: 16px;
+    color: var(--muted);
+    flex-shrink: 0;
+    opacity: .65
+}
+
+.sess-item.active .sess-icon {
+    color: var(--acctx);
+    opacity: 1
+}
+
+.sess-title {
+    font-size: var(--fs-base);
+    font-weight: 500;
+    line-height: 1.45;
+    letter-spacing: .01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis
 }
 
 .sess-item:hover {
@@ -1694,14 +1729,19 @@ code {
 }
 
 .sess-dots {
-    font-size: 16px;
+    font-size: 15px;
     color: var(--muted);
     flex-shrink: 0;
-    padding: 2px;
+    padding: 3px;
     border-radius: 6px;
     cursor: pointer;
     opacity: 0;
     transition: var(--dur-fast)
+}
+
+.sess-dots:hover {
+    background: var(--surface-2);
+    color: var(--fg)
 }
 
 .sess-item:hover .sess-dots {
@@ -1716,7 +1756,7 @@ code {
     position: absolute;
     right: 8px;
     top: 34px;
-    /* 必须高于“点击外部关闭”的全屏遮罩（var(--z-menu)），否则同层级时遮罩 DOM 靠后会盖住菜单，
+    /* 必须高于"点击外部关闭"的全屏遮罩（var(--z-menu)），否则同层级时遮罩 DOM 靠后会盖住菜单，
        导致菜单项点击全部被遮罩吞掉（删除/重命名/置顶失效） */
     z-index: calc(var(--z-menu) + 1);
     background: var(--surface);
@@ -1833,54 +1873,14 @@ code {
 
 /* ---- 知识图谱 ---- */
 .kg-wrap {
+    position: relative;
     background: radial-gradient(circle at 50% 40%, var(--surface) 0%, var(--surface-2) 100%);
     border: 1px solid var(--bd);
     border-radius: var(--radius);
-    padding: 12px;
     box-shadow: var(--shadow-1);
-    /* 工具栏移除、说明压缩为单行、图例收纳单行后，图谱尽量充满可视区域（仅预留标题/Tab/单行说明/单行图例高度） */
     height: calc(100vh - 228px);
-    min-height: 460px
-}
-
-.kg-svg {
-    width: 100%;
-    height: 100%;
-    display: block
-}
-
-.kg-edge {
-    fill: none;
-    /* stroke 颜色由 SvgGraph 三态逻辑内联控制，不得在此覆盖（CSS 规则会压过 SVG 属性） */
-    stroke-linecap: round;
-    transition: opacity .2s, stroke-width .2s, stroke .2s
-}
-
-.kg-node {
-    cursor: pointer;
-    transition: opacity .2s
-}
-
-.kg-node circle {
-    transition: filter .2s
-}
-
-.kg-count {
-    fill: var(--surface);
-    font-size: 10px;
-    font-weight: 600;
-    pointer-events: none
-}
-
-.kg-label {
-    fill: var(--sec);
-    font-size: 12px;
-    font-weight: 400;
-    pointer-events: none;
-    paint-order: stroke;
-    stroke: var(--surface);
-    stroke-width: 3px;
-    stroke-linejoin: round
+    min-height: 460px;
+    overflow: hidden
 }
 
 /* ---- 知识库文档上传 ---- */
@@ -1990,21 +1990,67 @@ button.btn-danger:hover {
     border-color: var(--dangbg)
 }
 
-/* ---- 分组标题（唯一标准：卡片/区块级标题统一用它，替代散落的内联 font-weight 标题） ---- */
-.section-title {
+/* ---- 参数项（设置页 schema 驱动的配置行） ---- */
+.param-item {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--sp-4);
+    padding: var(--sp-3) var(--sp-4);
+    margin: 0 calc(-1 * var(--sp-4));
+    border-radius: var(--radius-xs);
+    transition: background var(--dur-fast)
+}
+
+.param-item:not(:last-child) {
+    border-bottom: 1px solid var(--bd)
+}
+
+.param-item:hover {
+    background: var(--surface-2)
+}
+
+.param-item .param-label {
     font-size: var(--fs-md);
     font-weight: 600;
     color: var(--fg);
+    line-height: 1.4
+}
+
+.param-item .param-desc {
+    font-size: var(--fs-sm);
+    color: var(--sec);
+    margin-top: 3px;
+    line-height: 1.55
+}
+
+.param-item .param-effect {
+    font-size: var(--fs-xs);
+    color: var(--muted);
+    margin-top: 3px
+}
+
+.param-item .param-ctrl {
+    flex-shrink: 0;
+    padding-top: 2px
+}
+
+/* ---- 分组标题（唯一标准：卡片/区块级标题统一用它，替代散落的内联 font-weight 标题） ---- */
+.section-title {
+    font-size: var(--fs-lg);
+    font-weight: 600;
+    color: var(--fg);
+    letter-spacing: -.005em;
     margin-bottom: var(--sp-3)
 }
 
 .section-title.mt {
-    margin-top: var(--sp-5)
+    margin-top: var(--sp-6)
 }
 
 /* 带强调色的子区标题（如用户画像 区一/区二/区三） */
 .section-sub {
-    font-size: var(--fs-base);
+    font-size: var(--fs-md);
     font-weight: 600;
     color: var(--acctx);
     margin-bottom: var(--sp-3)
@@ -2130,6 +2176,306 @@ button.btn-danger:hover {
     margin-bottom: var(--sp-4)
 }
 
+/* ---- 记忆中心：通用组件类（消除 MemoryView 高频内联 style） ---- */
+
+/* 筛选/操作工具条：水平排列、换行、底部间距统一 */
+.filter-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    margin-bottom: var(--sp-3);
+    flex-wrap: wrap
+}
+
+/* 可点击列表行：统一 cursor + 标题加粗 */
+.list-row {
+    cursor: pointer
+}
+
+.list-row .list-title {
+    font-size: var(--fs-md);
+    font-weight: 500;
+    line-height: 1.45
+}
+
+.list-row .list-sub {
+    color: var(--sec);
+    font-size: var(--fs-sm);
+    line-height: 1.5;
+    margin-top: 2px
+}
+
+/* 时间线日期分组标题 */
+.tl-day {
+    font-weight: 600;
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    margin: var(--sp-4) 0 var(--sp-2);
+    letter-spacing: .01em
+}
+
+/* 时间线行内摘要（截断） */
+.tl-summary {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--muted);
+    font-size: var(--fs-sm)
+}
+
+/* 画像区 section-sub 旁的操作行 */
+.section-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--sp-3)
+}
+
+.section-row .section-sub {
+    margin-bottom: 0
+}
+
+/* 弹窗/卡片底部操作栏 */
+.action-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--sp-2);
+    margin-top: var(--sp-4)
+}
+
+/* 带左侧彩线的待确认/警告卡片 */
+.card-warn {
+    border: 1px solid var(--warntx);
+    background: var(--warnbg);
+    border-left: 3px solid var(--warntx)
+}
+
+.card-warn > b {
+    color: var(--warntx)
+}
+
+/* 待确认条目行 */
+.pending-item {
+    margin-top: var(--sp-2);
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid rgba(196, 127, 17, .15)
+}
+
+.pending-item:last-child {
+    border-bottom: none
+}
+
+.pending-item .pending-trigger {
+    font-size: var(--fs-sm);
+    color: var(--muted);
+    line-height: 1.5
+}
+
+.pending-item .pending-proposal {
+    font-size: var(--fs-base);
+    color: var(--fg);
+    margin-top: 2px;
+    line-height: 1.5
+}
+
+/* 画像维度预览卡片的标题行 */
+.dim-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2)
+}
+
+.dim-header b {
+    font-size: var(--fs-md)
+}
+
+/* 版本历史行 */
+.version-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    padding: var(--sp-3) 0;
+    border-bottom: 1px solid var(--bd)
+}
+
+.version-row:first-of-type {
+    margin-top: var(--sp-2)
+}
+
+.version-row:last-child {
+    border-bottom: none
+}
+
+.version-row b {
+    font-size: var(--fs-md)
+}
+
+/* 健康度扣分明细 */
+.score-breakdown {
+    margin-top: var(--sp-3);
+    font-size: var(--fs-xs);
+    line-height: 1.6
+}
+
+.score-breakdown > div {
+    color: var(--warntx)
+}
+
+/* cw 内区块标题（Lint 检查明细、孤立检测等） */
+.cw-heading {
+    font-size: var(--fs-md);
+    font-weight: 600;
+    margin-bottom: var(--sp-2);
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2)
+}
+
+.cw-heading .muted {
+    font-weight: 400
+}
+
+/* 可操作 Lint 建议行 */
+.lint-sug-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-3) var(--sp-3);
+    border-bottom: 1px solid var(--bd);
+    border-radius: var(--radius-sm);
+    transition: background var(--dur-fast)
+}
+
+.lint-sug-row:last-child {
+    border-bottom: none
+}
+
+.lint-sug-row:hover {
+    background: var(--surface-2)
+}
+
+.lint-sug-row .lint-sug-label {
+    flex: 1;
+    min-width: 0;
+    color: var(--sec);
+    font-size: var(--fs-base);
+    line-height: 1.5;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap
+}
+
+.lint-sug-row .lint-sug-actions {
+    display: flex;
+    gap: var(--sp-2);
+    flex-shrink: 0
+}
+
+/* 文档/目录列表行 */
+.doc-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3)
+}
+
+.doc-row .doc-name {
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis
+}
+
+.doc-row .doc-meta {
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    margin-top: var(--sp-1)
+}
+
+/* 目录行（带底边框分隔） */
+.dir-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-3);
+    padding: var(--sp-3) 0;
+    border-bottom: 1px solid var(--bd)
+}
+
+.dir-row:last-child {
+    border-bottom: none
+}
+
+/* 对比弹窗双栏内的元数据标签行 */
+.compare-meta {
+    display: flex;
+    gap: var(--sp-1);
+    margin-bottom: var(--sp-2);
+    flex-wrap: wrap;
+    font-size: var(--fs-xs);
+    align-items: center
+}
+
+/* 对比弹窗内的内容正文 */
+.compare-body {
+    color: var(--sec);
+    font-size: var(--fs-base);
+    line-height: 1.7;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+    flex: 1;
+    margin: 0
+}
+
+/* 引用/变更历史滚动区 */
+.history-scroll {
+    max-height: 180px;
+    overflow-y: auto;
+    margin-bottom: var(--sp-3)
+}
+
+/* 引用记录行 */
+.citation-row {
+    display: flex;
+    gap: var(--sp-2);
+    padding: var(--sp-2) 0;
+    font-size: var(--fs-base);
+    border-bottom: 1px solid var(--bd);
+    align-items: center
+}
+
+.citation-row .citation-title {
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis
+}
+
+/* pre 代码块（弹窗内正文预览） */
+.pre-block {
+    white-space: pre-wrap;
+    max-height: 280px;
+    overflow: auto;
+    margin-bottom: var(--sp-3);
+    background: var(--surface-2);
+    padding: var(--sp-3) var(--sp-4);
+    border-radius: var(--radius-sm);
+    font-family: var(--mono);
+    font-size: var(--fs-sm)
+}
+
+/* 画像样式段落的段标题 */
+.style-section-label {
+    font-weight: 500;
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    margin-bottom: var(--sp-1)
+}
+
 /* ---- 焦点可见性（可访问性：自研可点击元素补键盘焦点环） ---- */
 .tab:focus-visible,
 .chip:focus-visible,
@@ -2167,4 +2513,99 @@ button .ti-loader-2 {
     .main {
         padding: 20px 18px
     }
+}
+
+/* ---- 版本翻页器（编辑/重新生成分支导航） ---- */
+.version-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-bottom: 4px;
+    font-size: var(--fs-sm)
+}
+
+.ver-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--sec);
+    cursor: pointer;
+    padding: 0;
+    transition: background var(--dur-fast), color var(--dur-fast)
+}
+
+.ver-btn:hover:not(:disabled) {
+    background: var(--surface-2);
+    color: var(--fg)
+}
+
+.ver-btn:disabled {
+    opacity: 0.3;
+    cursor: default
+}
+
+.ver-indicator {
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    font-size: 12px;
+    min-width: 32px;
+    text-align: center
+}
+
+/* ---- 消息编辑态 ---- */
+.edit-textarea {
+    width: 100%;
+    resize: vertical;
+    border: 1.5px solid var(--brand-solid);
+    border-radius: var(--radius-sm);
+    padding: 10px 14px;
+    font-size: 15px;
+    font-family: inherit;
+    line-height: 1.6;
+    background: var(--surface-1);
+    color: var(--fg);
+    outline: none;
+    max-height: 200px;
+    box-sizing: border-box
+}
+
+.edit-textarea:focus {
+    border-color: var(--brand-solid);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-solid) 20%, transparent)
+}
+
+.edit-submit-btn {
+    padding: 5px 14px;
+    border-radius: var(--radius-sm);
+    border: none;
+    background: var(--brand-solid);
+    color: #fff;
+    font-size: var(--fs-sm);
+    cursor: pointer;
+    font-weight: 500;
+    transition: opacity var(--dur-fast)
+}
+
+.edit-submit-btn:hover {
+    opacity: 0.85
+}
+
+.edit-cancel-btn {
+    padding: 5px 14px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--bd);
+    background: transparent;
+    color: var(--sec);
+    font-size: var(--fs-sm);
+    cursor: pointer;
+    transition: background var(--dur-fast)
+}
+
+.edit-cancel-btn:hover {
+    background: var(--surface-2)
 }

@@ -113,6 +113,7 @@ class MetaCognitiveProtocol:
              {"role": "user", "content": user_content}],
             source="meta_cognitive",
             session_id=session_id,
+            json_mode=True,
         )
         data = repair_json(resp["content"])
         if not isinstance(data, dict):

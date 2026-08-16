@@ -55,7 +55,7 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
             f"[{i+1}] {m['title']}（id={m['id']}）：{m.get('detail', m.get('summary', ''))}"
             for i, m in enumerate(memories))
         ctx_parts.append(
-            "已检索到的相关记忆（若用到其中任何一条，必须在回复末尾声明 citations）：\n" + mem_txt)
+            "已检索到的相关记忆（可直接引用其中的事实、偏好或背景）：\n" + mem_txt)
     # 会话上下文检索：按 token 预算语义边界截断
     if conversation_context:
         _budget = 12000  # ~3000 tokens
@@ -127,6 +127,13 @@ def _strip_empty_fences(text: str) -> str:
     return re.sub(r"```[a-zA-Z]*\s*```", "", text).rstrip()
 
 
+def strip_tool_call_blocks(text: str) -> str:
+    """Strip inline tool-call markup that the model sometimes emits."""
+    text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<工具调用>[\s\S]*?</工具调用>", "", text)
+    return text.strip()
+
+
 def strip_mermaid_blocks(text: str) -> str:
     """Strip Mermaid code blocks from response text.
 
@@ -143,7 +150,7 @@ def strip_mermaid_blocks(text: str) -> str:
 
 
 def extract_citations(text: str, valid_ids: set[str]) -> tuple[str, list[str]]:
-    """从回复中提取 citations JSON 声明，返回 (去除声明后的正文, 有序去重的 memory_id)。"""
+    """从回复中提取 citations JSON 声明（兼容旧格式），返回 (去除声明后的正文, 有序去重的 memory_id)。"""
     m = re.search(r'\{\s*"citations"\s*:\s*\[(.*?)\]\s*\}', text, flags=re.S)
     cites: list[str] = []
     if m:
@@ -158,8 +165,49 @@ def extract_citations(text: str, valid_ids: set[str]) -> tuple[str, list[str]]:
     return text, cites
 
 
+def _tokenize_for_match(text: str) -> set[str]:
+    """提取文本中 ≥2 字符的中文/英文词用于引用匹配。"""
+    tokens: set[str] = set()
+    for seg in re.findall(r'[一-鿿]{2,}', text):
+        for i in range(len(seg) - 1):
+            tokens.add(seg[i:i + 2])
+    for word in re.findall(r'[a-zA-Z0-9_]{3,}', text.lower()):
+        tokens.add(word)
+    return tokens
+
+
+def detect_citations(response_text: str, memories: list[dict]) -> list[str]:
+    """确定性引用检测：通过内容匹配判断回复实际引用了哪些记忆。
+
+    对每条记忆，从 title+summary+detail 提取关键词，计算在回复中的命中率。
+    命中率超过阈值则视为引用。返回按匹配强度排序的 memory_id 列表。"""
+    if not memories or not response_text:
+        return []
+    resp_tokens = _tokenize_for_match(response_text)
+    resp_lower = response_text.lower()
+    scored: list[tuple[str, float]] = []
+    for mem in memories:
+        mid = mem.get("id", "")
+        title = mem.get("title", "")
+        summary = mem.get("summary", "")
+        detail = mem.get("detail", "")
+        source_text = f"{title} {summary} {detail}"
+        mem_tokens = _tokenize_for_match(source_text)
+        if not mem_tokens:
+            continue
+        hits = mem_tokens & resp_tokens
+        ratio = len(hits) / len(mem_tokens)
+        title_in_resp = title and title in response_text
+        if title_in_resp:
+            ratio = max(ratio, 0.5)
+        if ratio >= 0.3:
+            scored.append((mid, ratio))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [mid for mid, _ in scored]
+
+
 def extract_memory_confirm(text: str) -> tuple[str, dict | None]:
-    """从回复中提取 memory_confirm 声明（low 待确认记忆的对话确认结果）。
+    """从回复中提取 memory_confirm 声明（兼容旧格式 JSON 嵌入）。
     返回 (去除声明后的正文, {"id":..., "confirmed": bool} | None)。"""
     m = re.search(
         r'\{\s*"memory_confirm"\s*:\s*\{\s*"id"\s*:\s*"(mem_\w+)"\s*,\s*'
@@ -169,6 +217,42 @@ def extract_memory_confirm(text: str) -> tuple[str, dict | None]:
     text = (text[:m.start()].rstrip() + text[m.end():]).rstrip()
     text = _strip_empty_fences(text)
     return text, {"id": m.group(1), "confirmed": m.group(2) == "true"}
+
+
+_CONFIRM_WORDS = re.compile(
+    r"确认|是的|没错|对的|属实|正确|确实|嗯是|对啊|是啊|记得没错|"
+    r"confirmed|yes|right|correct", re.I)
+_DENY_WORDS = re.compile(
+    r"不是|不对|不准确|有误|不太对|已经变了|不再是|不确定|记错了|"
+    r"不正确|否认|denied|no|wrong|incorrect", re.I)
+
+
+def detect_memory_confirm(
+    user_message: str, response_text: str,
+    candidate: dict | None,
+) -> dict | None:
+    """确定性检测用户对 low 待确认记忆的确认/否认。
+
+    基于用户消息和 AI 回复中的关键词匹配判断：
+    - 用户消息含确认词 → confirmed=True
+    - 用户消息含否认词 → confirmed=False
+    - AI 回复中引用了记忆标题且含确认/否认语境 → 相应判定
+    - 无法判定 → 返回 None（不做处理，等下轮再问）
+    """
+    if not candidate:
+        return None
+    mid = candidate.get("id", "")
+    title = candidate.get("title", "")
+    if not mid:
+        return None
+    combined = f"{user_message} {response_text}"
+    has_confirm = bool(_CONFIRM_WORDS.search(combined))
+    has_deny = bool(_DENY_WORDS.search(combined))
+    if has_confirm and not has_deny:
+        return {"id": mid, "confirmed": True}
+    if has_deny and not has_confirm:
+        return {"id": mid, "confirmed": False}
+    return None
 
 
 def collect_signal_shape(content: str) -> dict:

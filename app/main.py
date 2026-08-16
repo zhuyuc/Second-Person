@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from infrastructure.config_manager import ConfigError
@@ -113,6 +113,11 @@ def create_app(data_dir: str | Path) -> FastAPI:
     img_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/chat-images", StaticFiles(directory=str(img_dir)),
               name="chat_images")
+
+    # 浏览器默认探测 /favicon.ico，统一重定向到 favicon.svg，避免 404 噪音
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon():
+        return RedirectResponse(url="/favicon.svg")
 
     # 静态前端（构建产物）
     static_dir = Path(__file__).parent / "static"

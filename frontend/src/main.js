@@ -5,7 +5,7 @@ import App from './App.vue'
 import ChatView from './views/ChatView.vue'
 import MemoryView from './views/MemoryView.vue'
 import SettingsView from './views/SettingsView.vue'
-import '@tabler/icons-webfont/dist/tabler-icons.min.css'
+import './assets/tabler-icons-subset.css'
 import './style.css'
 
 const router = createRouter({

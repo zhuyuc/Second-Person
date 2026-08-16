@@ -171,6 +171,7 @@ class StrategyEngine:
              {"role": "user", "content": user_content}],
             source="strategy_decide",
             session_id=session_id,
+            json_mode=True,
         )
         data = repair_json(resp["content"])
         if not isinstance(data, dict):
@@ -274,7 +275,8 @@ class StrategyEngine:
             resp = await self.llm.chat(snap, [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
-            ], source="elicitation_decision", session_id=session_id)
+            ], source="elicitation_decision", session_id=session_id,
+                json_mode=True)
             raw = resp.get("content", "")
             data = repair_json(raw)
 

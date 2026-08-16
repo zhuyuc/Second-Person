@@ -1,13 +1,14 @@
 // 流式请求统一封装：保留 ReadableStream 能力，同时复用统一错误提示语义
 import { useToast } from '@/stores/toast'
+import { friendlyError } from '@/utils/format'
 
 const BASE = '/api'
 
 async function parseError(resp) {
     const data = await resp.clone().json().catch(() => null)
-    if (data && data.message) return data.message
+    if (data && data.message) return friendlyError(data.message)
     const text = await resp.text().catch(() => '')
-    return text || `请求失败（HTTP ${resp.status}）`
+    return friendlyError(text, `请求失败（HTTP ${resp.status}）`)
 }
 
 export async function postJsonStream(path, body, { signal } = {}) {

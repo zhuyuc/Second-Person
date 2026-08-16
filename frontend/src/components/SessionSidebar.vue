@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '@/api/client'
 import { useSessions } from '@/stores/sessions'
 import { useConfirm } from '@/stores/confirm'
+import ChannelIcon from '@/components/ChannelIcon.vue'
 
 const props = defineProps({ health: { type: String, default: 'healthy' } })
 
@@ -130,18 +131,15 @@ onMounted(() => sess.load())
           <div v-for="s in grp.items" :key="s.session_id" class="sess-item"
             :class="{ active: s.session_id === sess.currentSid && route.path === '/chat' }"
             @click="openSession(s.session_id)" style="position:relative">
-            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:6px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <i v-if="s.pinned || !s.channel" class="ti sess-icon" :class="s.pinned ? 'ti-pin' : 'ti-message'"></i>
+              <ChannelIcon v-else :platform="s.channel" :size="16" class="sess-icon" />
               <div style="min-width:0;flex:1">
-                <div style="display:flex;align-items:center;gap:5px">
-                  <i v-if="s.pinned" class="ti ti-pin"
-                    style="font-size:var(--fs-sm);color:var(--acctx);flex-shrink:0"></i>
+                <div style="display:flex;align-items:center;gap:6px">
                   <input v-if="editingId === s.session_id" :id="'rename-' + s.session_id" v-model="editTitle"
                     class="sess-rename-input" @click.stop @blur="saveRename(s)"
                     @keydown.enter.prevent="saveRename(s)" />
-                  <div v-else class="sess-title"
-                    style="font-size:var(--fs-base);font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-                    {{
-                      s.title }}</div>
+                  <div v-else class="sess-title">{{ s.title }}</div>
                   <span v-if="s.channel && editingId !== s.session_id" class="sess-channel-badge">{{
                     channelName(s.channel) }}</span>
                   <span v-if="s.readonly && editingId !== s.session_id" class="sess-readonly-badge">已结束</span>

@@ -121,7 +121,7 @@ class AppContainer:
                 snap, [{"role": "system",
                         "content": PROMPTS.load_raw("app/prompts/domain_label")},
                        {"role": "user", "content": "\n".join(domains)}],
-                source="system_agent")
+                source="system_agent", json_mode=True)
             return repair_json(resp["content"]).get("labels", {})
         self.domain_labeler = DomainLabeler(self.db, domain_translate_fn)
 
@@ -233,7 +233,7 @@ class AppContainer:
                       {"role": "user", "content":
                        f"{ctx_part}当前问题：{query}\n候选：\n{listing}"}]
             resp = await self.llm.chat(snap, prompt, source="agent",
-                                       session_id=session_id)
+                                       session_id=session_id, json_mode=True)
             data = repair_json(resp["content"])
             return data.get("ids", [])[:3]
 
@@ -256,7 +256,8 @@ class AppContainer:
             prompt = DISTILL_DOC_PROMPT if source_type == "knowledge" else DISTILL_PROMPT
             resp = await self.llm.chat(
                 snap, [{"role": "system", "content": prompt},
-                       {"role": "user", "content": text}], source="system_agent")
+                       {"role": "user", "content": text}], source="system_agent",
+                json_mode=True)
             return repair_json(resp["content"])
 
         self.skills = SkillManager(d, self.db, self.fw)
@@ -382,7 +383,8 @@ class AppContainer:
             resp = await self.llm.chat(
                 snap, [{"role": "system",
                         "content": PROMPTS.load_raw("app/prompts/merge_judge")},
-                       {"role": "user", "content": content}], source="system_agent")
+                       {"role": "user", "content": content}], source="system_agent",
+                json_mode=True)
             return repair_json(resp["content"])
         self.merge_judge_fn = merge_judge_fn
 

@@ -5,7 +5,8 @@ import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useBusy } from '@/composables/useBusy'
 import BaseModal from '@/components/BaseModal.vue'
-import { formatTime } from '@/utils/format'
+import ChannelIcon from '@/components/ChannelIcon.vue'
+import { formatTime, friendlyError } from '@/utils/format'
 import { withQuery } from '@/utils/query'
 import { PLATFORM_MAP, usageSourceLabel } from '@/utils/enumLabel'
 
@@ -277,7 +278,7 @@ async function testConnector() {
     : { url: newConn.value.url }
   const r = await api.post('/settings/connectors/test', { name: newConn.value.name, transport: newConn.value.transport, config: cfg })
   if (r.ok) toast.push('success', `连接测试成功，发现 ${r.tool_count ?? 0} 个工具`)
-  else toast.push('error', '连接测试失败：' + (r.error || '未知错误'))
+  else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
 
 // 连接器：保存直接复用 addConnector（单一入口，不再冗余包装）
@@ -373,7 +374,7 @@ async function testChannel() {
   // 同上：后端失败不抛异常，需检查 r.ok
   const r = await api.post('/settings/platforms/test', newChannel.value)
   if (r.ok) toast.push('success', '连接测试成功')
-  else toast.push('error', '连接测试失败：' + (r.error || '未知错误'))
+  else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
 
 // 编辑已录入渠道：回显现有配置（含解密凭证），平台类型不可改
@@ -402,7 +403,7 @@ async function saveChannelEdit() {
 async function testEditChannel() {
   const r = await api.post('/settings/platforms/test', editChannel.value)
   if (r.ok) toast.push('success', '连接测试成功')
-  else toast.push('error', '连接测试失败：' + (r.error || '未知错误'))
+  else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
 
 const groups = ['memory', 'conversation', 'cost', 'retrieval', 'visualization', 'other']
@@ -576,7 +577,7 @@ onActivated(() => selectTab(tab.value))
     <div class="g3">
       <div v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom', 'weixin']" :key="pt" class="cw"
         style="text-align:center;cursor:pointer;padding:20px" @click="clickAddChannel(pt)">
-        <i class="ti ti-plug" style="font-size:var(--icon-lg);color:var(--acctx)"></i>
+        <ChannelIcon :platform="pt" :size="28" />
         <div style="font-weight:500;margin-top:8px">{{ PLATFORM_MAP[pt] || pt }}</div>
         <div class="muted">{{ pt === 'weixin' ? 'ClawBot 扫码绑定' : 'Bot 私聊接入' }}</div>
       </div>
@@ -587,14 +588,14 @@ onActivated(() => selectTab(tab.value))
   <div v-else-if="tab === 3">
     <div v-for="g in groups" :key="g" class="cw">
       <div class="section-title">{{ groupNames[g] }}</div>
-      <div v-for="s in schemaByGroup(g)" :key="s.key" class="row" style="margin-bottom:12px;align-items:flex-start">
-        <div style="flex:1;min-width:0;padding-right:16px">
-          <b>{{ s.label }}</b>
-          <div v-if="s.desc" class="muted" style="margin-top:2px;line-height:1.5">{{ s.desc }}</div>
-          <div class="muted" style="margin-top:2px;opacity:.7">{{ effectNames[s.effect] }}<span
+      <div v-for="s in schemaByGroup(g)" :key="s.key" class="param-item">
+        <div style="flex:1;min-width:0">
+          <div class="param-label">{{ s.label }}</div>
+          <div v-if="s.desc" class="param-desc">{{ s.desc }}</div>
+          <div class="param-effect">{{ effectNames[s.effect] }}<span
               v-if="s.min !== undefined"> · 取值范围 {{ s.min }}–{{ s.max ?? '∞' }}</span></div>
         </div>
-        <div style="flex-shrink:0">
+        <div class="param-ctrl">
           <input v-if="s.type === 'bool'" type="checkbox" v-model="params[s.key]" />
           <select v-else-if="s.type === 'enum'" v-model="params[s.key]">
             <option v-for="o in s.options" :key="o" :value="o">{{ enumLabel(o) }}</option>
