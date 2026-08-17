@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import AsyncIterator
 
 from infrastructure.llm_provider import CircuitOpenError
+from infrastructure.json_repair import repair_json
 from infrastructure.observability import get_trace_id
 from infrastructure.prompt_loader import PROMPTS
 from langfuse.integration import get_tracer, mark_preview
@@ -38,6 +39,7 @@ from .intent_parser import (
     FocusResult,
     GapDetector,
     GapResult,
+    Intent,
     IntentParser,
     QuickIntentResult,
     Understanding,
@@ -49,6 +51,12 @@ from .strategy_engine import (
 )
 from .meta_cognitive import CognitiveSkeleton, MetaCognitiveProtocol
 from .next_step import NextStepPipeline, parse_suggestion, strip_suggestion_from_partial
+from .context_signals import (
+    detect_fake_claim,
+    detect_proposal_sentence,
+    is_confirm_ack,
+    map_proposal_tools,
+)
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
@@ -474,6 +482,29 @@ class AgentCore:
             f"{'用户' if m['role'] == 'user' else 'AI'}：{m['content'] or ''}"
             for m in history[-6:])
 
+        # ---- 提议—确认闭环：pending 提议读回 + 确认绑定（零阻塞） ----
+        # 用户对 AI 上轮主动提议回复短确认词（"可以/好/行"）时，把待执行提议
+        # 显式注入意图上下文，避免被误判为无工具的闲聊确认导致动作丢失
+        _pending_proposal: dict | None = None
+        _proposal_bound = False
+        if not onboarding:
+            try:
+                _pending_proposal = self.sessions.get_pending_proposal(sid)
+                if _pending_proposal and is_confirm_ack(message):
+                    _proposal_bound = True
+                    recent_history = (
+                        "【待执行提议】AI 上一轮主动提议：" + _pending_proposal["text"]
+                        + "。用户当前消息是对该提议的确认，意图以执行此提议为准。\n"
+                        + recent_history)
+                    await emit("thinking_delta", {
+                        "text": "【提议承接】用户确认上轮提议，将按提议内容规划执行："
+                                + _pending_proposal["text"][:40] + "\n"})
+            except Exception:  # noqa: BLE001 - 零阻塞：异常退回现状
+                logger.warning("pending 提议读回失败", exc_info=True)
+                _pending_proposal, _proposal_bound = None, False
+        # quick_intent 使用字符串上下文（含提议注入）；意图解析用消息列表另走注入
+        _recent_ctx = recent_history
+
         # ---- 收敛式理解：快速预判（§3.1） ----
         quick_result: QuickIntentResult | None = None
         understanding: Understanding | None = None
@@ -484,7 +515,7 @@ class AgentCore:
             try:
                 quick_result = await self.intent_parser.quick_intent(
                     message + _img_hint, session_id=sid,
-                    recent_history=recent_history)
+                    recent_history=_recent_ctx)
                 _sp.end(output={
                     "needs_convergence": quick_result.needs_convergence,
                     "hypothesis": quick_result.intent_hypothesis,
@@ -635,14 +666,41 @@ class AgentCore:
                                                "intent_type": "chat", "tools_needed": [],
                                                "depends_on": []})()]
                 else:
+                    _hist_ctx = history[-6:]
+                    if _proposal_bound and _pending_proposal:
+                        # 提议绑定：待执行提议作为显式待办注入意图解析上下文
+                        _hist_ctx = [{"role": "system",
+                                      "content": "【待执行提议】AI 上一轮主动提议："
+                                                 + _pending_proposal["text"]
+                                                 + "。用户当前消息是对该提议的确认，"
+                                                   "意图以执行此提议为准。"}] + _hist_ctx
                     _intents = await self.intent_parser.parse(
                         message + _img_hint, tool_names, sid,
-                        recent_history=history[-6:])
+                        recent_history=_hist_ctx)
                     # 兜底：外部类意图若未选工具，自动补上 web_search（防止模型凭空回答实时信息）
                     if "web_search" in tool_names:
                         for it in _intents:
                             if it.intent_type == "query_external" and not it.tools_needed:
                                 it.tools_needed = ["web_search"]
+                    # 确定性流转：绑定命中但解析仍为纯 chat 无工具时，按提议
+                    # 文本关键词强制补工具，不依赖 LLM 对注入文本的二次理解
+                    if (_proposal_bound and _pending_proposal and _intents
+                            and all(getattr(i, "intent_type", "") == "chat"
+                                    and not (getattr(i, "tools_needed", None) or [])
+                                    for i in _intents)):
+                        _p_itype, _p_tools = map_proposal_tools(
+                            _pending_proposal["text"], tool_names)
+                        if _p_tools:
+                            _intents = [Intent(
+                                id="i1",
+                                intent_summary="按上轮提议执行："
+                                + _pending_proposal["text"][:50],
+                                intent_type=_p_itype,
+                                tools_needed=_p_tools,
+                                depends_on=[], confidence=0.9)]
+                            await emit("thinking_delta", {
+                                "text": "【提议承接】意图按提议内容确定性改写，"
+                                        "计划调用工具：" + "、".join(_p_tools) + "\n"})
                 _sp.end(output=[{"summary": getattr(i, "intent_summary", ""),
                                  "type": getattr(i, "intent_type", ""),
                                  "tools": getattr(i, "tools_needed", [])} for i in _intents])
@@ -937,6 +995,7 @@ class AgentCore:
                          if skeleton else None),
         })
         _next_step_shown = None  # 建议句落盘数据（模型不可用/熔断等分支安全默认值）
+        _fake_promise_caught = False  # 假承诺检测命中（无工具执行时的未来式空头承诺）
         try:
             if not chat_configured and not onboarding:
                 # 态三：模型不可用 → 记录 decision_reason
@@ -977,7 +1036,8 @@ class AgentCore:
                     try:
                         extra_mems = await material_task
                         if extra_mems:
-                            seen = {m.get("id") for m in memories if m.get("id")}
+                            seen = {m.get("id")
+                                    for m in memories if m.get("id")}
                             for m in extra_mems:
                                 if m.get("id") and m["id"] not in seen:
                                     memories.append(m)
@@ -1026,6 +1086,15 @@ class AgentCore:
                             "agent/prompts/elicitation_supplement")
                         prompt[0]["content"] = (prompt[0]["content"]
                                                 + "\n\n" + supplement)
+                # 提议承接强制交付：用户确认的提议已执行完毕时，必须基于
+                # 工具结果交付成品，禁止再次以"要不要开始下一步"推诿（闭环最后一公里）
+                if _proposal_bound and tool_results:
+                    prompt[0]["content"] += (
+                        "\n\n【提议承接交付约束】本轮是用户确认你上一轮提议后的"
+                        "执行轮，所需工具已全部执行完毕，结果见「工具执行结果」。"
+                        "你必须直接基于工具结果交付完整成品（分析结论/拆解结果），"
+                        "严禁输出\"那就按这个方向继续/如果你想开始下一步/随时说\"等"
+                        "再次征求确认或推迟交付的措辞；工具结果不足的部分如实说明。")
                 valid_ids = {m["id"] for m in memories}
 
                 # 推理模型（DeepSeek 等）的原生思考过程同样以 thinking_delta 外露
@@ -1101,7 +1170,50 @@ class AgentCore:
                 raw, _suggestion_text = parse_suggestion(raw)
                 _next_step_shown = None
                 if _suggestion_text:
-                    _next_step_shown = {"text": _suggestion_text}
+                    # 结构化落盘：kind+status 支撑提议—确认闭环读回（兼容旧读侧）
+                    _next_step_shown = {"text": _suggestion_text,
+                                        "kind": "proposal", "status": "pending"}
+                else:
+                    # 轮末动作意图提取（主通道）：LLM 语义三分类
+                    # proposal/instruction/none，仅 proposal 落 pending；
+                    # 门控：brief 跳过、末尾无提议前兆词跳过；失败/超时回退正则（零阻塞）
+                    _ae_tail = raw[-200:] if len(raw) > 200 else raw
+                    _ae_premonition = bool(re.search(
+                        r"我可以|如果(你)?(愿意|需要|想|要)|需要的话|下一步|接下来",
+                        _ae_tail))
+                    if depth_level != "brief" and _ae_premonition:
+                        try:
+                            _ae_system = PROMPTS.load_raw(
+                                "agent/prompts/action_extract")
+                            _ae_resp = await asyncio.wait_for(self.llm.chat(
+                                chat_snap,
+                                [{"role": "system", "content": _ae_system},
+                                 {"role": "user", "content": _ae_tail}],
+                                source="action_extract",
+                                session_id=sid,
+                                json_mode=True,
+                                extra_body={"thinking_enabled": False},
+                            ), timeout=5.0)
+                            _ae_data = repair_json(
+                                _ae_resp["content"]) or {}
+                            if (_ae_data.get("kind") == "proposal"
+                                    and str(_ae_data.get("action_text")
+                                            or "").strip()):
+                                _next_step_shown = {
+                                    "text": str(_ae_data["action_text"]).strip()[:80],
+                                    "kind": "proposal", "status": "pending"}
+                        except Exception:  # noqa: BLE001 - 降级回退正则兜底
+                            logger.warning("轮末动作意图提取失败，回退正则兜底",
+                                           exc_info=True)
+                    if _next_step_shown is None:
+                        try:
+                            _prop = detect_proposal_sentence(raw)
+                            if _prop:
+                                _next_step_shown = {"text": _prop,
+                                                    "kind": "proposal",
+                                                    "status": "pending"}
+                        except Exception:  # noqa: BLE001
+                            pass
                 # 兼容旧格式：若 LLM 仍输出了嵌入式 citations JSON，先剥离
                 assistant_text, legacy_citations = rs.extract_citations(
                     raw, valid_ids)
@@ -1131,6 +1243,15 @@ class AgentCore:
                 # Strip duplicate Mermaid blocks when diagram tool succeeded
                 if any(tr.get("ok") and tr.get("tool") in ("render_flowchart", "render_mermaid") for tr in (tool_results or [])):
                     assistant_text = rs.strip_mermaid_blocks(assistant_text)
+                # 假承诺检测：本轮无任何工具执行却出现"我现在就去查/稍等贴结论"
+                # 类未来式承诺 → 命中后在回复末尾追加诚实纠偏（文件卡片前先检测，
+                # 避免卡片链接把承诺句推出末尾 200 字窗口）
+                if (not onboarding and not doc_only and not tool_results):
+                    try:
+                        _fake_promise_caught = detect_fake_claim(
+                            assistant_text)
+                    except Exception:  # noqa: BLE001
+                        _fake_promise_caught = False
                 if citations:
                     cited_ids = citations
                     refs = [{"id": mid, "title": next(
@@ -1225,6 +1346,16 @@ class AgentCore:
                     assistant_text += _card
                     await emit("content_delta", {"text": _card})
 
+        # 假承诺诚实纠偏：系统同步执行（工具在回复前已执行完毕），未执行的
+        # 动作不能以"稍等去查"形式承诺；追加纠偏句避免用户空等（零阻塞）
+        if _fake_promise_caught:
+            _correction = ("\n\n> 更正：我这边没有后台执行能力，"
+                           "刚才说的\"去查一下\"并未实际执行。"
+                           "如需现在完成这件事，请直接回复确认，我会立即安排。")
+            assistant_text += _correction
+            await emit("content_delta", {"text": _correction})
+            logger.info("假承诺检测命中，已追加诚实纠偏（session=%s）", sid)
+
         # 第 8 步 后置处理
         _sp = tracer.span_start("post_process", input={
                                 "session_id": sid, "cited_ids": cited_ids,
@@ -1251,6 +1382,10 @@ class AgentCore:
                                                       if skeleton else None),
                                                   next_step_shown=_next_step_shown,
                                                   parent_id=user_msg_id)
+            # 提议—确认闭环：消费用户本轮承接的提议（重新生成删消息时自然失效）
+            if _proposal_bound and _pending_proposal:
+                self.sessions.consume_pending_proposal(
+                    _pending_proposal["message_id"])
             self._turn_partials.pop(sid, None)
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
                                                      message, onboarding, user_msg_id=user_msg_id, intents=intents)
@@ -1652,10 +1787,11 @@ class AgentCore:
         # 2. 思考过程外露（与思考面板既有机制一致）
         try:
             if profile_block or extra_memories:
-                dim_txt = ("、".join(dimension_names))[:60] if dimension_names else "无"
+                dim_txt = ("、".join(dimension_names))[
+                    :60] if dimension_names else "无"
                 await emit("thinking_delta", {
                     "text": f"【材料充实】已聚合画像维度：{dim_txt}；"
-                            f"定向检索命中 {len(extra_memories)} 条记忆\n"})
+                    f"定向检索命中 {len(extra_memories)} 条记忆\n"})
         except Exception:  # noqa: BLE001
             pass
         # 3. Langfuse span 埋点（失败不影响主流程）
@@ -2929,7 +3065,7 @@ class AgentCore:
                 assistant_reply=str(ai_reply or "")[:800])}]
 
             resp = await self.llm.chat(snap, prompt, source="mood", session_id=sid,
-                                      json_mode=True)
+                                       json_mode=True)
             data = repair_json(resp["content"]) or {}
 
             result = self.mood.apply_v2(

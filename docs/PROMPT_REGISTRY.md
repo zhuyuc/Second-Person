@@ -73,6 +73,7 @@
 | 44 | agent/prompts/elicitation_decision.md | 追问判定（clarification_router 可枚举/发散二分；注入画像摘要，已知信息不追问） | agent/strategy_engine.py | 惰性 | - | A |
 | 45 | agent/prompts/elicitation_supplement.md | 关闭追问后新消息临时决策指令 | agent/core.py | 惰性 | - | A |
 | 46 | agent/prompts/synth_elicitation_answered.md | 追问已作答闭环约束（已确认事实回填/推断注明/仅未知占位，条件注入） | agent/response_synthesizer.py | 惰性 | - | A |
+| 47 | agent/prompts/action_extract.md | 轮末动作意图提取（proposal/instruction/none 三分类，提议—确认闭环，门控触发） | agent/core.py | 惰性 | - | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -116,6 +117,7 @@
 | 29 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取（格式绑定） |
 | 30 | agent/core.py::_format_template_save_params | chat | intent | agent/prompts/format_scenario.md | 格式绑定适用场景提取 |
 | 31 | agent/strategy_engine.py::clarification_router | chat | elicitation_decision | agent/prompts/elicitation_decision.md | 追问可枚举/发散二分判定 |
+| 32 | agent/core.py::_pipeline_impl | chat | action_extract | agent/prompts/action_extract.md | 轮末动作意图提取（提议—确认闭环，门控触发） |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export/synth_elicitation_answered 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

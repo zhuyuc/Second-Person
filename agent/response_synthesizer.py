@@ -129,7 +129,8 @@ def _strip_empty_fences(text: str) -> str:
 
 def strip_tool_call_blocks(text: str) -> str:
     """Strip inline tool-call markup that the model sometimes emits."""
-    text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<tool_call>[\s\S]*?</tool_call>",
+                  "", text, flags=re.IGNORECASE)
     text = re.sub(r"<工具调用>[\s\S]*?</工具调用>", "", text)
     return text.strip()
 
@@ -184,7 +185,6 @@ def detect_citations(response_text: str, memories: list[dict]) -> list[str]:
     if not memories or not response_text:
         return []
     resp_tokens = _tokenize_for_match(response_text)
-    resp_lower = response_text.lower()
     scored: list[tuple[str, float]] = []
     for mem in memories:
         mid = mem.get("id", "")
@@ -242,7 +242,6 @@ def detect_memory_confirm(
     if not candidate:
         return None
     mid = candidate.get("id", "")
-    title = candidate.get("title", "")
     if not mid:
         return None
     combined = f"{user_message} {response_text}"

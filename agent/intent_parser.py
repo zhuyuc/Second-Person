@@ -483,15 +483,24 @@ class IntentParser:
 
     @staticmethod
     def _format_history(recent_history: list[dict] | None) -> str:
-        """格式化最近对话为意图理解的上下文块（最多 3 轮/6 条，单条截 300 字符）。"""
+        """格式化最近对话为意图理解的上下文块（最多 3 轮/6 条，单条截 300 字符）。
+
+        role=system 为提议—确认闭环注入的【待执行提议】标记，原样保留。
+        """
         if not recent_history:
             return ""
         lines = []
         for m in recent_history[-6:]:
-            role = "用户" if m.get("role") == "user" else "AI"
+            role = m.get("role")
+            if role == "system":
+                prefix = ""
+            elif role == "user":
+                prefix = "用户："
+            else:
+                prefix = "AI："
             content = str(m.get("content", "") or "")[:300]
             if content.strip():
-                lines.append(f"{role}：{content}")
+                lines.append(f"{prefix}{content}")
         return "\n".join(lines)
 
     # 软失败判定用：用户消息含工具/检索意图信号时，全部降级为 chat 应触发重试

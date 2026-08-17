@@ -2,6 +2,7 @@
 {"intents":[{"id":"i1","intent_summary":"...","intent_type":"<枚举>","tools_needed":["..."],"depends_on":[],"confidence":0.9}]}
 
 confidence（0-1）：现有信息是否足够产出高质量结果。不是"我是否听懂了"，而是"我能不能做好"。
+
 - 0.9-1.0 = 信息充分，可直接高质量执行（如"RAG是什么"、"你记得我喜欢吃什么吗"）
 - 0.7-0.8 = 能执行且结果基本可用，补充细节能锦上添花但不影响核心（如"部署到服务器的步骤"）
 - 0.4-0.6 = 缺少关键前提，不同前提会导致完全不同的输出（如"帮我写一个简历"——岗位不同简历完全不同；"帮我做个方案"——什么方案？）
@@ -105,6 +106,13 @@ ${intent_shared}
 
 用户："帮我写一份应聘前端工程师的简历，我有3年React经验"
 → {"intents":[{"id":"i1","intent_summary":"编写前端工程师简历（3年React经验）","intent_type":"chat","tools_needed":[],"depends_on":[],"confidence":0.9}]}
+
+### 示例 18 — 用户确认 AI 上一轮主动提议的动作（按提议内容选工具，绝不判为普通闲聊）
+
+最近对话：AI 上一轮回复末尾提议"我可以帮你拆解 Pi 仓库的 unified LLM API 和 agent loop 目录结构"；上下文含【待执行提议】标记
+用户："可以"
+→ {"intents":[{"id":"i1","intent_summary":"按上轮提议拆解 Pi 仓库的目录结构","intent_type":"query_external","tools_needed":["web_search","web_fetch"],"depends_on":[],"confidence":0.9}]}
+⚠ 规则：消息含【待执行提议】标记且当前消息是"可以/好/行/嗯"等短确认时，意图以提议内容为准：涉及外部仓库/实时信息选 query_external 并配 web_search/web_fetch，涉及本地记忆选 query_memory，涉及文件/导出选 file_op；绝不可判为无工具的 chat 确认性回复。
 
 ---
 只输出 JSON，不要解释。

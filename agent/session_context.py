@@ -17,6 +17,7 @@ from pathlib import Path
 
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
 from memory.naming import session_id as make_session_id
+from agent.context_signals import detect_fake_claim, detect_proposal_sentence
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
 
@@ -208,7 +209,8 @@ class SessionStore:
                 (vgroup,))
             sibling_ids = [s["id"] for s in siblings]
             sibling_count = len(sibling_ids)
-            sibling_index = sibling_ids.index(r["id"]) if r["id"] in sibling_ids else 0
+            sibling_index = sibling_ids.index(
+                r["id"]) if r["id"] in sibling_ids else 0
             out.append({"id": r["id"], "role": r["role"],
                         "message_type": r["message_type"],
                         "notification_type": r["notification_type"],
@@ -317,6 +319,75 @@ class SessionStore:
         row = self.db.query_one(
             "SELECT session_id FROM sessions ORDER BY last_active DESC LIMIT 1")
         return row["session_id"] if row else None
+
+    # ---- 提议—确认闭环：pending 提议读回/消费 -------------------------
+
+    def get_pending_proposal(self, sid: str) -> dict | None:
+        """读回本会话待确认的下一步提议（提议—确认闭环）。
+
+        仅当最近一条活跃 assistant 消息携带 status=pending 的 next_step_shown
+        时返回 {"message_id":…, "text":…}；隔轮未确认的提议因后续 assistant
+        消息覆盖而自然过期，无需显式 TTL。兼容旧格式 {"text":…}（无 status 视同 pending）。
+
+        存量惰性自愈：读不到 pending 时，回扫最近 2 条活跃 assistant 消息尾部
+        （旧代码产出的提议轮 next_step_shown 为空）；命中提议句即补落 pending，
+        遇假承诺回复（过去式假声明/未来式空头承诺）继续向前回溯。
+        任何异常返回 None（对话零阻塞铁律）。
+        """
+        try:
+            rows = self.db.query_all(
+                "SELECT id, content, next_step_shown FROM conversations "
+                "WHERE session_id=? AND role='assistant' "
+                "AND (is_active=1 OR is_active IS NULL) "
+                "ORDER BY id DESC LIMIT 2", (sid,))
+            for row in rows:
+                if row["next_step_shown"]:
+                    try:
+                        data = json.loads(row["next_step_shown"])
+                    except (json.JSONDecodeError, TypeError):
+                        data = None
+                    if isinstance(data, dict) and (data.get("text") or "").strip():
+                        if data.get("status", "pending") == "pending":
+                            return {"message_id": row["id"],
+                                    "text": str(data["text"]).strip()}
+                        # 已消费/已过期的提议不回溯（属于正常闭环终态）
+                        return None
+                # 惰性自愈：尾部提议句扫描（假承诺句不作提议，继续回溯）
+                content = row["content"] or ""
+                if detect_fake_claim(content):
+                    continue
+                proposal = detect_proposal_sentence(content)
+                if proposal:
+                    healed = {"text": proposal, "kind": "proposal",
+                              "status": "pending"}
+                    self.db.execute(
+                        "UPDATE conversations SET next_step_shown=? WHERE id=?",
+                        (json.dumps(healed, ensure_ascii=False), row["id"]))
+                    return {"message_id": row["id"], "text": proposal}
+            return None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def consume_pending_proposal(self, message_id: int) -> None:
+        """将已承接的提议标记为 consumed（用户确认后本轮结束调用）。
+
+        仅覆盖 next_step_shown 的 status 字段，保留 text/kind；
+        行不存在（重新生成删消息等场景）时静默无操作。异常不阻断主链路。
+        """
+        try:
+            row = self.db.query_one(
+                "SELECT next_step_shown FROM conversations WHERE id=?",
+                (message_id,))
+            if not row or not row["next_step_shown"]:
+                return
+            data = json.loads(row["next_step_shown"])
+            if isinstance(data, dict) and data.get("status", "pending") == "pending":
+                data["status"] = "consumed"
+                self.db.execute(
+                    "UPDATE conversations SET next_step_shown=? WHERE id=?",
+                    (json.dumps(data, ensure_ascii=False), message_id))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _cleanup_images(self, sql: str, params: tuple) -> None:
         """删除消息前同步清理其持久化图片文件（失败不阻断删除流程）。"""
