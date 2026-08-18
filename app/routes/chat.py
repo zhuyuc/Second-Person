@@ -294,7 +294,7 @@ async def switch_version(body: SwitchVersionRequest):
     返回更新后的活跃分支消息列表。"""
     c = _c()
     c.sessions.switch_version(body.session_id, body.version_group_id,
-                               body.target_message_id)
+                              body.target_message_id)
     msgs = c.sessions.get_messages(body.session_id)
     return {"code": 200, "data": {"messages": msgs}}
 
@@ -353,13 +353,7 @@ async def _generate_handoff(c, from_sid: str, to_sid: str) -> None:
 async def _gen_title(c, sid: str, message: str):
     """首条消息异步生成 10 字标题；3 秒超时退化为取前 15 字符。
     超时后 LLM 调用仍继续完成（shielding），晚到时覆盖已退化标题。
-    使用独立 Langfuse trace，确保 generation 可被观测。"""
-    from langfuse.integration import get_tracer
-    tracer = get_tracer()
-    trace = tracer.trace_start("title_generation", session_id=sid, input={
-        "session_id": sid, "message": message})
-    span = tracer.span_start("title_generation", input={
-                             "session_id": sid, "message": message})
+    不做 Langfuse 埋点：标题生成不纳入可观测性上报。"""
     try:
         snap = c.providers.snapshot_for("agent")
         q = message.split(
@@ -399,21 +393,13 @@ async def _gen_title(c, sid: str, message: str):
             try:
                 result = await asyncio.wait_for(asyncio.shield(task), timeout=3)
             except asyncio.TimeoutError:
-                span.end(output={"title": title,
-                         "fallback": True, "timeout": True})
-                trace.end(output={"title": title,
-                          "fallback": True, "timeout": True})
                 return
             if result:
                 c.sessions.set_auto_title(sid, result)
-                span.end(output={"title": result})
-                trace.end(output={"title": result})
                 return
-        span.end(output={"title": title, "fallback": True})
-        trace.end(output={"title": title, "fallback": True})
-    except Exception as e:  # noqa: BLE001
-        span.end(level="ERROR", status_message=str(e))
-        trace.end(level="ERROR", status_message=str(e))
+    except Exception:  # noqa: BLE001
+        logger = logging.getLogger("second_person.chat")
+        logger.warning("会话标题生成失败 session=%s", sid, exc_info=True)
 
 
 @router.get("/chat/session/{session_id}/active-request")

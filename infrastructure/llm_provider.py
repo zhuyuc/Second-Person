@@ -67,6 +67,32 @@ def estimate_tokens(messages: list[dict] | str) -> int:
         return min(int(len(text) / 2.5), _CAP)  # 中文经验值
 
 
+# ---------------------------------------------------------------------------
+# extra_body 厂商适配：通用开关 → 厂商原生参数
+# ---------------------------------------------------------------------------
+def _normalize_extra_body(snap, extra_body: dict | None) -> dict:
+    """把通用 extra_body 字段翻译成厂商原生参数。
+
+    thinking_enabled 是项目统一的思考模式开关，但各厂商参数名不同，
+    原样透传不会被厂商识别（DeepSeek 直接忽略，导致思考模式关不掉：
+    轻量结构化调用白白消耗思考令牌，且偶发只思考不给最终答复的空返回）：
+    - DeepSeek：{"thinking": {"type": "enabled"/"disabled"}}
+    - Anthropic/Google：无统一映射，思考默认关闭，直接剔除
+    - 其他 OpenAI 兼容厂商：保持透传语义不变
+    """
+    eb = dict(extra_body or {})
+    if "thinking_enabled" not in eb:
+        return eb
+    enabled = bool(eb.pop("thinking_enabled"))
+    if "deepseek" in (snap.base_url or "").lower():
+        eb["thinking"] = {"type": "enabled" if enabled else "disabled"}
+    elif snap.provider_type in ("anthropic", "google"):
+        pass   # 思考默认关闭，剔除即可
+    else:
+        eb["thinking_enabled"] = enabled
+    return eb
+
+
 @dataclass
 class CircuitBreaker:
     model: str
@@ -142,6 +168,14 @@ class CircuitOpenError(LLMError):
     pass
 
 
+class EmptyCompletionError(LLMError):
+    """HTTP 200 但 content 为空（输出疑似全被思考内容占用）。
+
+    属上游偶发异常，可重试：不携带 response 属性，_call_with_retry
+    不会误判为 4xx 快速失败，会走完整退避重试链。"""
+    pass
+
+
 class LLMClient:
     """LLM 调用客户端：熔断 + 重试 + token 记录，按 ProviderSnapshot 调用。"""
 
@@ -166,9 +200,11 @@ class LLMClient:
         images：可选图片 dataURL 列表（多模态）。
         json_mode：启用 Provider 原生 JSON 输出保证（OpenAI 兼容 →
           response_format={"type":"json_object"}）。Anthropic/Google 不支持时静默降级。
-        extra_body：透传至 API 请求体的额外字段（如 {"thinking_enabled": false}
-          对推理模型禁用思考模式）。收敛分析等轻量结构化任务建议传
-          extra_body={"thinking_enabled": False} 以避免思考令牌拖慢响应。
+        extra_body：透传至 API 请求体的额外字段。thinking_enabled 为项目统一的
+          思考模式开关，由 _normalize_extra_body 翻译成厂商原生参数（如
+          DeepSeek 的 {"thinking": {"type": "disabled"}}）；收敛分析等轻量结构化
+          任务建议传 extra_body={"thinking_enabled": False} 关闭思考，避免思考
+          令牌拖慢响应、偶发只思考不给答复的空返回。
         """
         from langfuse.integration import get_tracer
         gen = get_tracer().generation_start(
@@ -355,9 +391,9 @@ class LLMClient:
                     if k in ("temperature", "max_tokens")})
         if kw.get("json_mode"):
             body["response_format"] = {"type": "json_object"}
-        # extra_body：透传至请求体的额外字段（如 thinking_enabled=False 禁用思考模式）
-        if "extra_body" in kw and isinstance(kw["extra_body"], dict):
-            body.update(kw["extra_body"])
+        # extra_body：通用开关经 _normalize_extra_body 翻译成厂商原生参数
+        # （如 DeepSeek 的 thinking.type；thinking_enabled 原样透传会被忽略）
+        body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/chat/completions",
                              json=body,
@@ -367,9 +403,19 @@ class LLMClient:
         choices = data.get("choices") or [{}]
         choice = choices[0].get("message", {}) if choices else {}
         usage = data.get("usage", {})
+        content = choice.get("content") or ""
+        tool_calls = choice.get("tool_calls") or []
+        # 空返回护栏：HTTP 200 但 content 为空且无工具调用——上游偶发将输出
+        # 全部消耗在 reasoning_content（只思考不给最终答复），抛可重试异常
+        # 走退避重试，避免空内容直接透传导致下游 JSON 解析失败
+        if not content and not tool_calls:
+            raise EmptyCompletionError(
+                f"模型 {snap.model_id} 返回空内容"
+                f"（completion_tokens={usage.get('completion_tokens', 0)}，"
+                f"疑似输出全被思考内容占用）")
         return {
-            "content": choice.get("content") or "",
-            "tool_calls": choice.get("tool_calls") or [],
+            "content": content,
+            "tool_calls": tool_calls,
             "annotations": choice.get("annotations") or [],
             "usage": {"input_tokens": usage.get("prompt_tokens", 0),
                       "output_tokens": usage.get("completion_tokens", 0)},
@@ -384,8 +430,7 @@ class LLMClient:
             body["system"] = sys
         if tools:
             body["tools"] = tools
-        if "extra_body" in kw and isinstance(kw["extra_body"], dict):
-            body.update(kw["extra_body"])
+        body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
             r = await c.post(f"{snap.base_url.rstrip('/')}/messages", json=body,
                              headers={"x-api-key": snap.api_key,
@@ -403,6 +448,8 @@ class LLMClient:
         contents = [{"role": "user" if m["role"] != "assistant" else "model",
                      "parts": [{"text": m.get("content", "")}]}
                     for m in messages if m["role"] != "system"]
+        # Google 无统一思考开关映射，extra_body 不并入请求体（思考默认关闭，
+        # 与归一化剔除 thinking_enabled 的语义一致）
         url = (f"{snap.base_url.rstrip('/')}/models/{snap.model_id}:generateContent"
                f"?key={snap.api_key}")
         async with httpx.AsyncClient(timeout=timeout_for("default")) as c:

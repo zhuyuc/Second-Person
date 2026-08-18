@@ -240,8 +240,10 @@ class DeliveryJobManager:
         outline = model.outline or ProblemModelBuilder._default_outline(
             model.contract.explicit_requirements)
         for index, section in enumerate(outline):
-            title = str(section.get("title") or "").strip()[:120] or f"第 {index + 1} 节"
-            requirement_ids = [str(value) for value in (section.get("requirement_ids") or [])]
+            title = str(section.get("title") or "").strip()[
+                :120] or f"第 {index + 1} 节"
+            requirement_ids = [str(value) for value in (
+                section.get("requirement_ids") or [])]
             self.db.execute(
                 "INSERT INTO delivery_sections(job_id,section_key,sequence,title,requirement_ids_json,"
                 "status,content,quality_json,attempts,created_at,updated_at) "
@@ -252,7 +254,8 @@ class DeliveryJobManager:
 
     async def run(self, job_id: str, *, session_id: str,
                   emit: Callable[[str, dict], Awaitable[None]]) -> tuple[str, QualityReport]:
-        job = self.db.query_one("SELECT * FROM delivery_jobs WHERE id=?", (job_id,))
+        job = self.db.query_one(
+            "SELECT * FROM delivery_jobs WHERE id=?", (job_id,))
         if not job:
             raise KeyError(job_id)
         model = ProblemModel.from_dict(json.loads(job["problem_model_json"]))
@@ -274,9 +277,11 @@ class DeliveryJobManager:
                     "job_id": job_id, "status": "running", "current": index,
                     "total": total, "title": section["title"],
                 })
-                self._publish_delivery(job_id, session_id, "running", index, total)
+                self._publish_delivery(
+                    job_id, session_id, "running", index, total)
                 content = await self._generate_section(snap, job, model, section, session_id)
-                quality = self.quality_gate.validate(content, self._section_model(model, section))
+                quality = self.quality_gate.validate(
+                    content, self._section_model(model, section))
                 stamp = now_cst().isoformat(timespec="seconds")
                 self.db.execute(
                     "UPDATE delivery_sections SET status='completed',content=?,quality_json=?,"
@@ -286,7 +291,8 @@ class DeliveryJobManager:
                     "job_id": job_id, "status": "section_completed", "current": index,
                     "total": total, "title": section["title"],
                 })
-                self._publish_delivery(job_id, session_id, "section_completed", index, total)
+                self._publish_delivery(
+                    job_id, session_id, "section_completed", index, total)
             final_text = "\n\n".join(
                 f"## {row['title']}\n\n{row['content'].strip()}"
                 for row in self.db.query_all(
@@ -304,7 +310,8 @@ class DeliveryJobManager:
             await emit("delivery_progress", {
                 "job_id": job_id, "status": "completed", "current": total, "total": total,
             })
-            self._publish_delivery(job_id, session_id, "completed", total, total)
+            self._publish_delivery(
+                job_id, session_id, "completed", total, total)
             return final_text, report
         except (asyncio.CancelledError, CircuitOpenError):
             self.db.execute("UPDATE delivery_jobs SET status='paused',updated_at=? WHERE id=?",
@@ -329,7 +336,8 @@ class DeliveryJobManager:
             logger.debug("长文交付事件广播失败", exc_info=True)
 
     def _section_model(self, model: ProblemModel, section) -> ProblemModel:
-        requirement_ids = set(json.loads(section["requirement_ids_json"] or "[]"))
+        requirement_ids = set(json.loads(
+            section["requirement_ids_json"] or "[]"))
         requirements = [item for item in model.contract.explicit_requirements
                         if item.id in requirement_ids]
         contract = DeliveryContract.from_dict(model.contract.to_dict())
@@ -371,7 +379,8 @@ class DeliveryJobManager:
                  json.dumps([item.id for item in missing], ensure_ascii=False), now, now))
             existing = self.db.query_one(
                 "SELECT * FROM delivery_sections WHERE job_id=? AND section_key='S_GAP'", (job["id"],))
-        targets = "\n".join(f"- [{item.id}] {item.raw_request}" for item in missing)
+        targets = "\n".join(
+            f"- [{item.id}] {item.raw_request}" for item in missing)
         user = (
             "请补写一节‘遗漏需求补充’，解决下列缺口，并说明机制、依赖、风险和验收。"
             "不要删除或概括已有正文。\n\n"
@@ -448,7 +457,8 @@ class AgentCore:
         self.problem_model_builder = ProblemModelBuilder(
             llm_client, lambda: self.providers.snapshot_for("deep_analysis"))
         self.delivery_jobs = DeliveryJobManager(
-            db, llm_client, lambda: self.providers.snapshot_for("deep_analysis"),
+            db, llm_client, lambda: self.providers.snapshot_for(
+                "deep_analysis"),
             self.quality_gate, event_bus=event_bus)
         # 下一步建议模块：种子提取 + 门槛过滤 + 分隔符解析
         self.next_step = NextStepPipeline(config)
@@ -769,8 +779,8 @@ class AgentCore:
                     })
                 self._turn_partials[sid]["analysis_metadata"] = self._analysis_metadata(
                     think_mode, effective_mode, mode_reason, None, None, None)
-                await emit("thinking_delta", {
-                    "text": f"【执行路径】{'深度分析' if effective_mode == 'deep' else '快速回答'}：{mode_reason}\n"})
+                # 执行路径展示行由前端 mode_decision 事件处理追加；
+                # 不再另发同文案的 thinking_delta，避免思考面板重复渲染两遍
             except Exception:
                 _sp.end(level="ERROR")
                 raise
@@ -999,7 +1009,7 @@ class AgentCore:
             })
             await emit("thinking_delta", {
                 "text": f"【问题建模】已识别 {len(problem_model.contract.explicit_requirements)} 项明确需求，"
-                        f"按{('长文分节' if problem_model.contract.delivery_form == 'long_document' else '结构化')}交付\n"})
+                f"按{('长文分节' if problem_model.contract.delivery_form == 'long_document' else '结构化')}交付\n"})
 
         # ---- 元认知协议（v3 §六）：中等以上复杂度且非排除意图才触发 ----
         # 触发条件：complexity_score≥4 且 intent_type∉排除集 且开关开启；
@@ -1319,11 +1329,11 @@ class AgentCore:
                                                   tool_results, memories, onboarding,
                                                   skill_text, preload_text,
                                                   depth_level=depth_level,
-                                                   strategy=strategy,
-                                                   skeleton=skeleton,
-                                                   next_step_seeds=next_step_seeds,
-                                                   profile_material=profile_block,
-                                                   problem_model=problem_model)
+                                                  strategy=strategy,
+                                                  skeleton=skeleton,
+                                                  next_step_seeds=next_step_seeds,
+                                                  profile_material=profile_block,
+                                                  problem_model=problem_model)
                 # 关闭追问后新消息：注入临时决策指令
                 if not elicitation_triggered:
                     row = self.db.query_one(
@@ -1412,14 +1422,16 @@ class AgentCore:
                 if (problem_model is not None
                         and problem_model.contract.delivery_form != "long_document"
                         and self.config.get("deep_quality_gate_enabled", True)):
-                    quality_report = self.quality_gate.validate(raw, problem_model)
+                    quality_report = self.quality_gate.validate(
+                        raw, problem_model)
                     await emit("quality_status", quality_report.safe_summary())
                     self._publish_quality_event(sid, quality_report)
                     if not quality_report.passed:
                         await emit("thinking_delta", {"text": "【质量校验】发现需求覆盖缺口，正在补齐完整解法\n"})
                         raw = await self._repair_deep_response(
                             sid, problem_model, raw, quality_report, chat_snap)
-                        quality_report = self.quality_gate.validate(raw, problem_model)
+                        quality_report = self.quality_gate.validate(
+                            raw, problem_model)
                         await emit("quality_status", quality_report.safe_summary())
                         self._publish_quality_event(sid, quality_report)
                 elif problem_model is not None and quality_report is not None:
@@ -1662,14 +1674,14 @@ class AgentCore:
                                                   strategy_snapshot=(
                                                       strategy.db_snapshot()
                                                       if strategy else None),
-                                                   skeleton_snapshot=(
-                                                       skeleton.to_dict()
-                                                       if skeleton else None),
-                                                   analysis_metadata=self._analysis_metadata(
-                                                       think_mode, effective_mode, mode_reason,
-                                                       problem_model, quality_report,
-                                                       delivery_job_id),
-                                                   next_step_shown=_next_step_shown,
+                                                  skeleton_snapshot=(
+                                                      skeleton.to_dict()
+                                                      if skeleton else None),
+                                                  analysis_metadata=self._analysis_metadata(
+                                                      think_mode, effective_mode, mode_reason,
+                                                      problem_model, quality_report,
+                                                      delivery_job_id),
+                                                  next_step_shown=_next_step_shown,
                                                   parent_id=user_msg_id)
             # 提议—确认闭环：消费用户本轮承接的提议（重新生成删消息时自然失效）
             if _proposal_bound and _pending_proposal:
@@ -1706,7 +1718,7 @@ class AgentCore:
             think_mode, effective_mode, mode_reason, problem_model,
             quality_report, delivery_job_id)
         await emit("turn_completed", {"message_id": msg_id,
-                                       "analysis_metadata": _analysis_metadata})
+                                      "analysis_metadata": _analysis_metadata})
 
         # v2 情绪快照推送：前端通过 SSE 实时更新情绪徽标（无需轮询）
         if self.mood and self.config.get("mood_enabled", True):
@@ -3240,13 +3252,13 @@ class AgentCore:
         }
 
     def _build_final_prompt(self, system_prompt, history, message, tool_results,
-                             memories, onboarding, skill_text="", preload_text="",
-                             depth_level: str = "normal",
-                             strategy: ResponseStrategy | None = None,
-                             skeleton: CognitiveSkeleton | None = None,
-                             next_step_seeds: list | None = None,
-                             profile_material: str = "",
-                             problem_model: ProblemModel | None = None):
+                            memories, onboarding, skill_text="", preload_text="",
+                            depth_level: str = "normal",
+                            strategy: ResponseStrategy | None = None,
+                            skeleton: CognitiveSkeleton | None = None,
+                            next_step_seeds: list | None = None,
+                            profile_material: str = "",
+                            problem_model: ProblemModel | None = None):
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]

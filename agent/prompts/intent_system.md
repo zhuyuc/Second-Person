@@ -112,7 +112,7 @@ ${intent_shared}
 最近对话：AI 上一轮回复末尾提议"我可以帮你拆解 Pi 仓库的 unified LLM API 和 agent loop 目录结构"；上下文含【待执行提议】标记
 用户："可以"
 → {"intents":[{"id":"i1","intent_summary":"按上轮提议拆解 Pi 仓库的目录结构","intent_type":"query_external","tools_needed":["web_search","web_fetch"],"depends_on":[],"confidence":0.9}]}
-⚠ 规则：消息含【待执行提议】标记且当前消息是"可以/好/行/嗯"等短确认时，意图以提议内容为准：涉及外部仓库/实时信息选 query_external 并配 web_search/web_fetch，涉及本地记忆选 query_memory，涉及文件/导出选 file_op；绝不可判为无工具的 chat 确认性回复。
+⚠ 规则：消息含【待执行提议】标记且当前消息是"可以/好/行/嗯"等短确认时，意图以提议内容为准：涉及外部仓库/实时信息选 query_external，若工具列表中有匹配的连接器工具（conn_前缀，如 GitHub 类）优先选用，否则配 web_search/web_fetch；涉及本地记忆选 query_memory，涉及文件/导出选 file_op；绝不可判为无工具的 chat 确认性回复。
 
 ---
 只输出 JSON，不要解释。

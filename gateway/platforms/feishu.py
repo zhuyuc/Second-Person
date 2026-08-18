@@ -407,6 +407,15 @@ class FeishuAdapter(BasePlatformAdapter):
                 if evt["event"] == "thinking_delta":
                     thinking.append(evt["data"].get("text", ""))
                     dirty = True
+                elif evt["event"] == "mode_decision":
+                    # 【执行路径】展示行由本事件统一渲染（后端不再另发同文案
+                    # thinking_delta），与网页端 ChatView 的处理保持一致
+                    path = "深度分析" if evt["data"].get(
+                        "effective_mode") == "deep" else "快速回答"
+                    thinking.append(
+                        f"【执行路径】{path}："
+                        f"{evt['data'].get('reason') or '模型自动判断'}\n")
+                    dirty = True
                 elif evt["event"] == "content_delta":
                     content.append(evt["data"].get("text", ""))
                     dirty = True

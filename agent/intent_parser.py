@@ -312,6 +312,23 @@ class IntentParser:
         self.snapshot_fn = provider_snapshot_fn  # () -> ProviderSnapshot (chat)
 
     # ---- 快速预判（§3.1） --------------------------------------------------
+    @staticmethod
+    def _quick_fallback(user_message: str, reason: str) -> QuickIntentResult:
+        """快速预判降级：保守进入深度收敛路径，叠加规则强制收敛判断。"""
+        result = QuickIntentResult(
+            intent_hypothesis=user_message[:50],
+            needs_convergence=True,
+            complexity_reason=reason,
+            complexity_hint=5,
+        )
+        force, _reason = needs_convergence_rule(user_message)
+        if force:
+            result.needs_convergence = True
+            result.consistency_corrected = True
+            result.complexity_reason = f"{reason} + 规则强制收敛"
+            result.complexity_hint = max(result.complexity_hint, 5)
+        return result
+
     async def quick_intent(self, user_message: str,
                            session_id: str | None = None,
                            recent_history: str = "") -> QuickIntentResult:
@@ -358,22 +375,15 @@ class IntentParser:
                     result.complexity_reason = f"规则强制收敛：{reason}"
                     result.complexity_hint = max(result.complexity_hint, 5)
             return result
+        except ValueError:
+            # repair_json 抛出：LLM 调用本身成功（已计入 token_usage），
+            # 但返回内容无法解析为 JSON——如实区分，不误报为调用失败
+            logger.error("快速预判输出解析失败（LLM 调用已成功）", exc_info=True)
+            return self._quick_fallback(user_message, "预判输出解析失败")
         except Exception:
             logger.error("快速预判 LLM 调用失败，降级走规则判断", exc_info=True)
             # LLM 失败时也走规则判断，不直接默认快速通道
-            result = QuickIntentResult(
-                intent_hypothesis=user_message[:50],
-                needs_convergence=True,
-                complexity_reason="快速预判 LLM 调用失败",
-                complexity_hint=5,
-            )
-            force, _reason = needs_convergence_rule(user_message)
-            if force:
-                result.needs_convergence = True
-                result.consistency_corrected = True
-                result.complexity_reason = "LLM 失败 + 规则强制收敛"
-                result.complexity_hint = max(result.complexity_hint, 5)
-            return result
+            return self._quick_fallback(user_message, "快速预判 LLM 调用失败")
 
     # ---- 意图收敛（§3.3） --------------------------------------------------
     async def converge_intent(

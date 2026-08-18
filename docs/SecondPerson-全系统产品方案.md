@@ -381,7 +381,7 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 ### 3.12 可观测性
 
 - **trace_id 全链路**：每请求 tr_ 前缀 id，contextvars 跨 await 传播，日志行携带，错误 toast 可复制；
-- **Langfuse 全链路追踪**：自研批量协议客户端（队列 2000 上限 / 3 秒批量上报 / 失败仅告警绝不影响主链路）；层级 trace（chat.turn）→ span（八步流水线 7 个步骤 + 标题生成）→ generation（LLM 调用自动记录模型/输入输出/用量）；本地自托管 Langfuse v2（PostgreSQL 5433 + Redis 6379，页面 3001）；
+- **Langfuse 全链路追踪**：自研批量协议客户端（队列 2000 上限 / 3 秒批量上报 / 失败仅告警绝不影响主链路）；层级 trace（chat.turn）→ span（八步流水线 7 个步骤）→ generation（LLM 调用自动记录模型/输入输出/用量）；标题生成不纳入埋点；本地自托管 Langfuse v2（PostgreSQL 5433 + Redis 6379，页面 3001）；
 - **运行防线**：EventLoopMonitor 事件循环卡顿哨兵（>0.5s warning / >2s error）、慢操作检测（3000ms）、写队列深度仪表、操作日志（90 天，仅排障）；
 - **健康检查**：/api/health 九项子系统三级判定（healthy/degraded/unhealthy），前端侧栏状态灯 30 秒轮询。
 

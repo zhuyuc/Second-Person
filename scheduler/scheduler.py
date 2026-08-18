@@ -6,7 +6,8 @@
   → 已解决矛盾清理 → failed 写入重扫
 - 记忆维护链（每 passive_review_interval_days 天 03:00，04:00 兜底检查）：
   被动回顾 → Lint（含技能提炼归档）→ 画像重建
-- 独立任务：输出样式画像提炼（不入链）
+- 独立任务：输出样式画像提炼（不入链）、情绪模式提取（每周一 04:00）
+- 高频任务：追问过期扫描（每 5 分钟，按 last_run 自门控）
 链上任务失败重试 2 次后整链中断，后续任务跳过并记录。
 手动触发写 task_logs（trigger_source=manual），不改下次定时时间。
 """
@@ -145,6 +146,27 @@ class TaskScheduler:
                                 "UPDATE scheduled_tasks SET last_run=? "
                                 "WHERE task_id='local_dir_scan'",
                                 (now.isoformat(timespec="seconds"),))
+                # 追问过期扫描（每 5 分钟，按 last_run 自门控：register_task 的
+                # schedule 文案仅供展示，触发时机必须在此显式实现；
+                # run_task 成败均推进 last_run，失败也按 5 分钟间隔重试）
+                due = True
+                row = self.db.query_one(
+                    "SELECT last_run FROM scheduled_tasks "
+                    "WHERE task_id='elicit_expire'")
+                if row and row["last_run"]:
+                    try:
+                        due = (now - datetime.fromisoformat(
+                            row["last_run"])) >= timedelta(minutes=5)
+                    except ValueError:
+                        due = True
+                if due:
+                    await self.run_task("elicit_expire")
+                # 情绪模式提取：每周一 04:00（时间窗仅周一出现，
+                # 当日 marker 保证当周只跑一次）
+                if now.weekday() == 0 and now.hour == 4 and now.minute < 5:
+                    if not self._ran_today("mood_pattern_extract_marker"):
+                        await self.run_task("mood_pattern_extract")
+                        self._mark_ran("mood_pattern_extract_marker")
                 # 04:00 兜底检查：若记忆链应跑但未跑成（链首未启动/失败），写日志不补跑
                 if now.hour == 4 and now.minute < 5:
                     if not self._ran_today("fallback_check_marker"):

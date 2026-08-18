@@ -45,6 +45,8 @@ class ConnectorManager:
                 **config, "env": {k: "••••••" for k in config["env"]}}
         elif transport == "http" and config.get("auth", {}).get("value"):
             sensitive["auth_value"] = config["auth"]["value"]
+            clean_config = {
+                **config, "auth": {**config["auth"], "value": "••••••"}}
         cred_id = self.creds.store(f"connector:{cid}", "connector",
                                    json.dumps(sensitive, ensure_ascii=False)) if sensitive else None
         self.db.execute(
@@ -124,8 +126,9 @@ class ConnectorManager:
 
     @staticmethod
     def _guess_destructive(name: str) -> bool:
+        # 与前端 SettingsView.toolBadge 启发式同口径；add/fork 为写入类操作（如 add_issue_comment/fork_repository）
         return any(k in name.lower() for k in
-                   ("create", "delete", "update", "write", "remove", "merge", "push"))
+                   ("create", "delete", "update", "write", "remove", "merge", "push", "add", "fork"))
 
     async def toggle(self, connector_id: str, enabled: bool) -> None:
         if enabled:
@@ -182,11 +185,19 @@ class ConnectorManager:
             "credential_id=? WHERE id=?",
             (name, transport, json.dumps(clean_config, ensure_ascii=False), timeout,
              json.dumps(tools_filter or {}, ensure_ascii=False), cred_id, connector_id))
-        # 重连
+        # 重连（与 add/toggle 同口径回写 status：成功 connected，失败 error，
+        # 避免库里残留陈旧状态误导设置页展示）
         old_client = self._clients.pop(connector_id, None)
         if old_client:
             await old_client.disconnect()
-        await self.connect(connector_id)
+        try:
+            await self.connect(connector_id)
+        except Exception:  # noqa: BLE001
+            self.db.execute(
+                "UPDATE connectors SET status='error' WHERE id=?", (connector_id,))
+            raise
+        self.db.execute(
+            "UPDATE connectors SET status='connected' WHERE id=?", (connector_id,))
 
     async def delete(self, connector_id: str) -> None:
         row = self.db.query_one("SELECT credential_id FROM connectors WHERE id=?",
@@ -205,9 +216,14 @@ class ConnectorManager:
         out = []
         for r in rows:
             tools = json.loads(r["tools_cache"] or "[]")
+            config = json.loads(r["config"])
+            # 防御性脱敏：历史行可能残留明文 auth 值，出参一律按占位回显
+            if config.get("auth", {}).get("value"):
+                config["auth"] = {**config["auth"], "value": "••••••"}
             out.append({
                 "id": r["id"], "name": r["name"], "transport": r["transport"],
                 "status": r["status"], "timeout": r["timeout"],
+                "config": config,
                 "tools": tools, "tool_count": len(tools),
                 "tools_filter": json.loads(r["tools_filter"] or "{}"),
                 "created_at": r["created_at"],

@@ -10,7 +10,9 @@ query_knowledge — 查询【客观/通用】知识，答案不依赖用户个�
 
 query_external  — 需要联网获取【实时/最新】信息
                   触发信号：现在/今天/最新/当前/实时/股价/汇率/天气/新闻
-                  ⚠ 必须把 web_search 写入 tools_needed（若工具列表中有）
+                  ⚠ 必须把 web_search 写入 tools_needed（若工具列表中有）；
+                     但工具列表中存在更匹配用户诉求的连接器工具（conn_ 前缀）时，
+                     优先选连接器工具，见下方"连接器工具"规则
 
 compute         — 纯数学/算术计算
 file_op         — 对已有工作区文件进行操作，或导出文档供下载
@@ -77,13 +79,28 @@ remember_intent 与 remember_confirm 的边界（重要）：
 - web_fetch：仅当用户给了具体网址要求阅读时使用
 - query_knowledge vs query_external 判定：涉及"今天/最新/当前/实时"等时间敏感词 → query_external + web_search；
   不涉及时效性的通用知识问题（"XX是什么""XX原理"）→ query_knowledge，不触发外部工具。
+- ⚠ 例外：当工具列表中存在与诉求更匹配的连接器工具（如 GitHub 连接器）时，
+  优先选连接器工具，不要用 web_search 兜底，见下方"连接器工具"规则。
+
+### 连接器工具（conn_ 前缀，外部系统能力）
+
+- 工具列表中可能包含外部系统连接器注入的工具，命名形如 conn_xxxx__工具名，
+  前缀只是连接器标识，能力以工具描述为准。
+- ⚠ 优先级规则：用户诉求与某连接器工具的能力语义匹配时，tools_needed 必须写
+  对应的连接器工具名，不得用 web_search/web_fetch 替代。
+- 典型场景：用户说"git 上查一下/在 GitHub 上找某个项目/分析某个仓库的代码"，
+  且工具列表含 conn_xxxx__search_repositories、conn_xxxx__get_file_contents、
+  conn_xxxx__search_code 等 GitHub 类工具 → 选这些工具（intent_type 用 query_external），
+  而不是去公网搜索引擎搜索。
+- ❌ 用户诉求与连接器工具描述不匹配时（如查实时新闻/天气/股价），仍用 web_search。
 
 ---
 
 工具选择规则（重要）：
 
 - 凡涉及实时/最新/当下的外部信息（股价、汇率、天气、新闻、赛事、"现在/今天/最新"等），
-  intent_type 用 query_external，且 tools_needed 必须包含 "web_search"（若工具列表中有）。
+  intent_type 用 query_external，且 tools_needed 必须包含 "web_search"（若工具列表中有）；
+  除非工具列表中有更匹配用户诉求的连接器工具（见"连接器工具"规则）。
 - 用户给了具体网址要求阅读，则用 web_fetch。
 - soul_feedback（语气/行为反馈）：识别后 tools_needed 用 ["memory_save"]，将用户反馈存入记忆层。
 - output_preference_feedback（输出格式偏好）：识别后 tools_needed 用 ["memory_save"]，记录输出偏好；

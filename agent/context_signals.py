@@ -181,9 +181,29 @@ PROPOSAL_TOOL_MAP: list[tuple[str, str, list[str]]] = [
      "file_op", ["generate_document"]),
     (r"记忆|你记得|我说过|我的(偏好|习惯|情况)",
      "query_memory", ["memory_search"]),
-    (r"仓库|github|源码|目录结构|联网|搜一?下|查一?下|最新|官网",
+    # 仓库/GitHub 类提议：占位符 __github_conn__ 运行时解析为已注册的
+    # GitHub 连接器工具（前缀 conn_xxxx 动态，规则层无法硬编码）
+    (r"仓库|github|源码|目录结构",
+     "query_external", ["__github_conn__"]),
+    (r"联网|搜一?下|查一?下|最新|官网",
      "query_external", ["web_search", "web_fetch"]),
 ]
+
+# GitHub 连接器工具识别：工具名含 conn_ 前缀且尾部为 GitHub API 类能力
+_GITHUB_CONN_SUFFIXES = (
+    "__search_repositories", "__get_file_contents", "__search_code",
+    "__list_commits", "__search_issues", "__fork_repository",
+)
+
+
+def _resolve_github_conn_tools(tool_names: list[str]) -> list[str]:
+    """从注册表工具名中解析 GitHub 连接器工具；无命中回退 web_search/web_fetch。"""
+    hits = [t for t in (tool_names or [])
+            if t.startswith("conn_") and t.endswith(_GITHUB_CONN_SUFFIXES)]
+    if hits:
+        # 搜索→读内容 的典型组合优先，最多取 3 个避免意图工具序列过长
+        return hits[:3]
+    return [t for t in ("web_search", "web_fetch") if t in (tool_names or [])]
 
 
 def map_proposal_tools(proposal_text: str,
@@ -197,6 +217,9 @@ def map_proposal_tools(proposal_text: str,
         if re.search(pattern, proposal_text or ""):
             itype, tools = t, list(ts)
             break
+    # 占位符解析：GitHub 连接器工具名含动态 conn_ 前缀，此处运行时匹配
+    if "__github_conn__" in tools:
+        tools = _resolve_github_conn_tools(tool_names)
     available = [t for t in tools if t in (tool_names or [])]
     if not available and "web_search" in (tool_names or []):
         available = ["web_search"]

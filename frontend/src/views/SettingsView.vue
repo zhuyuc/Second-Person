@@ -263,25 +263,97 @@ async function confirmMigrate() {
 const showAddConn = ref(false)
 const newConn = ref({ name: '', transport: 'stdio', command: 'npx', args: '', env: '', url: '', timeout: 120 })
 async function addConnector() {
-  const cfg = newConn.value.transport === 'stdio'
-    ? { command: newConn.value.command, args: parseJson(newConn.value.args, []), env: parseJson(newConn.value.env, {}) }
-    : { url: newConn.value.url }
-  await api.post('/settings/connectors', { name: newConn.value.name, transport: newConn.value.transport, config: cfg, timeout: newConn.value.timeout })
+  await api.post('/settings/connectors', { name: newConn.value.name, transport: newConn.value.transport, config: connCfgPayload(newConn.value), timeout: newConn.value.timeout })
   showAddConn.value = false; await loadConnectors(); toast.push('success', '已添加')
 }
 function parseJson(s, def) { try { return s ? JSON.parse(s) : def } catch { return def } }
 
 // 连接器：测试连接（仅验证）——后端失败时返回 code:200+ok:false，必须检查 r.ok 而非靠异常
 async function testConnector() {
-  const cfg = newConn.value.transport === 'stdio'
-    ? { command: newConn.value.command, args: parseJson(newConn.value.args, []), env: parseJson(newConn.value.env, {}) }
-    : { url: newConn.value.url }
-  const r = await api.post('/settings/connectors/test', { name: newConn.value.name, transport: newConn.value.transport, config: cfg })
+  const r = await api.post('/settings/connectors/test', { name: newConn.value.name, transport: newConn.value.transport, config: connCfgPayload(newConn.value) })
   if (r.ok) toast.push('success', `连接测试成功，发现 ${r.tool_count ?? 0} 个工具`)
   else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
 
 // 连接器：保存直接复用 addConnector（单一入口，不再冗余包装）
+
+// 连接器编辑：回显现有配置（敏感值为 •••••• 占位，不改动时后端保留原值）
+const showEditConn = ref(false)
+const editConn = ref({ id: '', name: '', transport: 'stdio', command: '', args: '', env: '', url: '', timeout: 120, tools_filter: null })
+function openConnEdit(c) {
+  const cfg = c.config || {}
+  editConn.value = {
+    id: c.id, name: c.name, transport: c.transport, timeout: c.timeout ?? 120,
+    command: cfg.command || '',
+    args: (cfg.args || []).length ? JSON.stringify(cfg.args) : '',
+    env: cfg.env && Object.keys(cfg.env).length ? JSON.stringify(cfg.env) : '',
+    url: cfg.url || '',
+    tools_filter: c.tools_filter || null,
+  }
+  showEditConn.value = true
+}
+// 添加/编辑共用的 config 组装：stdio 取 command/args/env，http 取 url
+function connCfgPayload(f) {
+  return f.transport === 'stdio'
+    ? { command: f.command, args: parseJson(f.args, []), env: parseJson(f.env, {}) }
+    : { url: f.url }
+}
+async function saveConnEdit() {
+  await api.put('/settings/connectors/' + editConn.value.id, {
+    name: editConn.value.name, transport: editConn.value.transport,
+    config: connCfgPayload(editConn.value), timeout: editConn.value.timeout,
+    tools_filter: editConn.value.tools_filter,
+  })
+  showEditConn.value = false; await loadConnectors(); toast.push('success', '已保存')
+}
+// 编辑态测试连接：env 仍含占位密钥时禁用（拿占位值测试必然失败，避免误导）
+const editConnMasked = computed(() => (editConn.value.env || '').includes('••••••'))
+async function testEditConn() {
+  const r = await api.post('/settings/connectors/test', {
+    name: editConn.value.name, transport: editConn.value.transport, config: connCfgPayload(editConn.value),
+  })
+  if (r.ok) toast.push('success', `连接测试成功，发现 ${r.tool_count ?? 0} 个工具`)
+  else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
+}
+
+// 连接器工具清单：数据直接取列表接口已返回的 c.tools，不发额外请求
+const viewTools = ref(null)
+const expandedTool = ref('')
+function openToolList(c) { expandedTool.value = ''; viewTools.value = c }
+function toggleTool(t) { expandedTool.value = expandedTool.value === t.name ? '' : t.name }
+// 工具语义中文标注：优先取 MCP annotations，缺失时按名称启发式兜底（与后端 _guess_destructive 同口径）
+function toolBadge(t) {
+  const ann = t.annotations || {}
+  if (ann.destructiveHint) return { label: '破坏性', cls: 'badge-r' }
+  if (ann.readOnlyHint === true) return { label: '只读', cls: 'badge-g' }
+  if (ann.readOnlyHint === false) return { label: '写入', cls: '' }
+  const writable = /create|delete|update|write|remove|merge|push|add|fork/.test(t.name.toLowerCase())
+  return writable ? { label: '写入', cls: '' } : { label: '只读', cls: 'badge-g' }
+}
+// 描述只保留开篇摘要：截断 Python docstring 的 Args/Returns 段（参数明细已在展开区结构化呈现，避免重复）
+function toolSummary(t) {
+  const raw = (t.description || '').trim()
+  if (!raw) return ''
+  return raw.split(/\n(?=\s*(Args|Arguments|Returns|Raises)\s*:)/i)[0].trim()
+}
+// inputSchema 展平成参数行：类型兼容 anyOf/数组写法，兼容缺省
+function schemaType(v) {
+  if (v.anyOf) {
+    const ts = v.anyOf.map(x => x.type).filter(t => t && t !== 'null')
+    return ts.length ? ts.join('|') : 'any'
+  }
+  if (Array.isArray(v.type)) return v.type.join('|')
+  return v.type || 'any'
+}
+function toolParams(t) {
+  const schema = t.inputSchema || {}
+  const req = schema.required || []
+  return Object.entries(schema.properties || {}).map(([name, v]) => ({
+    name, type: schemaType(v), required: req.includes(name),
+    def: v.default !== undefined ? JSON.stringify(v.default) : '',
+    desc: v.description || '',
+  }))
+}
 
 // 接入渠道配置
 const showChannelCfg = ref(false)
@@ -535,6 +607,8 @@ onActivated(() => selectTab(tab.value))
           : '已停用' }}</span>
       </div>
       <div class="fg" style="gap:6px;margin-top:10px">
+        <button class="btn-xs" @click="openConnEdit(c)">编辑</button>
+        <button class="btn-xs" @click="openToolList(c)">工具</button>
         <button class="btn-xs" :disabled="busy('togC' + c.id)" @click="run('togC' + c.id, () => toggleConn(c))">{{
           c.status === 'connected' ? '断开' : '连接' }}</button>
         <button class="btn-xs" :disabled="busy('refC' + c.id)" @click="run('refC' + c.id, () => refreshConn(c.id))"><i
@@ -592,8 +666,8 @@ onActivated(() => selectTab(tab.value))
         <div style="flex:1;min-width:0">
           <div class="param-label">{{ s.label }}</div>
           <div v-if="s.desc" class="param-desc">{{ s.desc }}</div>
-          <div class="param-effect">{{ effectNames[s.effect] }}<span
-              v-if="s.min !== undefined"> · 取值范围 {{ s.min }}–{{ s.max ?? '∞' }}</span></div>
+          <div class="param-effect">{{ effectNames[s.effect] }}<span v-if="s.min !== undefined"> · 取值范围 {{ s.min }}–{{
+            s.max ?? '∞' }}</span></div>
         </div>
         <div class="param-ctrl">
           <input v-if="s.type === 'bool'" type="checkbox" v-model="params[s.key]" />
@@ -912,6 +986,63 @@ onActivated(() => selectTab(tab.value))
     </div>
   </BaseModal>
 
+  <!-- 编辑连接器弹窗：与添加表单同构；占位密钥不改动时后端保留原值 -->
+  <BaseModal v-if="showEditConn" title="编辑 MCP 连接器" @close="showEditConn = false">
+    <div class="form-group"><label class="label">名称</label><input v-model="editConn.name" />
+    </div>
+    <div class="form-group"><label class="label">传输方式</label>
+      <select v-model="editConn.transport">
+        <option value="stdio">stdio — 本地子进程</option>
+        <option value="http">Streamable HTTP</option>
+      </select>
+    </div>
+    <template v-if="editConn.transport === 'stdio'">
+      <div class="form-group"><label class="label">启动命令</label><input v-model="editConn.command" /></div>
+      <div class="form-group"><label class="label">参数（JSON 数组）</label><input v-model="editConn.args"
+          placeholder='["-y","@modelcontextprotocol/server-github"]' /></div>
+      <div class="form-group"><label class="label">环境变量（JSON 对象）</label><input v-model="editConn.env"
+          placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' /></div>
+    </template>
+    <template v-else>
+      <div class="form-group"><label class="label">端点地址</label><input v-model="editConn.url" /></div>
+    </template>
+    <div v-if="editConnMasked" class="muted" style="margin-bottom:12px">环境变量中的 •••••• 为占位密钥，保持不动即沿用原值；填入新值则覆盖。</div>
+    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+      <button @click="showEditConn = false">取消</button>
+      <button :disabled="busy('testEditConn') || editConnMasked" @click="run('testEditConn', testEditConn)"><i
+          v-if="busy('testEditConn')" class="ti ti-loader-2"></i> 测试连接</button>
+      <button class="btn-primary" :disabled="busy('saveEditConn')" @click="run('saveEditConn', saveConnEdit)"><i
+          v-if="busy('saveEditConn')" class="ti ti-loader-2"></i> 保存</button>
+    </div>
+  </BaseModal>
+
+  <!-- 连接器工具清单弹窗：数据取自列表接口的 tools 缓存，点击工具行展开参数明细 -->
+  <BaseModal v-if="viewTools" :title="'工具清单 · ' + viewTools.name" size="lg" @close="viewTools = null">
+    <div class="muted mb-3">共 {{ viewTools.tool_count }} 个工具 · 点击工具行可展开参数明细</div>
+    <div v-for="t in viewTools.tools" :key="t.name" class="cw tool-row" role="button" tabindex="0"
+      :aria-expanded="expandedTool === t.name" :aria-label="'工具 ' + t.name + '，点击展开参数明细'" @click="toggleTool(t)"
+      @keydown.enter.prevent="toggleTool(t)" @keydown.space.prevent="toggleTool(t)">
+      <div class="row">
+        <div class="fg">
+          <code>{{ t.name }}</code>
+          <span class="badge" :class="toolBadge(t).cls">{{ toolBadge(t).label }}</span>
+        </div>
+        <i class="ti muted" :class="expandedTool === t.name ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+      </div>
+      <div v-if="toolSummary(t)" class="tool-desc">{{ toolSummary(t) }}</div>
+      <div v-if="expandedTool === t.name" class="tool-params" @click.stop>
+        <div v-if="!toolParams(t).length" class="muted">无参数</div>
+        <div v-for="p in toolParams(t)" :key="p.name" class="param-row">
+          <code>{{ p.name }}</code>
+          <span class="muted">{{ p.type }}</span>
+          <span v-if="p.required" class="badge badge-r">必填</span>
+          <span v-if="p.def" class="muted">默认 {{ p.def }}</span>
+          <span v-if="p.desc" class="muted param-desc">{{ p.desc }}</span>
+        </div>
+      </div>
+    </div>
+  </BaseModal>
+
   <!-- 接入渠道配置弹窗 -->
   <BaseModal v-if="showChannelCfg" title="配置接入渠道" @close="showChannelCfg = false">
     <div class="form-group"><label class="label">平台</label>
@@ -1030,3 +1161,37 @@ onActivated(() => selectTab(tab.value))
     </div>
   </BaseModal>
 </template>
+
+<style scoped>
+/* 工具清单弹窗：工具行与参数明细（仅此处使用，不污染全局类库） */
+.tool-row {
+  cursor: pointer;
+  margin-bottom: var(--sp-3);
+}
+
+.tool-desc {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--muted);
+  white-space: pre-line;
+}
+
+.tool-params {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--bd);
+}
+
+.param-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) 0;
+  font-size: var(--fs-sm);
+}
+
+.param-desc {
+  flex-basis: 100%;
+}
+</style>
