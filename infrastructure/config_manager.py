@@ -218,8 +218,11 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "effect": "next_turn", "group": "other", "order": 5, "label": "输出画像自动演化",
      "desc": "是否允许系统根据反馈自动更新回复风格；关闭后只能在画像页手动提炼。"},
     {"key": "response_depth_enabled", "type": "bool", "default": True,
-     "effect": "next_turn", "group": "other", "order": 8, "label": "场景化回复篇幅",
-     "desc": "根据消息场景自动判定回复篇幅：寒暄简短、方案/分析详细；关闭后所有场景按输出画像默认篇幅回复。"},
+     "effect": "next_turn", "group": "other", "order": 8, "label": "常规回答表达密度",
+     "desc": "仅调节快速和常规回答的表达密度；深度模式始终按任务合同完整交付，不受该项限制。"},
+    {"key": "deep_quality_gate_enabled", "type": "bool", "default": True,
+     "effect": "next_turn", "group": "other", "order": 9, "label": "深度回答质量校验",
+     "desc": "深度模式完成初稿后，检查用户明确需求是否都有实质解法；发现遗漏时自动补齐，不以缩短内容换取速度。"},
     # -- 位置 --
     {"key": "geolocation_enabled", "type": "bool", "default": False,
      "effect": "immediate", "group": "other", "order": 7,

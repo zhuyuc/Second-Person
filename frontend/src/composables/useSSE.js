@@ -6,7 +6,7 @@ import { postJsonStream } from '@/api/streamClient'
 export function useSSE() {
     let controller = null
 
-    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, editMessageId, location, onEvent, onError, handoffPath, thinkMode }) {
+    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, editMessageId, location, onEvent, onError, handoffPath, thinkMode = 'auto' }) {
         const crid = clientRequestId || genId()
         sessionStorage.setItem('sp_active_crid', crid)
         // 首次发送携带 message；断线重连时同 crid 重推（服务端缓冲区断点续推）
@@ -29,8 +29,8 @@ export function useSSE() {
                     edit_message_id: editMessageId || undefined,
                     location: location || undefined,
                     handoff_path: handoffPath || undefined,
-                    // 思考模式用户指定：quick=快速回复 / deep=深度思考；不传 → 后端 auto
-                    think_mode: thinkMode || undefined,
+                    // auto=模型自主路由；quick/deep 为用户显式覆盖。
+                    think_mode: thinkMode,
                 }, { signal: controller.signal })
                 const reader = resp.body.getReader()
                 const decoder = new TextDecoder()

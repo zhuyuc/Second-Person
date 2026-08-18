@@ -83,19 +83,19 @@
 | 4 意图识别 | LLM 结构化输出拆解多意图（11 种枚举），JSON 修复链 + 重试 3 次 | 失败降级单 chat 意图 |
 | 5 流程编排 | DAG 拓扑分层（Kahn），同层并行；环检测降级单意图直出；技能按需注入 | 依赖容错：非法依赖丢弃、未注册工具剔除 |
 | 6 工具执行 | 按层 asyncio 并行；LLM function_call 推断参数；破坏性操作弹确认（300s 超时）；失败 Replan 补救（每请求 1 次） | 空结果重试 1 次；凭证脱敏 |
-| 7 响应合成 | 组装记忆 + 工具结果 + disputed 提示的合成 prompt，流式生成；尾部提取 citations / memory_confirm 声明 | 工具结果单条截断 8000 字符 |
-| 8 后置处理 | 回复落库（含 thinking）；信号采集阶段一；主动记忆检测（含新事实句式→回顾候选）；频次三类更新；引用溯源落表；stable 升级检查；预算告警 | fire-and-forget，不阻塞回复 |
+| 7 响应合成 | `auto` 路由到 quick/deep；deep 先建立任务合同与问题模型，逐项覆盖质量门通过后交付；长文按可恢复章节生成 | 单次模型物理上限只影响单节，不截短整篇交付 |
+| 8 后置处理 | 回复落库（安全分析元数据、策略、骨架）；信号采集阶段一；主动记忆检测；频次更新；引用溯源；预算告警 | fire-and-forget，不阻塞回复 |
 
 **意图类型枚举（11 种）**：`query_memory` / `query_knowledge` / `query_external` / `compute` / `file_op` / `remember_intent`（明确记忆指令，直接写入）/ `remember_confirm`（重要性表态，需确认）/ `soul_feedback` / `output_preference_feedback` / `meta` / `chat`。
 
 **SSE 事件类型全集**：
-`queued`（排队）、`error`、`memory_retrieved`、`thinking_delta`（思考增量：意图理解/工具调用/模型原生推理统一外露并随消息持久化）、`degrade`（降级提示）、`tool_executing`、`tool_confirm`（破坏性待确认）、`tool_confirm_timeout`、`content_delta`、`citations`、`turn_completed`。
+`queued`（排队）、`error`、`memory_retrieved`、`thinking_delta`（安全分析摘要）、`mode_decision`（自动路由结果）、`analysis_progress`、`delivery_progress`、`quality_status`、`degrade`（降级提示）、`tool_executing`、`tool_confirm`（破坏性待确认）、`tool_confirm_timeout`、`content_delta`、`citations`、`turn_completed`。不传输或保存模型原生链式思维。
 
 **并发与可靠性**：
 
-- 同会话串行处理，排队上限 `session_queue_limit=3`，单请求总超时 600 秒；
+- 同会话串行处理，排队上限 `session_queue_limit=3`；模型与工具保留各自超时，整轮任务不以固定总时长截断长文交付；
 - SSE 断线重连：按 `client_request_id` 缓冲事件 5 分钟 / 1MB，重连断点续推；
-- 客户端断开即取消后台 worker，避免流式空转；
+- 浏览器断开只断开 SSE 读者，后台生成继续并可重连；仅用户点击停止才取消 worker，深度/长文任务使用较长的可恢复缓冲窗口；
 - mimo 模型内置联网搜索：query_external 意图 + mimo 模型 + 开关开启时由模型端搜索（博查源，带结构化引用，回复尾部自动附"联网来源"列表），否则回退自研 web_search（Bing 优先 / DuckDuckGo 兜底）。
 
 **延迟写入**：`file_write` 内容为回复正文时（`__FROM_RESPONSE__` 标记），登记延迟写，回复流式生成完成后自动写入。
@@ -119,7 +119,7 @@
 - 会话 CRUD：新建 / 重命名（manual 优先）/ 置顶 / 删除（级联清理消息、平台映射、摘要文件）；
 - 自动标题：首条消息立即取前 15 字符兜底，并行调 LLM 生成 2-8 字标题（3 秒超时，晚到覆盖）；
 - 列表：置顶优先 + 最近活跃排序，FTS5 全文关键词搜索，分页；
-- 消息：持久化 citations（引用记忆）与 thinking（思考过程），历史可回看；
+- 消息：持久化 citations（引用记忆）、安全进度摘要与分析元数据（请求模式、实际执行模式、问题模型摘要、质量状态）；历史可回看；
 - 附件：上传解析为文本（20MB 上限，不截断，不入记忆库，仅供当轮上下文）。
 
 ### 3.3 记忆系统（核心竞争力）
@@ -405,7 +405,7 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 ### 4.1 页面结构（Vue3 三大页 + 全局壳）
 
 - **全局壳 App.vue**：引导流程全屏接管；左侧会话栏（会话列表/搜索/置顶/健康灯）；全局 toast（错误带复制 trace_id）；系统自研确认弹窗（禁用原生 window.confirm）；
-- **对话页 /chat**：SSE 流式回复；思考过程面板流式展示 + 完成自动折叠（历史可回看）；代码块统一操作条（语言标签/复制/预览）与全局高度限制；引用记忆卡片可点击查详情；消息操作（点赞/点踩带原因、重新生成原位替换、复制）；工具确认卡片；附件与图片上传；浏览器定位（可选）随消息携带；断线自动重连续推；
+- **对话页 /chat**：默认“自动模式”，可覆盖为快速回答或深度思考；SSE 展示安全进度与完整回复，深度任务展示问题建模、分节交付和质量状态，不展示原生推理；其余交互保持现有规范。
 - **记忆中心 /memory** 六 Tab：
   1. 知识图谱：WebGL 渲染 + 搜索定位 + 邻居扩展 + 节点详情抽屉；
   2. 记忆列表：分页/关键词（混合检索）/领域/生命周期/置信度/重要筛选，属性编辑、归档/恢复/删除；
@@ -445,9 +445,9 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 
 | 分组 | 表 |
 | --- | --- |
-| 供应商与凭证 | credentials（加密凭证）、providers、model_assignment（四槽位） |
+| 供应商与凭证 | credentials（加密凭证）、providers、model_assignment（chat/agent/intent/deep_analysis/embedding/vision 槽位） |
 | 接入渠道 | platforms、platform_sessions、message_dedup |
-| 对话 | conversations（含 thinking/citations/feedback）+ conversations_fts + 触发器、sessions（含置顶/压缩水位） |
+| 对话 | conversations（含 thinking/citations/analysis_metadata/feedback）+ conversations_fts + 触发器、sessions（含置顶/压缩水位）、delivery_jobs、delivery_sections |
 | 记忆索引 | memories（主索引）、memories_fts、vectors（BLOB + pending/ready/failed）、memory_links（5 类边）、memory_entities、memory_entity_links、memory_timeline、lint_suggestions、graph_layout（预计算坐标）、domain_labels（中文标签缓存）、citation_events（引用溯源）、review_candidates（回顾候选）、pending_imports（导入预览暂存） |
 | 素材与技能 | raw_docs（含 extracted_text 解析缓存/review_status）、skill_usage、skill_patterns（3 次计数） |
 | 写入与信号 | pending_writes（写队列持久化）、response_signals（两阶段信号） |
@@ -486,7 +486,7 @@ data/
 | 检索 | top_k 10、向量阈值 0.55、兜底 0.35、BM25 下限 0.3、合并阈值 0.85、建链 0.6、重复提示 0.9、rrf_k 60、个人问题知识降权 0.7、知识问题记忆降权 0.85 |
 | 输出画像 | 提炼间隔 7 天、批阈值 100、保留 90 天、窗口 30 天、自动演化 on |
 | 可视化 | 图谱 300 节点 / 2000 边 |
-| 其他 | 会话排队 3、切块 6000 token、抓取超时 15s、工具确认 300s、IM 单条 4000 字、向量缓存 512MB、浏览器定位 off、mimo 内置搜索 on（关键词上限 3） |
+| 其他 | 会话排队 3、常规回答表达密度、深度回答质量校验 on、抓取超时 15s、工具确认 300s、IM 单条 4000 字、向量缓存 512MB、浏览器定位 off、mimo 内置搜索 on（关键词上限 3） |
 
 ---
 
@@ -521,6 +521,7 @@ frontend/ 下 `npm run build`，产物部署至 `app/static/` 由主应用挂载
 2. **人格闭环**：用户风格反馈 → 待确认 → 对话确认 → 语义去重落盘建版；回复信号两阶段采集 → 输出画像自动提炼 → 影响后续回复风格 → 新信号继续采集；
 3. **可靠性闭环**：写入失败 → failed 标记 + 通知 → 夜间重扫重放；Embedding 不可用 → pending 占位 → 补偿协程回填 → 回溯去重；外部编辑 → watcher 感知 → 索引同步/注入扫描；
 4. **成本闭环**：全调用 token 记录 → 用量统计/费用实算 → 预算告警 → （策略可扩展为阻断）。
+5. **问题解决闭环**：自动路由 → 深度任务合同与问题模型 → 逐项方案 → 需求覆盖质量门 → 长文分节持久化与恢复 → 用户反馈校准。
 
 ---
 

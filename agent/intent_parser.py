@@ -52,6 +52,45 @@ INTENT_TYPE_LABELS = {
 }
 
 
+def extract_explicit_requirements(message: str) -> list[str]:
+    """保守提取用户明确列出的事项，供深度路径的本地兜底使用。"""
+    message = (message or "").strip()
+    if not message:
+        return []
+    lines = [re.sub(
+        r"^\s*(?:[-*]|\d+[.、]|[一二三四五六七八九十]+[、.])\s*", "", line).strip()
+        for line in message.splitlines()
+    ]
+    listed = [line for line in lines if len(line) >= 3]
+    if len(listed) >= 2:
+        return _dedupe_requirement_texts(listed)
+    pieces = re.split(
+        r"(?:\n|；|;|。|(?<=，)同时|(?<=，)并且|(?<=，)以及|(?<=，)另外)", message)
+    return _dedupe_requirement_texts(piece.strip() for piece in pieces) or [message]
+
+
+def infer_deep_delivery_form(message: str, requirement_count: int) -> str:
+    """仅决定 deep 路径内部交付形态，不将其扩展为新的用户模式。"""
+    if re.search(
+            r"(?:\d+\s*(?:万字|千字|字)|白皮书|研究报告|完整报告|长篇|长文|"
+            r"导出.{0,12}(?:word|docx|markdown|md|pdf)|生成.{0,12}(?:文档|报告))",
+            message or "", re.I):
+        return "long_document"
+    return "structured" if requirement_count > 1 else "direct"
+
+
+def _dedupe_requirement_texts(values) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        key = re.sub(r"\s+", "", text).lower()
+        if text and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
+
+
 @dataclass
 class Intent:
     id: str
@@ -281,8 +320,9 @@ class IntentParser:
         if snap is None:
             return QuickIntentResult(
                 intent_hypothesis=user_message[:50],
-                needs_convergence=False,
-                complexity_reason="LLM 不可用，默认快速通道",
+                needs_convergence=True,
+                complexity_reason="路由模型不可用，保守进入深度路径",
+                complexity_hint=5,
             )
         system = PROMPTS.load_raw("agent/prompts/quick_intent")
         # 拼接上下文：近期对话在前，帮助消解"你推荐的""上次说的"等悬空指代
@@ -323,9 +363,9 @@ class IntentParser:
             # LLM 失败时也走规则判断，不直接默认快速通道
             result = QuickIntentResult(
                 intent_hypothesis=user_message[:50],
-                needs_convergence=False,
+                needs_convergence=True,
                 complexity_reason="快速预判 LLM 调用失败",
-                complexity_hint=3,
+                complexity_hint=5,
             )
             force, _reason = needs_convergence_rule(user_message)
             if force:

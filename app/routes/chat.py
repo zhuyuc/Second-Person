@@ -68,9 +68,6 @@ def _load_images_as_data_uri(data_dir, filenames: list[str]) -> list[str]:
 # client_request_id -> {events, dropped, done, started, finished, size, sid, task}
 _BUFFERS: dict[str, dict] = {}
 BUFFER_TTL = 300        # 生成完成后缓冲保留 5 分钟供断线重连
-BUFFER_HARD_TTL = 900   # 硬上限：超时仍未完成（流水线自身 600s 超时）取消并回收
-# elicitation 等待中超时放宽（48h，覆盖 IM 24h TTL）
-BUFFER_HARD_TTL_ELICITATION = 86400 * 2
 BUFFER_MAX = 1024 * 1024
 
 
@@ -88,22 +85,14 @@ def _gc_buffers():
         if v["done"]:
             if now - (v.get("finished") or v["started"]) > BUFFER_TTL:
                 _BUFFERS.pop(k, None)
-        else:
-            hard_ttl = BUFFER_HARD_TTL_ELICITATION if v.get(
-                "elicitation_pending") else BUFFER_HARD_TTL
-            if now - v["started"] > hard_ttl:
-                t = v.get("task")
-                if t and not t.done():
-                    t.cancel()
-                _BUFFERS.pop(k, None)
+        # 活跃请求不按固定时长取消：深度/长文的完成时间由任务合同决定。
+        # 模型、工具和用户主动停止仍各自有超时/取消语义。
     if len(_BUFFERS) > _BUFFERS_MAX_COUNT:
-        by_age = sorted(_BUFFERS.items(), key=lambda kv: kv[1]["started"])
-        for k, _ in by_age[:len(_BUFFERS) - _BUFFERS_MAX_COUNT]:
-            buf = _BUFFERS.pop(k, None)
-            if buf and not buf["done"]:
-                t = buf.get("task")
-                if t and not t.done():
-                    t.cancel()
+        completed = sorted(
+            ((k, v) for k, v in _BUFFERS.items() if v["done"]),
+            key=lambda kv: kv[1]["started"])
+        for k, _ in completed[:max(0, len(_BUFFERS) - _BUFFERS_MAX_COUNT)]:
+            _BUFFERS.pop(k, None)
 
 
 async def _follow(buf: dict):
@@ -151,10 +140,10 @@ async def chat_send(request: Request):
     location = (body.get("location") or "").strip()[:60] or None
     # handoff 摘要附件路径（会话上下文管理方案 v2）
     handoff_path = (body.get("handoff_path") or "").strip() or None
-    # 思考模式用户指定：quick=快速回复 / deep=深度思考；
+    # 思考模式用户指定：auto=模型决策 / quick=快速回复 / deep=深度思考；
     # 缺失或非法 → auto（保留模型判断，IM 等无 UI 渠道兜底）
     think_mode = body.get("think_mode")
-    if think_mode not in ("quick", "deep"):
+    if think_mode not in ("auto", "quick", "deep"):
         think_mode = "auto"
     c = _c()
 
@@ -169,7 +158,7 @@ async def chat_send(request: Request):
 
     buf = {"events": [], "dropped": 0, "done": False, "started": time.time(),
            "finished": None, "size": 0, "sid": sid, "task": None,
-           "nudge": asyncio.Event()}
+           "nudge": asyncio.Event(), "deep_requested": think_mode == "deep"}
     if crid:
         _BUFFERS[crid] = buf
 
@@ -267,6 +256,11 @@ async def chat_send(request: Request):
                                         think_mode=think_mode,
                                         edit_parent_id=_ep,
                                         edit_version_group_id=_evg):
+                if (evt.get("event") == "mode_decision"
+                        and evt.get("data", {}).get("effective_mode") == "deep"):
+                    buf["deep_delivery"] = True
+                if evt.get("event") == "delivery_progress":
+                    buf["long_delivery"] = True
                 buf["events"].append(evt)
                 buf["size"] += len(json.dumps(evt.get("data", {})))
                 if buf["size"] > BUFFER_MAX:

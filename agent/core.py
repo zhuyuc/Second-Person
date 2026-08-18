@@ -9,15 +9,18 @@ Agent Core —— 八步对话流水线编排（产品文档 §对话调度引�
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
-from infrastructure.llm_provider import CircuitOpenError
 from infrastructure.json_repair import repair_json
+from infrastructure.llm_provider import CircuitOpenError
 from infrastructure.observability import get_trace_id
 from infrastructure.prompt_loader import PROMPTS
 from langfuse.integration import get_tracer, mark_preview
@@ -49,8 +52,15 @@ from .strategy_engine import (
     StrategyEngine,
     StrategyInputs,
 )
-from .meta_cognitive import CognitiveSkeleton, MetaCognitiveProtocol
+from .meta_cognitive import (
+    CognitiveSkeleton,
+    DeliveryContract,
+    MetaCognitiveProtocol,
+    ProblemModel,
+    ProblemModelBuilder,
+)
 from .next_step import NextStepPipeline, parse_suggestion, strip_suggestion_from_partial
+from .response_synthesizer import QualityGate, QualityReport
 from .context_signals import (
     detect_fake_claim,
     detect_proposal_sentence,
@@ -191,6 +201,199 @@ def _has_collect_direction(strategy, skeleton) -> bool:
     return any(k in text for k in _COLLECT_DIRECTION_KEYS)
 
 
+class DeliveryJobManager:
+    """深度长文的编排状态机。
+
+    问题理解由 ``meta_cognitive`` 完成，章节内容由
+    ``response_synthesizer`` 生成；本类只负责可恢复状态、会话事件和数据库协调。
+    """
+
+    def __init__(self, db, llm_client, provider_snapshot_fn: Callable,
+                 quality_gate: QualityGate, event_bus=None):
+        self.db = db
+        self.llm = llm_client
+        self.snapshot_fn = provider_snapshot_fn
+        self.quality_gate = quality_gate
+        self.bus = event_bus
+
+    @staticmethod
+    def _request_key(message: str) -> str:
+        return hashlib.sha256((message or "").encode("utf-8")).hexdigest()
+
+    def create_or_resume(self, session_id: str, message: str, model: ProblemModel,
+                         base_system: str) -> dict:
+        key = self._request_key(message)
+        row = self.db.query_one(
+            "SELECT * FROM delivery_jobs WHERE session_id=? AND request_key=? "
+            "AND status IN ('queued','running','paused','failed') "
+            "ORDER BY updated_at DESC LIMIT 1", (session_id, key))
+        if row:
+            return dict(row)
+        job_id = "dj_" + uuid.uuid4().hex
+        now = now_cst().isoformat(timespec="seconds")
+        self.db.execute(
+            "INSERT INTO delivery_jobs(id,session_id,request_key,status,contract_json,"
+            "problem_model_json,base_system,result_text,quality_json,error,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (job_id, session_id, key, "queued", json.dumps(model.contract.to_dict(), ensure_ascii=False),
+             json.dumps(model.to_dict(), ensure_ascii=False), base_system, "", None, None, now, now))
+        outline = model.outline or ProblemModelBuilder._default_outline(
+            model.contract.explicit_requirements)
+        for index, section in enumerate(outline):
+            title = str(section.get("title") or "").strip()[:120] or f"第 {index + 1} 节"
+            requirement_ids = [str(value) for value in (section.get("requirement_ids") or [])]
+            self.db.execute(
+                "INSERT INTO delivery_sections(job_id,section_key,sequence,title,requirement_ids_json,"
+                "status,content,quality_json,attempts,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,'queued','',NULL,0,?,?)",
+                (job_id, str(section.get("id") or f"S{index}").strip()[:40] or f"S{index}",
+                 index, title, json.dumps(requirement_ids, ensure_ascii=False), now, now))
+        return dict(self.db.query_one("SELECT * FROM delivery_jobs WHERE id=?", (job_id,)))
+
+    async def run(self, job_id: str, *, session_id: str,
+                  emit: Callable[[str, dict], Awaitable[None]]) -> tuple[str, QualityReport]:
+        job = self.db.query_one("SELECT * FROM delivery_jobs WHERE id=?", (job_id,))
+        if not job:
+            raise KeyError(job_id)
+        model = ProblemModel.from_dict(json.loads(job["problem_model_json"]))
+        snap = self.snapshot_fn()
+        if snap is None:
+            raise RuntimeError("深度分析模型不可用，长文交付无法开始")
+        now = now_cst().isoformat(timespec="seconds")
+        self.db.execute(
+            "UPDATE delivery_jobs SET status='running',error=NULL,updated_at=? WHERE id=?",
+            (now, job_id))
+        sections = self.db.query_all(
+            "SELECT * FROM delivery_sections WHERE job_id=? ORDER BY sequence", (job_id,))
+        total = len(sections)
+        try:
+            for index, section in enumerate(sections, 1):
+                if section["status"] == "completed":
+                    continue
+                await emit("delivery_progress", {
+                    "job_id": job_id, "status": "running", "current": index,
+                    "total": total, "title": section["title"],
+                })
+                self._publish_delivery(job_id, session_id, "running", index, total)
+                content = await self._generate_section(snap, job, model, section, session_id)
+                quality = self.quality_gate.validate(content, self._section_model(model, section))
+                stamp = now_cst().isoformat(timespec="seconds")
+                self.db.execute(
+                    "UPDATE delivery_sections SET status='completed',content=?,quality_json=?,"
+                    "attempts=attempts+1,updated_at=? WHERE id=?",
+                    (content, json.dumps(quality.to_dict(), ensure_ascii=False), stamp, section["id"]))
+                await emit("delivery_progress", {
+                    "job_id": job_id, "status": "section_completed", "current": index,
+                    "total": total, "title": section["title"],
+                })
+                self._publish_delivery(job_id, session_id, "section_completed", index, total)
+            final_text = "\n\n".join(
+                f"## {row['title']}\n\n{row['content'].strip()}"
+                for row in self.db.query_all(
+                    "SELECT title,content FROM delivery_sections WHERE job_id=? ORDER BY sequence",
+                    (job_id,)) if (row["content"] or "").strip())
+            report = self.quality_gate.validate(final_text, model)
+            if not report.passed:
+                final_text = await self._append_gap_section(
+                    snap, job, model, final_text, report, session_id)
+                report = self.quality_gate.validate(final_text, model)
+            stamp = now_cst().isoformat(timespec="seconds")
+            self.db.execute(
+                "UPDATE delivery_jobs SET status='completed',result_text=?,quality_json=?,updated_at=? "
+                "WHERE id=?", (final_text, json.dumps(report.to_dict(), ensure_ascii=False), stamp, job_id))
+            await emit("delivery_progress", {
+                "job_id": job_id, "status": "completed", "current": total, "total": total,
+            })
+            self._publish_delivery(job_id, session_id, "completed", total, total)
+            return final_text, report
+        except (asyncio.CancelledError, CircuitOpenError):
+            self.db.execute("UPDATE delivery_jobs SET status='paused',updated_at=? WHERE id=?",
+                            (now_cst().isoformat(timespec="seconds"), job_id))
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.db.execute("UPDATE delivery_jobs SET status='failed',error=?,updated_at=? WHERE id=?",
+                            (str(exc)[:500], now_cst().isoformat(timespec="seconds"), job_id))
+            raise
+
+    def _publish_delivery(self, job_id: str, session_id: str, status: str,
+                          current: int, total: int) -> None:
+        if not self.bus:
+            return
+        try:
+            from infrastructure.event_bus import EVT_DELIVERY_UPDATED
+            self.bus.publish_nowait(EVT_DELIVERY_UPDATED, {
+                "job_id": job_id, "session_id": session_id, "status": status,
+                "current": current, "total": total,
+            })
+        except Exception:  # noqa: BLE001
+            logger.debug("长文交付事件广播失败", exc_info=True)
+
+    def _section_model(self, model: ProblemModel, section) -> ProblemModel:
+        requirement_ids = set(json.loads(section["requirement_ids_json"] or "[]"))
+        requirements = [item for item in model.contract.explicit_requirements
+                        if item.id in requirement_ids]
+        contract = DeliveryContract.from_dict(model.contract.to_dict())
+        contract.explicit_requirements = requirements or model.contract.explicit_requirements
+        contract.delivery_form = "structured"
+        return ProblemModel.from_dict({**model.to_dict(), "contract": contract.to_dict()})
+
+    async def _generate_section(self, snap, job, model: ProblemModel, section,
+                                session_id: str) -> str:
+        requirement_ids = json.loads(section["requirement_ids_json"] or "[]")
+        requirements = [item for item in model.contract.explicit_requirements
+                        if item.id in requirement_ids]
+        requirements_text = "\n".join(
+            f"- [{item.id}] {item.raw_request}：{item.expected_outcome or '给出完整解法'}"
+            for item in requirements)
+        system = job["base_system"] or ""
+        user = (
+            f"章节标题：{section['title']}\n本节负责的需求：\n"
+            f"{requirements_text or '覆盖整体方案的一部分'}\n\n问题模型：\n{model.prompt_text()}")
+        return await rs.generate_complete_section(self.llm, snap, system, user, session_id)
+
+    async def _append_gap_section(self, snap, job, model: ProblemModel, current: str,
+                                  report: QualityReport, session_id: str) -> str:
+        missing = [item for item in model.contract.explicit_requirements
+                   if item.id in report.missing_requirements]
+        if not missing and not report.missing_dimensions:
+            return current
+        existing = self.db.query_one(
+            "SELECT * FROM delivery_sections WHERE job_id=? AND section_key='S_GAP'", (job["id"],))
+        if existing and existing["status"] == "completed":
+            return current
+        now = now_cst().isoformat(timespec="seconds")
+        if not existing:
+            self.db.execute(
+                "INSERT INTO delivery_sections(job_id,section_key,sequence,title,requirement_ids_json,"
+                "status,content,quality_json,attempts,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,'running','',NULL,0,?,?)",
+                (job["id"], "S_GAP", 1_000_000, "遗漏需求补充",
+                 json.dumps([item.id for item in missing], ensure_ascii=False), now, now))
+            existing = self.db.query_one(
+                "SELECT * FROM delivery_sections WHERE job_id=? AND section_key='S_GAP'", (job["id"],))
+        targets = "\n".join(f"- [{item.id}] {item.raw_request}" for item in missing)
+        user = (
+            "请补写一节‘遗漏需求补充’，解决下列缺口，并说明机制、依赖、风险和验收。"
+            "不要删除或概括已有正文。\n\n"
+            + (targets or "- 补齐下列交付维度")
+            + f"\n\n需要补齐的结构维度：{'、'.join(report.missing_dimensions) or '无'}")
+        system = job["base_system"] or ""
+        try:
+            addition = await rs.generate_complete_section(self.llm, snap, system, user, session_id)
+            self.db.execute(
+                "UPDATE delivery_sections SET status='completed',content=?,attempts=attempts+1,updated_at=? "
+                "WHERE id=?", (addition, now_cst().isoformat(timespec="seconds"), existing["id"]))
+        except asyncio.CancelledError:
+            self.db.execute("UPDATE delivery_sections SET status='paused',updated_at=? WHERE id=?",
+                            (now_cst().isoformat(timespec="seconds"), existing["id"]))
+            raise
+        except Exception:
+            self.db.execute("UPDATE delivery_sections SET status='failed',updated_at=? WHERE id=?",
+                            (now_cst().isoformat(timespec="seconds"), existing["id"]))
+            raise
+        return current + ("\n\n## 遗漏需求补充\n\n" + addition if addition else "")
+
+
 class AgentCore:
     def __init__(self, *, db, config, session_store, context_entry, soul_manager,
                  profile_manager, retriever, tool_registry, tool_executor,
@@ -239,6 +442,14 @@ class AgentCore:
         # 元认知协议（v3 §六）：高复杂度问题的思考骨架，失败跳过不阻塞
         self.metacog = MetaCognitiveProtocol(
             llm_client, lambda: self.providers.snapshot_for("agent"))
+        # 深度问题解决：一次问题建模生成合同/需求/结构，质量门只在发现
+        # 明确缺口时追加修复；长文按章节持久化，不将其伪装成第三种模式。
+        self.quality_gate = QualityGate()
+        self.problem_model_builder = ProblemModelBuilder(
+            llm_client, lambda: self.providers.snapshot_for("deep_analysis"))
+        self.delivery_jobs = DeliveryJobManager(
+            db, llm_client, lambda: self.providers.snapshot_for("deep_analysis"),
+            self.quality_gate, event_bus=event_bus)
         # 下一步建议模块：种子提取 + 门槛过滤 + 分隔符解析
         self.next_step = NextStepPipeline(config)
         self.compressor = Compressor(
@@ -283,19 +494,15 @@ class AgentCore:
         async def worker() -> None:
             async with lock:
                 try:
-                    # 请求组：单请求超时 600 秒（进程内任务隔离）
-                    await asyncio.wait_for(
-                        self._pipeline(session_id, message, emit, images,
-                                       regenerate, location,
-                                       regenerate_message_id,
-                                       handoff_path=handoff_path,
-                                       think_mode=think_mode,
-                                       edit_parent_id=edit_parent_id,
-                                       edit_version_group_id=edit_version_group_id),
-                        timeout=600)
-                except asyncio.TimeoutError:
-                    logger.warning("请求超时（600s）：session=%s", session_id)
-                    await emit("error", {"code": 504, "message": "处理超时，请重试"})
+                    # 不对整轮任务施加固定总时长上限。长文和正式文档可按章节
+                    # 持续交付；各模型/工具调用仍保留自己的网络超时和取消语义。
+                    await self._pipeline(session_id, message, emit, images,
+                                         regenerate, location,
+                                         regenerate_message_id,
+                                         handoff_path=handoff_path,
+                                         think_mode=think_mode,
+                                         edit_parent_id=edit_parent_id,
+                                         edit_version_group_id=edit_version_group_id)
                 except Exception as e:  # noqa: BLE001
                     logger.exception("流水线异常")
                     raw = str(e)
@@ -314,7 +521,9 @@ class AgentCore:
                     break
                 yield item
         finally:
-            # 客户端断开/中断时取消后台 worker，避免流式输出继续跑完
+            # Chat 路由把连接消费和 produce 任务解耦；因此走到这里代表
+            # produce 被显式取消或内部结束，必须把流水线子任务一并停掉。
+            # 浏览器断开不会关闭 produce，不会误伤可恢复的长文交付。
             if not task.done():
                 task.cancel()
             try:
@@ -352,12 +561,14 @@ class AgentCore:
             # 保证“屏上所见即 DB 所存”，停止/刷新后已输出内容不丢失
             st = self._turn_partials.pop(sid, None)
             if st:
-                self._save_partial_reply(sid, st["buf"], st["think_parts"])
+                self._save_partial_reply(sid, st["buf"], st["think_parts"],
+                                         st.get("analysis_metadata"))
             raise
         except Exception as e:  # noqa: BLE001
             st = self._turn_partials.pop(sid, None)
             if st:
-                self._save_partial_reply(sid, st["buf"], st["think_parts"])
+                self._save_partial_reply(sid, st["buf"], st["think_parts"],
+                                         st.get("analysis_metadata"))
             trace.update(metadata={"internal_trace_id": get_trace_id(),
                                    "images": len(images) if images else 0,
                                    "regenerate": regenerate,
@@ -378,13 +589,13 @@ class AgentCore:
         _llm_call_count = 0   # 仅计主回复流式调用；意图/参数推断等辅助调用见 token_usage 表
         _model_id = None
 
-        # 思考过程累积：透明拦截所有 thinking_delta 增量（意图理解/工具调用/
-        # 模型原生推理），回复落库时随消息持久化，历史消息可回看
+        # 安全进度摘要累积：只保存系统步骤/可验证结论，绝不保存模型原生推理。
         think_parts: list[str] = []
         # 流式增量缓冲提前定义（正文）：任意阶段取消都需读取已产出部分补救，
         # 登记到 _turn_partials 供 _pipeline 外层 CancelledError 兜底
         buf: list[str] = []
-        self._turn_partials[sid] = {"buf": buf, "think_parts": think_parts}
+        self._turn_partials[sid] = {"buf": buf, "think_parts": think_parts,
+                                    "analysis_metadata": None}
         _orig_emit = emit
 
         async def emit(event, data):  # noqa: F811 — 有意遮蔽，对下游透明
@@ -509,6 +720,11 @@ class AgentCore:
         quick_result: QuickIntentResult | None = None
         understanding: Understanding | None = None
         strategy: ResponseStrategy | None = None  # 响应策略快照（v3，引导期/关闭时 None）
+        effective_mode = "quick"
+        mode_reason = "默认快速路径"
+        problem_model: ProblemModel | None = None
+        quality_report: QualityReport | None = None
+        delivery_job_id: str | None = None
         if not onboarding and chat_configured:
             _sp = tracer.span_start("quick_intent", input={
                 "message": message})
@@ -524,32 +740,44 @@ class AgentCore:
                     "consistency_corrected": quick_result.consistency_corrected,
                     "think_mode": think_mode,
                 })
-                # 用户指定思考模式优先（Web 端）：覆盖模型自我决策，
-                # 下游收敛环/篇幅档位自动跟随有效值；
-                # auto（IM 等无 UI 渠道）保留模型判断
+                # 用户指定模式优先；auto 只保留模型路由结论，执行模式始终只有 quick/deep。
                 if think_mode == "deep" and not quick_result.needs_convergence:
                     quick_result.needs_convergence = True
                     quick_result.complexity_reason = "用户指定深度思考"
                 elif think_mode == "quick" and quick_result.needs_convergence:
                     quick_result.needs_convergence = False
                     quick_result.complexity_reason = "用户指定快速回复"
-                # 思考过程外露：快速预判结论（用户指定时标注来源）
+                effective_mode = "deep" if quick_result.needs_convergence else "quick"
                 if think_mode == "deep":
-                    _mode_tail = "（用户指定深度思考，进入收敛环）"
+                    mode_reason = "用户指定深度思考"
                 elif think_mode == "quick":
-                    _mode_tail = "（用户指定快速回复，快速通道）"
+                    mode_reason = "用户指定快速回复"
                 else:
-                    _mode_tail = ("（需深度收敛：" + quick_result.complexity_reason + "）"
-                                  if quick_result.needs_convergence else "（简单，快速通道）")
+                    mode_reason = quick_result.complexity_reason or "模型根据任务结构判断"
+                await emit("mode_decision", {
+                    "requested_mode": think_mode,
+                    "effective_mode": effective_mode,
+                    "reason": mode_reason,
+                    "complexity_hint": quick_result.complexity_hint,
+                })
+                if self.bus:
+                    from infrastructure.event_bus import EVT_ROUTE_DECIDED
+                    self.bus.publish_nowait(EVT_ROUTE_DECIDED, {
+                        "session_id": sid, "requested_mode": think_mode,
+                        "effective_mode": effective_mode, "reason": mode_reason,
+                        "complexity_hint": quick_result.complexity_hint,
+                    })
+                self._turn_partials[sid]["analysis_metadata"] = self._analysis_metadata(
+                    think_mode, effective_mode, mode_reason, None, None, None)
                 await emit("thinking_delta", {
-                    "text": f"【快速预判】{quick_result.intent_hypothesis}{_mode_tail}\n"})
+                    "text": f"【执行路径】{'深度分析' if effective_mode == 'deep' else '快速回答'}：{mode_reason}\n"})
             except Exception:
                 _sp.end(level="ERROR")
                 raise
 
-        # ---- 策略决策任务（v3 §二）：输入不含 memories/Understanding（正交性） ----
-        # 快速通道：与检索/意图三路并行；收敛通道：与收敛环并行。
-        # 耗时均被掩盖，零净增；若等收敛环结束再决策，实测被超时吞掉 100% fallback
+        # ---- 策略决策任务 ----
+        # 快速通道可与检索/意图并行；深度通道在收敛后消费丰满意图和焦点，
+        # 避免后续模块又只根据表面原句重复判断。
         async def _run_strategy():
             if not self.config.get("strategy_engine_enabled", True):
                 return None
@@ -564,11 +792,8 @@ class AgentCore:
         self._material_slots: list[str] = []
         max_rounds = self.config.get("convergence_max_rounds", 2)
         _convergence_done = False
-        _conv_strategy_task = None
         if (not onboarding and quick_result and quick_result.needs_convergence
                 and llm_available):
-            # 策略决策与收敛环同时启动：策略不依赖理解包，收敛环耗时完全掩盖决策耗时
-            _conv_strategy_task = asyncio.create_task(_run_strategy())
             understanding, conv_memories = await self._convergence_loop(
                 sid, message + _img_hint, quick_result, history, tracer, emit,
                 max_rounds=max_rounds)
@@ -579,9 +804,8 @@ class AgentCore:
                     intents = []
                     memories = []
                     _convergence_done = True
-                    strategy = await _conv_strategy_task if _conv_strategy_task and not _conv_strategy_task.done() else None
+                    strategy = await _run_strategy()
                 else:
-                    _conv_strategy_task.cancel()
                     return  # 收敛失败（已 emit error），中止
             else:
                 # 从理解包提取 intents 给下游，跳过原有检索+意图流程
@@ -591,11 +815,12 @@ class AgentCore:
                 _convergence_done = True
                 # 思考过程外露：收敛后的丰满意图
                 await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
-            # 收敛通道策略结果：并行任务此时通常已完成，零等待取回
-            try:
-                strategy = await _conv_strategy_task
-            except Exception:  # noqa: BLE001 - 决策失败不阻塞主链
-                strategy = None
+            if understanding is not None:
+                strategy = await self._run_strategy_decision(
+                    sid, message + _img_hint, quick_result, tracer, emit,
+                    rich_intent=understanding.rich_intent,
+                    focus=understanding.focus,
+                    emotion=understanding.emotion_state)
         else:
             # 快速通道或引导模式
             memories = []
@@ -758,6 +983,24 @@ class AgentCore:
         if not onboarding and not _convergence_done:
             await emit("thinking_delta", {"text": _format_intent_thinking(intents)})
 
+        # 深度路径先建立统一问题模型：它同时保存任务合同、显式需求、约束和
+        # 交付形态，后续策略/骨架/生成都消费同一份理解，不再各自猜测用户诉求。
+        if not onboarding and effective_mode == "deep":
+            await emit("analysis_progress", {"stage": "problem_model", "status": "running"})
+            await emit("thinking_delta", {"text": "【问题建模】正在识别明确需求、目标、约束与交付标准\n"})
+            problem_model = await self.problem_model_builder.build(
+                message, session_id=sid, understanding=understanding,
+                strategy=strategy, recent_history=recent_history)
+            self._turn_partials[sid]["analysis_metadata"] = self._analysis_metadata(
+                think_mode, effective_mode, mode_reason, problem_model, None, None)
+            await emit("analysis_progress", {
+                "stage": "problem_model", "status": "completed",
+                "summary": problem_model.safe_summary(),
+            })
+            await emit("thinking_delta", {
+                "text": f"【问题建模】已识别 {len(problem_model.contract.explicit_requirements)} 项明确需求，"
+                        f"按{('长文分节' if problem_model.contract.delivery_form == 'long_document' else '结构化')}交付\n"})
+
         # ---- 元认知协议（v3 §六）：中等以上复杂度且非排除意图才触发 ----
         # 触发条件：complexity_score≥4 且 intent_type∉排除集 且开关开启；
         # fallback 策略不触发（避免低质量决策叠加高成本环节）
@@ -768,7 +1011,8 @@ class AgentCore:
                     strategy, getattr(intents[0], "intent_type", "chat"),
                     self.config.get("meta_cognitive_enabled", True))):
             skeleton = await self._run_meta_cognitive(
-                sid, message, strategy, memories, tracer, emit)
+                sid, message, strategy, memories, tracer, emit,
+                deep_intent=(problem_model.user_goal if problem_model else ""))
 
         # ---- 下一步建议：种子提取 + 门槛过滤 ----
         if not onboarding and skeleton is not None \
@@ -997,8 +1241,10 @@ class AgentCore:
         _next_step_shown = None  # 建议句落盘数据（模型不可用/熔断等分支安全默认值）
         _fake_promise_caught = False  # 假承诺检测命中（无工具执行时的未来式空头承诺）
         try:
-            if not chat_configured and not onboarding:
+            if not chat_configured:
                 # 态三：模型不可用 → 记录 decision_reason
+                # 引导状态也不能把 None 快照传给流式客户端；欢迎对话需要
+                # 用户先完成模型配置，随后才能开始生成。
                 _decision = decide_degradation(
                     failed_step="response_synthesis",
                     error="对话模型不可用",
@@ -1059,6 +1305,8 @@ class AgentCore:
                 if self.config.get("response_depth_enabled", True):
                     depth_level = self._decide_depth_level(
                         message, quick_result, intents, memories, tool_results)
+                if effective_mode == "deep":
+                    depth_level = "detailed"
                 # 门槛过滤（需 depth_level + doc_only + emotion 就绪）
                 if next_step_seeds:
                     _emotion = self._read_current_emotion()
@@ -1071,10 +1319,11 @@ class AgentCore:
                                                   tool_results, memories, onboarding,
                                                   skill_text, preload_text,
                                                   depth_level=depth_level,
-                                                  strategy=strategy,
-                                                  skeleton=skeleton,
-                                                  next_step_seeds=next_step_seeds,
-                                                  profile_material=profile_block)
+                                                   strategy=strategy,
+                                                   skeleton=skeleton,
+                                                   next_step_seeds=next_step_seeds,
+                                                   profile_material=profile_block,
+                                                   problem_model=problem_model)
                 # 关闭追问后新消息：注入临时决策指令
                 if not elicitation_triggered:
                     row = self.db.query_one(
@@ -1097,10 +1346,6 @@ class AgentCore:
                         "再次征求确认或推迟交付的措辞；工具结果不足的部分如实说明。")
                 valid_ids = {m["id"] for m in memories}
 
-                # 推理模型（DeepSeek 等）的原生思考过程同样以 thinking_delta 外露
-                async def on_reasoning(text: str) -> None:
-                    await emit("thinking_delta", {"text": text})
-
                 # 内置搜索引用源（流式首包到达）：收集并即时外露到思考过程
                 search_refs: list[dict] = []
 
@@ -1115,26 +1360,39 @@ class AgentCore:
                                {"text": f"【联网搜索】命中 {len(items)} 个来源：{titles}\n"})
 
                 _llm_call_count += 1
-                _model_id = getattr(chat_snap, "model_id", None)
-                if doc_only:
-                    await emit("thinking_delta",
-                               {"text": "【文档生成】检测到导出请求：正文将直接写入文档，不在对话中展示\n"})
-                _doc_chars, _doc_progress = 0, 0
-                try:
-                    async for chunk in self.llm.stream(chat_snap, prompt, source="main_chat",
+                # 深度路径优先使用专属槽位；未配置时注册表已回退 agent -> chat。
+                # quick 保持 chat 槽位，避免为简单问题平白增加推理成本。
+                response_snap = (self.providers.snapshot_for("deep_analysis")
+                                 if effective_mode == "deep" else None) or chat_snap
+                _model_id = getattr(response_snap, "model_id", None)
+                if problem_model is not None and problem_model.contract.delivery_form == "long_document":
+                    # 长文的每一节持久化后再进入下一节；重连/重启可从 completed 节恢复。
+                    await emit("analysis_progress", {"stage": "delivery", "status": "running"})
+                    job = self.delivery_jobs.create_or_resume(
+                        sid, message, problem_model, prompt[0]["content"])
+                    delivery_job_id = job["id"]
+                    raw, quality_report = await self.delivery_jobs.run(
+                        delivery_job_id, session_id=sid, emit=emit)
+                    buf.append(raw)
+                    await emit("analysis_progress", {"stage": "delivery", "status": "completed"})
+                else:
+                    if doc_only:
+                        await emit("thinking_delta",
+                                   {"text": "【文档生成】检测到导出请求：正文将直接写入文档，不在对话中展示\n"})
+                    _doc_chars, _doc_progress = 0, 0
+                    async for chunk in self.llm.stream(response_snap, prompt, source="main_chat",
                                                        session_id=sid, images=images,
-                                                       on_reasoning=on_reasoning,
                                                        on_annotations=on_annotations,
                                                        extra_tools=builtin_search_tools):
                         buf.append(chunk)
                         if doc_only:
-                            # 正文不外露；以思考过程定期报进度，避免前端长时间无反馈
+                            # 正文不外露；以安全进度定期反馈，避免用户长时间无感知。
                             _doc_chars += len(chunk)
                             if _doc_chars - _doc_progress >= 1000:
                                 _doc_progress = _doc_chars
                                 await emit("thinking_delta",
                                            {"text": f"【文档生成】正文已生成约 {_doc_chars} 字…\n"})
-                        else:
+                        elif effective_mode != "deep":
                             await emit("content_delta", {"text": chunk})
                     # 回复尾部追加联网来源列表（去重，随正文入库可溯源）
                     if search_refs and buf:
@@ -1147,25 +1405,26 @@ class AgentCore:
                             f"{i + 1}. [{(a.get('title') or a['url'])[:60]}]({a['url']})"
                             for i, a in enumerate(uniq[:8]))
                         buf.append(src_md)
-                        if not doc_only:
+                        if not doc_only and effective_mode != "deep":
                             await emit("content_delta", {"text": src_md})
-                except CircuitOpenError:
-                    # 态三：熔断兜底 → 记录 decision_reason
-                    _decision = decide_degradation(
-                        failed_step="response_synthesis",
-                        error="对话模型熔断中",
-                        skip_causes_misleading=True,
-                        failure_type=FailureType.SYSTEM_FAULT,
-                    )
-                    get_tracer().record_degradation(_decision)
-                    fallback = "对话模型暂时不可用（熔断中），请稍后重试或切换模型。"
-                    await emit("content_delta", {"text": fallback})
-                    buf = [fallback]
-                    # 熔断兜底文案不应被导出成文档
-                    doc_only = False
-                    shared.deferred_docs.clear()
                 raw = "".join(buf)
                 raw = rs.strip_tool_call_blocks(raw)
+                if (problem_model is not None
+                        and problem_model.contract.delivery_form != "long_document"
+                        and self.config.get("deep_quality_gate_enabled", True)):
+                    quality_report = self.quality_gate.validate(raw, problem_model)
+                    await emit("quality_status", quality_report.safe_summary())
+                    self._publish_quality_event(sid, quality_report)
+                    if not quality_report.passed:
+                        await emit("thinking_delta", {"text": "【质量校验】发现需求覆盖缺口，正在补齐完整解法\n"})
+                        raw = await self._repair_deep_response(
+                            sid, problem_model, raw, quality_report, chat_snap)
+                        quality_report = self.quality_gate.validate(raw, problem_model)
+                        await emit("quality_status", quality_report.safe_summary())
+                        self._publish_quality_event(sid, quality_report)
+                elif problem_model is not None and quality_report is not None:
+                    await emit("quality_status", quality_report.safe_summary())
+                    self._publish_quality_event(sid, quality_report)
                 # 建议句解析：从 LLM 输出中分离正文与分隔符后的建议句
                 raw, _suggestion_text = parse_suggestion(raw)
                 _next_step_shown = None
@@ -1263,8 +1522,28 @@ class AgentCore:
                 _extra = self._append_file_cards(assistant_text, tool_results)
                 if _extra:
                     assistant_text += _extra
-                    await emit("content_delta", {"text": _extra})
+                    if effective_mode != "deep" or doc_only:
+                        await emit("content_delta", {"text": _extra})
                 _sp.end(output=assistant_text)
+        except CircuitOpenError:
+            # 模型熔断是可预期的服务降级，不应被包装成未分类的 500。
+            # 长文任务若尚未完成，已持久化章节会保留，下一次同请求可继续恢复。
+            _sp.end(level="ERROR")
+            _decision = decide_degradation(
+                failed_step="response_synthesis",
+                error="对话模型熔断中",
+                skip_causes_misleading=True,
+                failure_type=FailureType.SYSTEM_FAULT,
+            )
+            get_tracer().record_degradation(_decision)
+            assistant_text = "对话模型暂时不可用（熔断中），请稍后重试或切换模型。"
+            buf.clear()
+            buf.append(assistant_text)
+            # 熔断提示不是用户请求的正式文档内容，也不能被质量门误判为成品。
+            doc_only = False
+            shared.deferred_docs.clear()
+            if effective_mode != "deep":
+                await emit("content_delta", {"text": assistant_text})
         except asyncio.CancelledError:
             # 中断补救（部分回复落库）统一由 _pipeline 外层处理，
             # 覆盖思考阶段等第 7 步之前的取消；此处只收尾 span
@@ -1353,8 +1632,14 @@ class AgentCore:
                            "刚才说的\"去查一下\"并未实际执行。"
                            "如需现在完成这件事，请直接回复确认，我会立即安排。")
             assistant_text += _correction
-            await emit("content_delta", {"text": _correction})
+            if effective_mode != "deep" or doc_only:
+                await emit("content_delta", {"text": _correction})
             logger.info("假承诺检测命中，已追加诚实纠偏（session=%s）", sid)
+
+        # 深度模式在质量门完成后一次交付正文，避免把未经覆盖校验的草稿
+        # 提前展示给用户。按传输块发送仅为 SSE 可靠性，不是内容长度限制。
+        if effective_mode == "deep" and not doc_only and assistant_text:
+            await self._emit_content_chunks(emit, assistant_text)
 
         # 第 8 步 后置处理
         _sp = tracer.span_start("post_process", input={
@@ -1377,10 +1662,14 @@ class AgentCore:
                                                   strategy_snapshot=(
                                                       strategy.db_snapshot()
                                                       if strategy else None),
-                                                  skeleton_snapshot=(
-                                                      skeleton.to_dict()
-                                                      if skeleton else None),
-                                                  next_step_shown=_next_step_shown,
+                                                   skeleton_snapshot=(
+                                                       skeleton.to_dict()
+                                                       if skeleton else None),
+                                                   analysis_metadata=self._analysis_metadata(
+                                                       think_mode, effective_mode, mode_reason,
+                                                       problem_model, quality_report,
+                                                       delivery_job_id),
+                                                   next_step_shown=_next_step_shown,
                                                   parent_id=user_msg_id)
             # 提议—确认闭环：消费用户本轮承接的提议（重新生成删消息时自然失效）
             if _proposal_bound and _pending_proposal:
@@ -1413,7 +1702,11 @@ class AgentCore:
                                "llm_call_count": _llm_call_count,
                                "model_id": _model_id})
 
-        await emit("turn_completed", {"message_id": msg_id})
+        _analysis_metadata = self._analysis_metadata(
+            think_mode, effective_mode, mode_reason, problem_model,
+            quality_report, delivery_job_id)
+        await emit("turn_completed", {"message_id": msg_id,
+                                       "analysis_metadata": _analysis_metadata})
 
         # v2 情绪快照推送：前端通过 SSE 实时更新情绪徽标（无需轮询）
         if self.mood and self.config.get("mood_enabled", True):
@@ -1444,8 +1737,72 @@ class AgentCore:
             logger.warning("图片存入知识库失败", exc_info=True)
             tr.end(level="ERROR", status_message=str(e)[:500])
 
+    async def _repair_deep_response(self, sid: str, problem_model: ProblemModel,
+                                    draft: str, quality: QualityReport,
+                                    fallback_snap) -> str:
+        """只在确定性质量门发现缺口时调用，失败时保留原稿而不缩短交付。"""
+        snap = self.providers.snapshot_for("deep_analysis") or fallback_snap
+        if snap is None:
+            return draft
+        missing = ", ".join(quality.missing_requirements) or "结构性说明"
+        user = (
+            f"问题模型：\n{problem_model.prompt_text()}\n\n"
+            f"当前回答：\n{draft}\n\n"
+            f"质量门发现的缺口：{missing}；"
+            f"其他缺口：{'、'.join(quality.missing_dimensions) or '无'}"
+        )
+        try:
+            response = await self.llm.chat(
+                snap,
+                [{"role": "system", "content": PROMPTS.load_raw("agent/prompts/deep_quality_repair")},
+                 {"role": "user", "content": user}],
+                source="deep_quality_repair", session_id=sid,
+                extra_body={"thinking_enabled": False},
+            )
+            repaired = str(response.get("content") or "").strip()
+            return repaired or draft
+        except Exception:  # noqa: BLE001 - 原稿仍是当前证据下的完整结果
+            logger.warning("深度回答质量修复失败，保留初稿", exc_info=True)
+            return draft
+
+    @staticmethod
+    async def _emit_content_chunks(emit, content: str, chunk_size: int = 4000) -> None:
+        """SSE 传输分块，不改变正文内容或对用户的交付长度。"""
+        for start in range(0, len(content), chunk_size):
+            await emit("content_delta", {"text": content[start:start + chunk_size]})
+
+    @staticmethod
+    def _analysis_metadata(requested_mode: str, effective_mode: str, reason: str,
+                           problem_model: ProblemModel | None,
+                           quality: QualityReport | None,
+                           delivery_job_id: str | None) -> dict:
+        """持久化可验证摘要，不包含模型原生推理或隐藏提示词。"""
+        data = {
+            "requested_mode": requested_mode,
+            "effective_mode": effective_mode,
+            "route_reason": reason[:240],
+        }
+        if problem_model is not None:
+            data["problem_model"] = problem_model.safe_summary()
+        if quality is not None:
+            data["quality"] = quality.safe_summary()
+        if delivery_job_id:
+            data["delivery_job_id"] = delivery_job_id
+        return data
+
+    def _publish_quality_event(self, session_id: str, quality: QualityReport) -> None:
+        if not self.bus:
+            return
+        try:
+            from infrastructure.event_bus import EVT_QUALITY_VALIDATED
+            self.bus.publish_nowait(EVT_QUALITY_VALIDATED, {
+                "session_id": session_id, "quality": quality.safe_summary()})
+        except Exception:  # noqa: BLE001
+            logger.debug("质量门事件广播失败", exc_info=True)
+
     def _save_partial_reply(self, sid: str, buf: list[str],
-                            think_parts: list[str]) -> None:
+                            think_parts: list[str],
+                            analysis_metadata: dict | None = None) -> None:
         """中断补救：把已流式产出的部分回复落库（标注未完成）。
         只输出了思考过程（正文尚未开始）时同样落库，保证已输出内容可见。
         同步写入（无 await）：取消处理中不得再挂起，避免二次取消丢失。"""
@@ -1464,7 +1821,8 @@ class AgentCore:
             else:
                 content = "> ⚠️ 本回复未完成：生成已中断，仅输出了思考过程"
             self.sessions.append_message(
-                sid, "assistant", content, thinking=think or None)
+                sid, "assistant", content, thinking=think or None,
+                analysis_metadata=analysis_metadata)
             logger.info("中断补救：部分回复已落库 session=%s chars=%d think_chars=%d",
                         sid, len(partial), len(think))
         except Exception:  # noqa: BLE001
@@ -1594,7 +1952,7 @@ class AgentCore:
         return result
 
     async def _run_meta_cognitive(self, sid, message, strategy, memories,
-                                  tracer, emit) -> CognitiveSkeleton | None:
+                                  tracer, emit, deep_intent: str = "") -> CognitiveSkeleton | None:
         """元认知骨架提取编排（v3 §十）：span + narrative 外露 + 事件。
 
         失败（超时/LLM 不可用/解析失败）返回 None，态一跳过骨架直接生成。
@@ -1610,7 +1968,8 @@ class AgentCore:
                 f"[{m['id']}] {m['title']}：{m.get('detail', m.get('summary', ''))}"
                 for m in (memories or [])[:15])
             skeleton = await self.metacog.extract(
-                message, strategy, memories_text=memories_text, session_id=sid)
+                message, strategy, memories_text=memories_text,
+                deep_intent=deep_intent, session_id=sid)
         except Exception as e:  # noqa: BLE001 - 零阻塞铁律
             logger.warning("元认知编排异常：%s", e, exc_info=True)
             skeleton = None
@@ -2881,12 +3240,13 @@ class AgentCore:
         }
 
     def _build_final_prompt(self, system_prompt, history, message, tool_results,
-                            memories, onboarding, skill_text="", preload_text="",
-                            depth_level: str = "normal",
-                            strategy: ResponseStrategy | None = None,
-                            skeleton: CognitiveSkeleton | None = None,
-                            next_step_seeds: list | None = None,
-                            profile_material: str = ""):
+                             memories, onboarding, skill_text="", preload_text="",
+                             depth_level: str = "normal",
+                             strategy: ResponseStrategy | None = None,
+                             skeleton: CognitiveSkeleton | None = None,
+                             next_step_seeds: list | None = None,
+                             profile_material: str = "",
+                             problem_model: ProblemModel | None = None):
         if onboarding:
             return [{"role": "system", "content": system_prompt}] + history + \
                    [{"role": "user", "content": message}]
@@ -2897,7 +3257,8 @@ class AgentCore:
             system_prompt = _strip_mood_section(system_prompt)
         synth = rs.build_response_prompt(
             message, tool_results, memories, depth_level=depth_level,
-            next_step_seeds=next_step_seeds)
+            next_step_seeds=next_step_seeds,
+            problem_model=problem_model)
         # synth[0] 是含上下文的 system；合并 SOUL system_prompt + 按需技能
         merged_system = system_prompt + "\n\n" + synth[0]["content"]
         # 响应策略硬约束注入（v3 §六）：策略是逐轮决策，优先于长期风格基线
@@ -2922,6 +3283,8 @@ class AgentCore:
                 + "\n遵循规则：opening_move 与 closing_move 必须遵循；关键洞察"
                 "必须在回答中以某种形式呈现，不可稀释。若已注入『用户画像材料』"
                 "且骨架方向为引导提问/收集信息，该方向作废，服从产出优先硬约束。")
+        if problem_model is not None:
+            merged_system += "\n\n" + problem_model.prompt_text()
         # 用户画像材料注入（答案材料充实层）：画像全部维度（通用设计，与当前
         # 任务无关的维度由模型忽略），是系统已知的关于用户的事实；禁止编造
         # 材料之外的用户信息；标注"（推断）"的内容使用时须注明推测性质。

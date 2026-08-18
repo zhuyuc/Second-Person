@@ -109,6 +109,13 @@ class SessionStore:
             "SELECT images FROM conversations WHERE session_id=? AND images IS NOT NULL",
             (sid,))
         with self.db.transaction() as conn:
+            # SQLite 外键在本项目由应用层维护；长文交付任务必须随会话删除，
+            # 否则章节正文和问题模型会成为不可访问的孤立数据。
+            conn.execute(
+                "DELETE FROM delivery_sections WHERE job_id IN "
+                "(SELECT id FROM delivery_jobs WHERE session_id=?)", (sid,))
+            conn.execute(
+                "DELETE FROM delivery_jobs WHERE session_id=?", (sid,))
             conn.execute(
                 "DELETE FROM conversations WHERE session_id=?", (sid,))
             conn.execute("DELETE FROM sessions WHERE session_id=?", (sid,))
@@ -130,10 +137,11 @@ class SessionStore:
                        notification_type: str = None,
                        thinking: str | None = None,
                        images: list[str] | None = None,
-                       visuals: list | None = None,
-                       strategy_snapshot: dict | None = None,
-                       skeleton_snapshot: dict | None = None,
-                       next_step_shown: dict | None = None,
+                        visuals: list | None = None,
+                        strategy_snapshot: dict | None = None,
+                        skeleton_snapshot: dict | None = None,
+                        analysis_metadata: dict | None = None,
+                        next_step_shown: dict | None = None,
                        parent_id: int | None = _UNSET,
                        version_group_id: int | None = None,
                        is_active: int = 1) -> int:
@@ -151,9 +159,9 @@ class SessionStore:
         cur = self.db.execute(
             "INSERT INTO conversations(session_id,role,message_type,notification_type,"
             "content,citations,feedback,create_time,thinking,images,visuals,"
-            "response_strategy_json,cognitive_skeleton_json,protected_from_compression,"
-            "next_step_shown,parent_id,version_group_id,is_active) "
-            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?)",
+            "response_strategy_json,cognitive_skeleton_json,analysis_metadata_json,"
+            "protected_from_compression,next_step_shown,parent_id,version_group_id,is_active) "
+            "VALUES(?,?,?,?,?,?,0,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, role, message_type, notification_type, content,
              json.dumps(citations, ensure_ascii=False) if citations else None,
              _now(), thinking,
@@ -161,9 +169,11 @@ class SessionStore:
              json.dumps(visuals, ensure_ascii=False) if visuals else None,
              json.dumps(strategy_snapshot,
                         ensure_ascii=False) if strategy_snapshot else None,
-             json.dumps(skeleton_snapshot,
-                        ensure_ascii=False) if skeleton_snapshot else None,
-             int(self._should_protect(role, content)),
+              json.dumps(skeleton_snapshot,
+                         ensure_ascii=False) if skeleton_snapshot else None,
+              json.dumps(analysis_metadata,
+                         ensure_ascii=False) if analysis_metadata else None,
+              int(self._should_protect(role, content)),
              json.dumps(next_step_shown,
                         ensure_ascii=False) if next_step_shown else None,
              parent_id, version_group_id, is_active)
@@ -215,8 +225,10 @@ class SessionStore:
                         "message_type": r["message_type"],
                         "notification_type": r["notification_type"],
                         "content": r["content"], "citations": cites,
-                        "feedback": r["feedback"], "create_time": r["create_time"],
-                        "thinking": r["thinking"],
+                         "feedback": r["feedback"], "create_time": r["create_time"],
+                         "thinking": r["thinking"],
+                         "analysis_metadata": (json.loads(r["analysis_metadata_json"])
+                                               if r["analysis_metadata_json"] else None),
                         "images": [f"/chat-images/{f}" for f in
                                    json.loads(r["images"])] if r["images"] else [],
                         "visuals": json.loads(r["visuals"]) if r["visuals"] else [],

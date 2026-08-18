@@ -8,15 +8,141 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict, dataclass, field
 
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
+from .meta_cognitive import ProblemModel, RequirementItem
 
 # 隐式关键词词表（本地正则匹配，零成本）
 IMPLICIT_KEYWORDS = [
     "太长了", "太短了", "说人话", "别啰嗦", "继续说", "展开讲讲", "给个表格",
     "别列 bullet", "简短", "详细点",
 ]
+
+
+@dataclass
+class QualityReport:
+    """可验证的交付质量摘要，不保存模型原生推理。"""
+    passed: bool
+    coverage: dict[str, bool]
+    missing_requirements: list[str] = field(default_factory=list)
+    missing_dimensions: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def safe_summary(self) -> dict:
+        return {
+            "passed": self.passed,
+            "covered": sum(1 for covered in self.coverage.values() if covered),
+            "total": len(self.coverage),
+            "missing_requirements": self.missing_requirements[:8],
+            "missing_dimensions": self.missing_dimensions[:5],
+        }
+
+
+def _problem_keywords(text: str) -> set[str]:
+    chunks = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_-]{2,}", text or "")
+    result: set[str] = set()
+    for chunk in chunks:
+        if re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
+            result.update(chunk[index:index + 2] for index in range(max(0, len(chunk) - 1)))
+        else:
+            result.add(chunk.lower())
+    return result
+
+
+class QualityGate:
+    """在交付层检查需求是否真的得到解法，而非仅被复述。"""
+    _SOLUTION_MARKERS = (
+        "做法", "实现", "机制", "步骤", "处理", "采用", "使用", "通过",
+        "建立", "接入", "配置", "拆分", "生成", "校验", "执行", "设计",
+    )
+    _RISK_MARKERS = ("风险", "边界", "依赖", "前提", "验收", "验证")
+
+    @classmethod
+    def _has_requirement_solution(cls, response: str, requirement: RequirementItem,
+                                  referenced: bool) -> bool:
+        if not referenced:
+            return False
+        marker_re = "|".join(re.escape(marker) for marker in cls._SOLUTION_MARKERS)
+        for match in re.finditer(re.escape(requirement.id), response, re.I):
+            if re.search(marker_re, response[match.start():match.start() + 600]):
+                return True
+        requirement_words = _problem_keywords(
+            requirement.raw_request + " " + requirement.expected_outcome)
+        for paragraph in re.split(r"[\n。；;]+", response):
+            words = _problem_keywords(paragraph)
+            if (len(requirement_words & words) / max(len(requirement_words), 1) >= 0.24
+                    and re.search(marker_re, paragraph)):
+                return True
+        return False
+
+    def validate(self, response: str, model: ProblemModel) -> QualityReport:
+        response = response or ""
+        response_words = _problem_keywords(response)
+        coverage: dict[str, bool] = {}
+        missing: list[str] = []
+        for requirement in model.contract.explicit_requirements:
+            requirement_words = _problem_keywords(
+                requirement.raw_request + " " + requirement.expected_outcome)
+            overlap = len(requirement_words & response_words)
+            referenced = (requirement.id.lower() in response.lower()
+                          or overlap / max(len(requirement_words), 1) >= 0.24
+                          or (len(requirement_words) <= 2 and overlap > 0))
+            covered = self._has_requirement_solution(response, requirement, referenced)
+            coverage[requirement.id] = covered
+            if requirement.solution_required and not covered:
+                missing.append(requirement.id)
+        dimensions: list[str] = []
+        structured = model.contract.delivery_form in ("structured", "long_document")
+        if structured and not any(marker in response for marker in self._SOLUTION_MARKERS):
+            dimensions.append("缺少可执行解法")
+        if (structured and len(model.contract.explicit_requirements) > 1
+                and not any(marker in response for marker in self._RISK_MARKERS)):
+            dimensions.append("缺少依赖、风险或验收说明")
+        if model.assumptions and not any(marker in response for marker in ("假设", "待验证", "不确定")):
+            dimensions.append("未区分待验证假设")
+        return QualityReport(
+            passed=not missing and not dimensions,
+            coverage=coverage,
+            missing_requirements=missing,
+            missing_dimensions=dimensions,
+            notes=[] if not (missing or dimensions) else ["质量门发现可修复的交付缺口"],
+        )
+
+
+async def generate_complete_section(llm, snap, system: str, user: str,
+                                    session_id: str) -> str:
+    """按明确完成标记续写，使模型单次上限不截断整节内容。"""
+    system = system + "\n\n" + PROMPTS.load_raw("agent/prompts/delivery_section")
+    parts: list[str] = []
+    continuation = ""
+    while True:
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if continuation:
+            messages.extend([
+                {"role": "assistant", "content": "".join(parts)},
+                {"role": "user", "content": continuation},
+            ])
+        response = await llm.chat(
+            snap, messages, source="delivery_section", session_id=session_id,
+            extra_body={"thinking_enabled": False},
+        )
+        chunk = str(response.get("content") or "")
+        if not chunk or chunk in parts:
+            break
+        complete = "<!-- SECTION_COMPLETE -->" in chunk
+        cleaned = chunk.replace("<!-- SECTION_COMPLETE -->", "").strip()
+        parts.append(cleaned)
+        if complete:
+            break
+        if not cleaned:
+            raise RuntimeError("长文分节生成未返回可续写内容")
+        continuation = "请从刚才中断的位置继续本节，不要重复已给出的内容；完成后附上 <!-- SECTION_COMPLETE -->。"
+    return "\n\n".join(parts).strip()
 
 
 def _truncate_at_boundary(text: str, max_chars: int) -> str:
@@ -41,10 +167,11 @@ TOOL_RESULT_MAX_CHARS = 30000
 
 
 def build_response_prompt(user_message: str, tool_results: list[dict],
-                          memories: list[dict],
-                          depth_level: str = "normal",
-                          conversation_context: list[dict] | None = None,
-                          next_step_seeds: list | None = None) -> list[dict]:
+                           memories: list[dict],
+                           depth_level: str = "normal",
+                           conversation_context: list[dict] | None = None,
+                           next_step_seeds: list | None = None,
+                           problem_model=None) -> list[dict]:
     """合成 prompt：把工具结果 + 命中记忆 + 会话上下文交给 LLM，要求输出 citations。
     depth_level（brief/normal/detailed）：场景化篇幅档位，normal 为默认不额外注入。
     conversation_context：FTS5 双通道检索命中的对话历史原文。
@@ -103,9 +230,10 @@ def build_response_prompt(user_message: str, tool_results: list[dict],
     if any(r.get("tool") == "generate_document" and r.get("deferred")
            for r in (tool_results or [])):
         ctx_parts.append(PROMPTS.load_raw("agent/prompts/synth_doc_export"))
-    # 场景化篇幅档位：brief/detailed 注入对应指令并明确本轮档位，
+    # 场景化篇幅档位只服务快速/常规回答；深度问题模型的任务合同优先，
+    # 不用档位截短用户明确要求的完整交付。
     # 优先于输出画像的全局长度倾向（normal 为默认行为，不注入）
-    if depth_level in ("brief", "detailed"):
+    if problem_model is None and depth_level in ("brief", "detailed"):
         ctx_parts.append(
             PROMPTS.load_raw("agent/prompts/response_depth")
             + f"\n\n本轮判定档位：{depth_level}，必须按该档位控制回复篇幅。")

@@ -74,6 +74,9 @@
 | 45 | agent/prompts/elicitation_supplement.md | 关闭追问后新消息临时决策指令 | agent/core.py | 惰性 | - | A |
 | 46 | agent/prompts/synth_elicitation_answered.md | 追问已作答闭环约束（已确认事实回填/推断注明/仅未知占位，条件注入） | agent/response_synthesizer.py | 惰性 | - | A |
 | 47 | agent/prompts/action_extract.md | 轮末动作意图提取（proposal/instruction/none 三分类，提议—确认闭环，门控触发） | agent/core.py | 惰性 | - | A |
+| 48 | agent/prompts/problem_model.md | 深度问题模型（任务合同、显式需求、事实/假设/约束与交付结构） | agent/meta_cognitive.py | 惰性 | - | A |
+| 49 | agent/prompts/deep_quality_repair.md | 深度回答需求覆盖质量修复 | agent/core.py | 惰性 | - | A |
+| 50 | agent/prompts/delivery_section.md | 深度长文分节生成与续写 | agent/response_synthesizer.py | 惰性 | - | A |
 
 分类说明：A = LLM 调用的 system/user 指令；B = 人格基线/默认值常量。
 
@@ -118,6 +121,9 @@
 | 30 | agent/core.py::_format_template_save_params | chat | intent | agent/prompts/format_scenario.md | 格式绑定适用场景提取 |
 | 31 | agent/strategy_engine.py::clarification_router | chat | elicitation_decision | agent/prompts/elicitation_decision.md | 追问可枚举/发散二分判定 |
 | 32 | agent/core.py::_pipeline_impl | chat | action_extract | agent/prompts/action_extract.md | 轮末动作意图提取（提议—确认闭环，门控触发） |
+| 33 | agent/meta_cognitive.py::build | chat | problem_model | agent/prompts/problem_model.md | 深度任务合同、显式需求与问题模型构建 |
+| 34 | agent/core.py::_repair_deep_response | chat | deep_quality_repair | agent/prompts/deep_quality_repair.md | 质量门发现缺口后的完整回答修复 |
+| 35 | agent/response_synthesizer.py::generate_complete_section | chat | delivery_section | agent/prompts/delivery_section.md | 长文交付章节与遗漏补充的生成、续写 |
 
 备注：`agent/response_synthesizer.py` 的 response_synth/synth_disputed_notice/
 synth_doc_export/synth_elicitation_answered 不是独立调用点，其合成结果经 `_build_final_prompt` 并入

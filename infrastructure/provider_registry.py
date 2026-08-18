@@ -5,6 +5,7 @@ Provider 注册表 —— 从 providers / model_assignment / credentials 解析 
   chat_model      → 第 4/6/7 步主链路
   agent_model     → 第 3 步第 2 层精筛、5 类系统 Agent、标题生成（未配回退 chat）
   intent_model    → 第 4 步意图识别 + 收敛分析 + 情绪判定 + 追问决策（未配回退 agent→chat）
+  deep_analysis   → 深度问题模型、需求覆盖质量修复与长文分节交付（未配回退 agent→chat）
   embedding_model → 所有向量化
   vision          → 图片文字解析（未配回退 agent→chat）
 
@@ -54,6 +55,12 @@ TASK_SLOTS: dict[str, TaskSlot] = {
         desc="解析用户消息的意图，决定后续检索与工具编排；同时承担收敛分析（注意力聚焦、缺口检测）、情绪判定与追问决策等轻量任务；建议配非推理小模型，可大幅降低每轮对话的首响应延迟。",
         fallback=("agent", "chat"),
         lightweight=True,
+    ),
+    "deep_analysis": TaskSlot(
+        key="deep_analysis",
+        label="深度分析模型",
+        desc="用于深度模式的问题建模、需求覆盖修复和长文分节交付。建议配置高质量模型；未配置时回退系统 Agent 或对话模型。",
+        fallback=("agent", "chat"),
     ),
     "embedding": TaskSlot(
         key="embedding",

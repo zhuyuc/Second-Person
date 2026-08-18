@@ -5,11 +5,12 @@ EventBus —— 模块间零直接调用，通过事件通信解耦。
 - 模块只写订阅者：新功能通过 subscribe() 挂接，不改发布方
 - 同步与异步订阅者都支持；异步订阅者在事件循环中调度
 - 订阅者异常被捕获并记日志，不影响其他订阅者与发布方
-核心事件（11 个）：
+核心事件：
   memory.created / memory.updated / turn.completed / lint.completed /
   review.completed / soul_style.updated / output_style.updated /
   profile.rebuilt / task.progress / embedding.migration.completed / mood.updated /
-  handoff.generate / handoff.ready（会话上下文管理方案 v2）
+  handoff.generate / handoff.ready（会话上下文管理方案 v2）/
+  route.decided / delivery.updated / quality.validated（通用问题解决）
 订阅方：container 启动时为全部预置事件挂接审计日志订阅者；
 插件通过 on_load(event_bus=...) 按需追加订阅。
 """
@@ -40,6 +41,10 @@ EVT_STRATEGY_DECIDED = "strategy.decided"
 EVT_SKELETON_EXTRACTED = "skeleton.extracted"
 EVT_STRATEGY_EXECUTED = "strategy.executed"
 EVT_STRATEGY_REFLECTED = "strategy.reflected"
+# 通用问题解决系统：路由、长文交付与质量门均供审计和后续评测订阅。
+EVT_ROUTE_DECIDED = "route.decided"
+EVT_DELIVERY_UPDATED = "delivery.updated"
+EVT_QUALITY_VALIDATED = "quality.validated"
 # 会话上下文管理（会话上下文管理方案 v2 §事件总线）
 EVT_HANDOFF_GENERATE = "handoff.generate"
 EVT_HANDOFF_READY = "handoff.ready"
@@ -57,6 +62,7 @@ KNOWN_EVENTS = {
     EVT_EMBEDDING_MIGRATION_COMPLETED, EVT_MOOD_UPDATED,
     EVT_STRATEGY_DECIDED, EVT_SKELETON_EXTRACTED,
     EVT_STRATEGY_EXECUTED, EVT_STRATEGY_REFLECTED,
+    EVT_ROUTE_DECIDED, EVT_DELIVERY_UPDATED, EVT_QUALITY_VALIDATED,
     EVT_HANDOFF_GENERATE, EVT_HANDOFF_READY,
     EVT_ELICITATION_TRIGGERED, EVT_ELICITATION_ANSWERED,
     EVT_ELICITATION_RESOLVED, EVT_ELICITATION_CLOSED,

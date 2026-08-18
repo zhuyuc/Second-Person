@@ -64,7 +64,7 @@ const messages = ref([])
 const input = ref('')
 const generating = ref(false)
 const streamText = ref('')
-const thinkText = ref('')     // 思考过程（意图理解/任务拆解 + 模型原生推理）流式缓冲
+const thinkText = ref('')     // 安全分析摘要与进度，不展示模型原生推理
 const thinkOpen = ref(true)   // 思考面板展开状态：思考中展开，正文首字出现后自动折叠
 const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认收起
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
@@ -124,11 +124,12 @@ async function switchModel(pid) {
   toast.push('success', '已切换，下一轮对话生效')
 }
 
-// ---- 思考模式用户指定：quick=快速回复（默认）/ deep=深度思考；点击胶囊弹窗枚举选择 ----
-const thinkMode = ref('quick')
+// ---- 自动模式默认；quick/deep 是用户对模型路由的显式覆盖。 ----
+const thinkMode = ref('auto')
 const thinkMenuOpen = ref(false)
 const THINK_MODES = [
-  { value: 'quick', label: '快速回复' },
+  { value: 'auto', label: '自动模式' },
+  { value: 'quick', label: '快速回答' },
   { value: 'deep', label: '深度思考' },
 ]
 const thinkModeLabel = computed(() =>
@@ -488,11 +489,38 @@ function handleEvent(ev, data) {
     if (!streamText.value && data.text) thinkOpen.value = false
     streamText.value += data.text; maybeScroll(); scrollStreamCode()
   }
+  else if (ev === 'mode_decision') {
+    const path = data.effective_mode === 'deep' ? '深度分析' : '快速回答'
+    thinkText.value += `【执行路径】${path}：${data.reason || '模型自动判断'}\n`
+    maybeScroll(); scrollThink()
+  }
+  else if (ev === 'analysis_progress') {
+    if (data.stage === 'problem_model' && data.status === 'completed') {
+      const count = data.summary?.requirement_count || 0
+      thinkText.value += `【问题建模】已识别 ${count} 项明确需求\n`
+    } else if (data.stage === 'delivery') {
+      thinkText.value += `【深度交付】${data.status === 'completed' ? '章节整合完成' : '正在分节生成'}\n`
+    }
+    maybeScroll(); scrollThink()
+  }
+  else if (ev === 'delivery_progress') {
+    if (data.total) {
+      thinkText.value += `【深度交付】${data.current || 0}/${data.total}${data.title ? '：' + data.title : ''}\n`
+      maybeScroll(); scrollThink()
+    }
+  }
+  else if (ev === 'quality_status') {
+    const done = data.covered || 0
+    const total = data.total || 0
+    thinkText.value += `【质量校验】${data.passed ? '通过' : '正在补齐'}${total ? `（${done}/${total} 项需求已覆盖）` : ''}\n`
+    maybeScroll(); scrollThink()
+  }
   else if (ev === 'citations') lastCitations = data.refs
   else if (ev === 'queued') toast.push('info', '正在处理上一条消息')
   else if (ev === 'degrade') { degraded.value = true }
   else if (ev === 'tool_visual') { streamVisuals.value.push(data); maybeScroll() }
   else if (ev === 'turn_completed') {
+    streamAnalysisMetadata = data.analysis_metadata || streamAnalysisMetadata
     finishStream(data.message_id)
     // 清理追问状态
     activeElicitation.value = null
@@ -534,6 +562,7 @@ function handleThreshold(threshold) {
 }
 
 let lastCitations = []
+let streamAnalysisMetadata = null
 function finishStream(msgId) {
   // 跨会话保护：用户已切到其他会话时不把回复插进当前列表
   //（回复已按 session 落库，切回原会话时 openSession 会重新加载）
@@ -548,6 +577,7 @@ function finishStream(msgId) {
       citations: lastCitations, feedback: 0,
       create_time: nowLocalIso(),
       thinking: thinkText.value || '', thinkOpen: false,
+      analysis_metadata: streamAnalysisMetadata,
       visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
     }
     messages.value.push(m)
@@ -557,10 +587,14 @@ function finishStream(msgId) {
   streamVisuals.value = []
   thinkOpen.value = true
   lastCitations = []
+  streamAnalysisMetadata = null
   degraded.value = false
   generating.value = false
   streamSid.value = null
   sessStore.load()
+  // 长文的 SSE 缓冲可能只保留末段。turn_completed 后以持久化消息回载，
+  // 保证页面显示的是完整交付而不是传输缓存的残片。
+  if (msgId && sameSession) reloadMessages(sessStore.currentSid)
     // 标题由后端并行异步生成（总结首条提问），在 5s 内多次轻量轮询拉取新标题
     ;[1200, 2500, 4000].forEach(ms => setTimeout(() => sessStore.load(), ms))
   maybeScroll()
@@ -1222,17 +1256,17 @@ onUnmounted(() => {
               <i class="ti ti-mood-smile emoji-toggle"
                 style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="表情" @mousedown.prevent
                 @click.stop="emojiOpen = !emojiOpen"></i>
-              <!-- 思考模式选择器：用户指定深度思考/快速回复（默认快速回复，点击外部关闭） -->
+              <!-- 自动模式默认启用；quick/deep 是用户对模型路由的显式覆盖。 -->
               <div class="think-mode-wrap">
                 <button type="button" class="think-mode-btn" :title="'思考模式：' + thinkModeLabel" @mousedown.prevent
-                  @click.stop="thinkMenuOpen = !thinkMenuOpen">
+                  :aria-expanded="thinkMenuOpen" aria-haspopup="menu" @click.stop="thinkMenuOpen = !thinkMenuOpen">
                   <i class="ti" :class="thinkMode === 'deep' ? 'ti-bulb' : 'ti-bolt'"></i>
                   <span>{{ thinkModeLabel }}</span>
                   <i class="ti think-mode-arrow" :class="thinkMenuOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </button>
-                <div v-if="thinkMenuOpen" class="think-mode-menu" @click.stop>
+                <div v-if="thinkMenuOpen" class="think-mode-menu" role="menu" @click.stop>
                   <button v-for="opt in THINK_MODES" :key="opt.value" type="button" class="think-mode-opt"
-                    :class="{ active: thinkMode === opt.value }" @click="pickThinkMode(opt.value)">
+                    :class="{ active: thinkMode === opt.value }" role="menuitemradio" :aria-checked="thinkMode === opt.value" @click="pickThinkMode(opt.value)">
                     <span>{{ opt.label }}</span>
                     <i v-if="thinkMode === opt.value" class="ti ti-check"></i>
                   </button>

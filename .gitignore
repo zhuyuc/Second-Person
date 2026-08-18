@@ -35,3 +35,7 @@ dist/
 # 运行产物
 *.pid
 *.log
+
+# 本地隔离测试与运行数据
+/.codex-pytest-*/
+/.codex-runtime*/

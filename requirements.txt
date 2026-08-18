@@ -41,4 +41,5 @@ qrcode[pil]>=7.4.2
 
 # 测试/静态门禁（tests/test_static_health.py 依赖 pyflakes）
 pytest>=8.0.0
+pytest-asyncio>=0.23.0
 pyflakes>=3.2.0
