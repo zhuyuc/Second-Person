@@ -81,6 +81,25 @@
     --z-confirm: 3000;
     /* 内容列最大宽度（各页正文列统一） */
     --content-max: 960px;
+    /* 回复语义展示 Token：由现有主题色派生，保证深浅色主题同步 */
+    --output-info-bg: var(--brand-soft);
+    --output-info-border: var(--brand-solid);
+    --output-info-text: var(--acctx);
+    --output-decision-bg: var(--brand-soft-2);
+    --output-decision-border: var(--brand-2);
+    --output-decision-text: var(--brand-tx);
+    --output-assumption-bg: var(--surface-2);
+    --output-assumption-border: var(--bd-strong);
+    --output-assumption-text: var(--sec);
+    --output-risk-bg: var(--warnbg);
+    --output-risk-border: var(--warn);
+    --output-risk-text: var(--warntx);
+    --output-blocker-bg: var(--dangbg);
+    --output-blocker-border: var(--dang);
+    --output-blocker-text: var(--dangtx);
+    --output-border: 1px;
+    --output-callout-line: 3px;
+    --output-table-min-width: 560px;
     /* 图标尺寸（非文字排版，用于 <i> 元素） */
     --icon-sm: 18px;
     --icon-md: 22px;
@@ -931,8 +950,6 @@ code {
     font-weight: 650;
     margin: 18px 0 8px;
     line-height: 1.4;
-    padding-left: 9px;
-    border-left: 3px solid var(--acctx);
 }
 
 .msg-ai .content h4 {
@@ -981,22 +998,199 @@ code {
     border-radius: 0 8px 8px 0;
 }
 
+/* 回复语义块：由 responsePresentation.js 从受控 Markdown 标记转换 */
+.msg-ai .content .md-callout {
+    margin: var(--sp-4) 0;
+    border: var(--output-border) solid var(--output-assumption-border);
+    border-left-width: var(--output-callout-line);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: var(--output-assumption-bg);
+    color: var(--output-assumption-text);
+    overflow: hidden;
+}
+
+.msg-ai .content .md-callout-info {
+    border-color: var(--output-info-border);
+    background: var(--output-info-bg);
+    color: var(--output-info-text);
+}
+
+.msg-ai .content .md-callout-decision {
+    border-color: var(--output-decision-border);
+    background: var(--output-decision-bg);
+    color: var(--output-decision-text);
+}
+
+.msg-ai .content .md-callout-assumption {
+    border-color: var(--output-assumption-border);
+    background: var(--output-assumption-bg);
+    color: var(--output-assumption-text);
+}
+
+.msg-ai .content .md-callout-risk {
+    border-color: var(--output-risk-border);
+    background: var(--output-risk-bg);
+    color: var(--output-risk-text);
+}
+
+.msg-ai .content .md-callout-blocker {
+    border-color: var(--output-blocker-border);
+    background: var(--output-blocker-bg);
+    color: var(--output-blocker-text);
+}
+
+.md-callout-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+}
+
+.md-callout-head .ti {
+    flex: 0 0 auto;
+    font-size: var(--icon-sm);
+}
+
+.md-callout-body {
+    padding: 0 var(--sp-4) var(--sp-3);
+}
+
+.md-callout-body > :first-child {
+    margin-top: 0;
+}
+
+.md-callout-body > :last-child {
+    margin-bottom: 0;
+}
+
+/* 表格：外层负责横向滚动，表格本身保持可读的最小列宽 */
+.msg-ai .content .md-table-wrap {
+    max-width: 100%;
+    margin: var(--sp-4) 0;
+    overflow-x: auto;
+    border: var(--output-border) solid var(--bd);
+    border-radius: var(--radius-xs);
+    background: var(--surface);
+    -webkit-overflow-scrolling: touch;
+}
+
+.msg-ai .content .md-table-wrap table {
+    width: 100%;
+    min-width: var(--output-table-min-width);
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+}
+
+.msg-ai .content .md-table-wrap th,
+.msg-ai .content .md-table-wrap td {
+    padding: var(--sp-2) var(--sp-3);
+    border-bottom: var(--output-border) solid var(--bd);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.msg-ai .content .md-table-wrap th {
+    background: var(--surface-2);
+    color: var(--fg);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.msg-ai .content .md-table-wrap tbody tr:nth-child(even) {
+    background: var(--surface-2);
+}
+
+.msg-ai .content .md-table-wrap tr:last-child td {
+    border-bottom: none;
+}
+
+/* 阶段结构：使用紧凑标题行和留白分组，不使用时间线竖线 */
+.msg-ai .content .md-stage {
+    margin: var(--sp-5) 0 var(--sp-6);
+}
+
+.md-stage-index {
+    flex: 0 0 auto;
+    color: var(--acctx);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+}
+
+.md-stage-header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--sp-2);
+}
+
+.md-stage-main {
+    min-width: 0;
+}
+
+.msg-ai .content .md-stage-title {
+    margin: 0;
+    padding: 0;
+    border-left: none;
+    color: var(--fg);
+    font-size: var(--fs-md);
+    font-weight: 600;
+    line-height: 1.5;
+}
+
+.msg-ai .content .md-stage-content {
+    margin: var(--sp-2) 0 0;
+    padding-left: 0;
+    border-left: none;
+}
+
+.msg-ai .content .md-stage-content ul,
+.msg-ai .content .md-stage-content ol {
+    padding-left: 1.25em;
+    margin: var(--sp-1) 0;
+}
+
+.msg-ai .content .md-stage-content li {
+    margin: var(--sp-1) 0;
+}
+
+.msg-ai .content .md-stage-content > :first-child {
+    margin-top: 0;
+}
+
+.msg-ai .content .md-stage-content > :last-child {
+    margin-bottom: 0;
+}
+
+.msg-ai .content .md-stage-field-label {
+    display: inline-block;
+    margin-right: var(--sp-2);
+    padding: var(--sp-1) var(--sp-2);
+    border-radius: var(--radius-xs);
+    background: var(--surface-2);
+    color: var(--sec);
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.msg-ai .content .md-stage-field {
+    margin-top: var(--sp-2);
+}
+
 .msg-ai .content hr {
     border: none;
     border-top: 1px solid var(--bd);
     margin: 16px 0;
 }
 
-/* 标题内容分组缩进：groupSections 把 h2-h4 下的内容包进 md-sec，
-   左侧细线 + 缩进体现维度层级；嵌套 sec 递进 */
+/* 标题内容分组：保留结构容器，层级只通过标题与留白表达。 */
 .msg-ai .content .md-sec {
-    padding-left: 16px;
-    margin: 2px 0 14px;
-    border-left: 1px solid var(--bd);
-}
-
-.msg-ai .content .md-sec .md-sec {
-    padding-left: 14px;
+    margin: 0 0 14px;
 }
 
 .msg-ai .content pre {
@@ -1016,13 +1210,21 @@ code {
 
 .msg-ai .content .mermaid {
     padding: 16px;
-    overflow-x: auto;
-    text-align: center
+    overflow: hidden;
+    text-align: center;
+    cursor: grab;
+    touch-action: none;
+    user-select: none
+}
+
+.msg-ai .content .mermaid.mermaid-panning {
+    cursor: grabbing
 }
 
 .msg-ai .content .mermaid svg {
     max-width: 100%;
-    height: auto
+    height: auto;
+    transform-origin: 0 0
 }
 
 .mermaid-actions {
@@ -1051,6 +1253,14 @@ code {
 .mermaid-btn:hover {
     background: var(--surface-2);
     color: var(--fg)
+}
+
+.mermaid-zoom-out,
+.mermaid-zoom-in,
+.mermaid-reset {
+    width: 28px;
+    justify-content: center;
+    padding: 4px
 }
 
 /* 流式输出期间：按钮可见但禁用（流完后当前 div 移除 .streaming 即启用） */

@@ -10,7 +10,7 @@ const ALLOWED_TAGS = new Set([
 
 const ALLOWED_ATTRS = new Set([
     'href', 'target', 'rel', 'title', 'class', 'data-source', 'download', 'src', 'alt',
-    'type', 'aria-label'
+    'type', 'aria-label', 'role', 'tabindex', 'scope'
 ])
 
 export function sanitizeHtml(html) {

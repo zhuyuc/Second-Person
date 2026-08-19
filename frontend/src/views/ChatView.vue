@@ -17,6 +17,8 @@ import { formatRelative, formatTimeFull, fmtSize, nowLocalIso, friendlyError } f
 import { confidenceLabel, lifecycleLabel, TOAST_ONLY_NOTIF } from '@/utils/enumLabel'
 import { withQuery } from '@/utils/query'
 import { sanitizeHtml } from '@/utils/sanitize'
+import { enhanceResponseHtml } from '@/utils/responsePresentation'
+import { bindInlineMermaidInteractions, cleanupInlineMermaidInteractions, resetInlineMermaid, zoomInlineMermaid } from '@/utils/inlineMermaidInteractions'
 
 // Mermaid 主题：CSS 变量驱动（与 MermaidChart 同源），自动跟随系统深浅色；手动触发 run
 applyMermaidTheme()
@@ -27,7 +29,7 @@ mermaidRenderer.code = function (code, lang) {
   if (lang === 'mermaid' || (typeof code === 'object' && code.lang === 'mermaid')) {
     const src = typeof code === 'object' ? code.text : code
     const escaped = src.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
-    return `<div class="mermaid-wrap" data-source="${escaped}"><div class="mermaid-actions"><button class="mermaid-btn mermaid-copy-src" title="复制源码"><i class="ti ti-code"></i> 源码</button><button class="mermaid-btn mermaid-copy-img" title="复制图片"><i class="ti ti-photo"></i> 图片</button></div><div class="mermaid">${src}</div></div>`
+    return `<div class="mermaid-wrap" data-source="${escaped}"><div class="mermaid-actions"><button class="mermaid-btn mermaid-zoom-out" title="缩小图表" aria-label="缩小图表"><i class="ti ti-zoom-out"></i></button><button class="mermaid-btn mermaid-zoom-in" title="放大图表" aria-label="放大图表"><i class="ti ti-zoom-in"></i></button><button class="mermaid-btn mermaid-reset" title="重置图表" aria-label="重置图表"><i class="ti ti-refresh"></i></button><button class="mermaid-btn mermaid-copy-src" title="复制源码"><i class="ti ti-code"></i> 源码</button><button class="mermaid-btn mermaid-copy-img" title="复制图片"><i class="ti ti-photo"></i> 图片</button></div><div class="mermaid">${src}</div></div>`
   }
   // HTML 代码块：加“预览/下载/复制”按钮
   if (lang === 'html' || (typeof code === 'object' && code.lang === 'html')) {
@@ -787,6 +789,16 @@ const memDetail = ref(null)
 async function openMemory(id) {
   try { memDetail.value = await api.get(withQuery('/memory/detail', { id })) } catch { /* api 层已提示 */ }
 }
+async function memoryFeedback(c, msg, feedbackType) {
+  try {
+    await api.post('/memory/feedback', {
+      memory_id: c.id, message_id: msg.id,
+      feedback_type: feedbackType, query_text: ''
+    })
+    c.memory_feedback = feedbackType
+    toast.push('success', feedbackType === 'irrelevant' ? '已降低这类问题下的召回权重' : '已标记并加入记忆治理')
+  } catch { /* api 已提示 */ }
+}
 function stripTail(t, visuals) {
   // 兼容兜底：后端已改为确定性提取，但旧模型缓存可能仍输出嵌入式 JSON 声明
   let s = (t || '').replace(/\s*\{\s*"citations"\s*:\s*\[[^\]]*\]\s*\}\s*/g, '\n')
@@ -812,12 +824,12 @@ function render(md, visuals) {
   // 对话内容里的链接统一新标签打开，不在当前界面跳转
   const html = marked.parse(stripTail(md, visuals))
     .replace(/<a\s/gi, '<a target="_blank" rel="noopener noreferrer" ')
-  return sanitizeHtml(groupSections(html))
+  return sanitizeHtml(enhanceResponseHtml(groupSections(html)))
 }
 
 // 层级分组：Markdown 渲染为平铺兄弟节点，把每个 h2/h3/h4 之后、下一个
-// 同级或更高级标题之前的内容包进 section.md-sec，用缩进体现维度层级；
-// 内层低级标题递归分组，形成多级缩进树
+// 同级或更高级标题之前的内容包进 section.md-sec，保留内容归属与阶段识别；
+// 内层低级标题递归分组，不额外增加视觉缩进。
 const _isHeading = (el) => el.nodeType === 1 && /^H[2-4]$/.test(el.tagName)
 const _hLevel = (el) => Number(el.tagName[1])
 
@@ -963,6 +975,9 @@ onMounted(() => {
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)
   document.addEventListener('click', onDocClickThink)
+  mermaidObserver = new MutationObserver(() => scheduleMermaidScoped())
+  mermaidObserver.observe(scroller.value, { childList: true, subtree: true })
+  scheduleMermaidScoped()
 })
 // 浏览器定位（方案 A）：开关开启时获取一次并缓存，发消息时携带城市名
 const geoEnabled = ref(false)
@@ -980,10 +995,22 @@ async function initGeolocation() {
 const htmlPreview = ref(null)  // 存储 HTML 源码，非 null 时展示预览抽屉
 const htmlFullscreen = ref(false)
 function handleMermaidActions(e) {
-  const btn = e.target.closest('.mermaid-copy-src, .mermaid-copy-img, .html-preview-btn, .html-download-btn, .html-copy-btn, .code-copy-btn')
+  const btn = e.target.closest('.mermaid-zoom-out, .mermaid-zoom-in, .mermaid-reset, .mermaid-copy-src, .mermaid-copy-img, .html-preview-btn, .html-download-btn, .html-copy-btn, .code-copy-btn')
   if (!btn) return
   const wrap = btn.closest('.mermaid-wrap, .html-code-wrap, .code-wrap')
   if (!wrap) return
+  if (btn.classList.contains('mermaid-zoom-out')) {
+    zoomInlineMermaid(wrap, 1 / 1.12)
+    return
+  }
+  if (btn.classList.contains('mermaid-zoom-in')) {
+    zoomInlineMermaid(wrap, 1.12)
+    return
+  }
+  if (btn.classList.contains('mermaid-reset')) {
+    resetInlineMermaid(wrap)
+    return
+  }
   const src = (wrap.dataset.source || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&lt;/g, '<')
   if (btn.classList.contains('mermaid-copy-src')) {
     navigator.clipboard.writeText(src); toast.push('success', '源码已复制')
@@ -1010,21 +1037,46 @@ async function copyMermaidAsImage(wrap) {
     toast.push('success', '图片已复制到剪贴板')
   } catch { toast.push('error', '复制图片失败，请手动右键保存') }
 }
-// Mermaid 图表自动渲染：消息更新或流式结束后触发
-function runMermaidScoped() {
-  nextTick(() => {
-    const nodes = document.querySelectorAll('.mermaid:not([data-processed])')
-    if (nodes.length) { try { mermaid.run({ nodes }) } catch (e) { } }
-  })
+let mermaidObserver = null
+let mermaidRunInFlight = false
+let mermaidRunRequested = false
+
+function scheduleMermaidScoped() {
+  mermaidRunRequested = true
+  if (!mermaidRunInFlight) void runMermaidScoped()
 }
-watch(() => messages.value.length, runMermaidScoped)
-watch(generating, (v) => { if (!v) runMermaidScoped() })
+
+// Markdown Mermaid 作为工具图的降级路径，也要提供完整的平移、缩放和重置能力。
+async function runMermaidScoped() {
+  if (mermaidRunInFlight) return
+  mermaidRunInFlight = true
+  try {
+    do {
+      mermaidRunRequested = false
+      await nextTick()
+      const root = scroller.value
+      if (!root) continue
+      const nodes = root.querySelectorAll('.mermaid:not([data-processed])')
+      if (nodes.length) {
+        try { await mermaid.run({ nodes }) } catch (e) { }
+      }
+      bindInlineMermaidInteractions(root)
+    } while (mermaidRunRequested)
+  } finally {
+    mermaidRunInFlight = false
+  }
+}
+watch(() => messages.value.length, scheduleMermaidScoped)
+watch(messages, scheduleMermaidScoped)
+watch(generating, (v) => { if (!v) scheduleMermaidScoped() })
 onUnmounted(() => {
   window.removeEventListener('sp-new-chat', resetToHome)
   window.removeEventListener('sp-open-session', onOpenSession)
   document.removeEventListener('click', handleMermaidActions)
   document.removeEventListener('click', onDocClickEmoji)
   document.removeEventListener('click', onDocClickThink)
+  mermaidObserver?.disconnect()
+  cleanupInlineMermaidInteractions(scroller.value)
 })
 </script>
 
@@ -1129,6 +1181,12 @@ onUnmounted(() => {
                   <i class="ti ti-quote"></i> 引用记忆：<span v-for="(c, ci) in m.citations" :key="ci" class="cite-link"
                     title="点击查看记忆详情" @click="openMemory(c.id)">[{{ ci + 1 }}] {{
                       c.title || c.id }} </span>
+                  <span v-for="c in m.citations" :key="'fb' + c.id" class="cite-feedback">
+                    <button class="btn-xs" title="这条记忆与本轮无关"
+                      @click.stop="memoryFeedback(c, m, 'irrelevant')"><i class="ti ti-link-off"></i> 不相关</button>
+                    <button class="btn-xs" title="这条记忆已过时"
+                      @click.stop="memoryFeedback(c, m, 'stale')"><i class="ti ti-clock-off"></i> 过时</button>
+                  </span>
                 </div>
                 <!-- 版本翻页器（AI 回复有多版本时显示） -->
                 <div v-if="m.has_branches" class="version-nav">
@@ -1325,6 +1383,14 @@ onUnmounted(() => {
     <p v-if="memDetail.detail"
       style="color:var(--sec);margin-bottom:12px;white-space:pre-wrap;max-height:280px;overflow-y:auto">{{
         memDetail.detail }}</p>
+    <div v-if="memDetail.governance" class="memory-provenance">
+      <div class="label">记忆状态</div>
+      <div class="muted">验证：{{ memDetail.governance.verification_state || '未验证' }} ·
+        时效：{{ memDetail.governance.freshness_state || '当前' }}</div>
+      <div v-if="memDetail.evidence?.length" class="muted" style="margin-top:4px">
+        证据：{{ memDetail.evidence[0].excerpt || memDetail.evidence[0].source_ref || '已记录来源' }}
+      </div>
+    </div>
     <template #footer>
       <button @click="memDetail = null">关闭</button>
     </template>

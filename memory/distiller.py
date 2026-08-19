@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any, Awaitable, Callable
 from infrastructure.timeutil import now_cst
 
@@ -246,6 +247,14 @@ class Distiller:
         from .naming import memory_id as mk_mid, normalize_domain
         mid = mk_mid(seq)
         now = now_cst()
+        attribution = item.get("attribution") or (
+            "imported" if source_type == "knowledge" else "verified")
+        verification_state = {
+            "verified": "direct", "inferred": "inferred",
+            "imported": "direct", "session_fact": "unverified",
+        }.get(attribution, "unverified")
+        review_after = (now + timedelta(
+            days=30 if verification_state == "inferred" else 90)).strftime("%Y-%m-%d")
         fm = {
             "id": mid, "title": item.get("title", "").strip()[:30] or "untitled",
             # 源头净化：LLM 蒸馏可能产出含反斜杠/多段式的脏 domain（v3 修复）
@@ -257,6 +266,12 @@ class Distiller:
             "links": [], "entities": entities,
             "created_by": "distiller",
             "dedup_pending": embedding is None,
+            "verification_state": verification_state,
+            "freshness_state": "current",
+            "usefulness_score": 0,
+            "valid_from": now.strftime("%Y-%m-%d"),
+            "review_after": review_after,
+            "evidence_refs": item.get("evidence_refs", []),
         }
         await self.fw.submit("memory", {
             "op": "create", "frontmatter": fm,
@@ -265,6 +280,7 @@ class Distiller:
             "embedding": embedding, "entities": entities,
             "entity_types": entity_types or {},
             "reason": item.get("reason", ""),
+            "evidence_refs": item.get("evidence_refs", []),
             # 文档/URL 导入（source_type=knowledge ⇔ attribution=imported）
             # 时间线记为导入事件，其余走默认 created
             "timeline_event": "imported" if source_type == "knowledge" else None,

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import json
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -84,6 +86,9 @@ async def memory_list(request: Request):
                   "domain": r["domain"], "confidence": r["confidence"],
                   "lifecycle": r["lifecycle"], "is_important": bool(r["is_important"]),
                   "access_count": r["access_count"], "last_accessed": r["last_accessed"],
+                  "verification_state": r.get("verification_state", "unverified"),
+                  "freshness_state": r.get("freshness_state", "current"),
+                  "usefulness_score": r.get("usefulness_score", 0),
                   "file_path": r["md_path"]} for r in page_rows]}}
 
 
@@ -135,14 +140,113 @@ async def detail(id: str):
         "SELECT ce.message_id, ce.session_id, ce.cited_at, s.title AS session_title "
         "FROM citation_events ce LEFT JOIN sessions s ON ce.session_id=s.session_id "
         "WHERE ce.memory_id=? ORDER BY ce.cited_at DESC LIMIT 50", (id,))
+    evidence = c.db.query_all(
+        "SELECT evidence_id,source_type,source_ref,locator,excerpt,captured_at,status "
+        "FROM memory_evidence WHERE memory_id=? AND status='active' "
+        "ORDER BY captured_at DESC LIMIT 50", (id,))
+    revisions = c.db.query_all(
+        "SELECT revision_id,revision_no,operation,reason,created_at "
+        "FROM memory_revisions WHERE memory_id=? ORDER BY revision_no DESC LIMIT 20", (id,))
     return {"code": 200, "data": {
         "id": id, "frontmatter": doc.frontmatter, "summary": doc.summary,
         "detail": doc.detail, "change_history": doc.change_history,
         "linked_memories": linked,
         "access_count": row["access_count"], "last_accessed": row["last_accessed"],
+        "evidence": evidence, "revisions": revisions,
+        "governance": {"verification_state": row.get("verification_state", "unverified"),
+                       "freshness_state": row.get("freshness_state", "current"),
+                       "usefulness_score": row.get("usefulness_score", 0),
+                       "review_after": row.get("review_after"),
+                       "superseded_by": row.get("superseded_by")},
         "citations": [{"message_id": r["message_id"], "session_id": r["session_id"],
                        "session_title": r["session_title"] or r["session_id"],
                        "cited_at": r["cited_at"]} for r in cites]}}
+
+
+@router.get("/memory/{mid}/revisions")
+async def revisions(mid: str):
+    c = _c()
+    rows = c.db.query_all(
+        "SELECT revision_id,revision_no,operation,before_json,after_json,reason,created_at "
+        "FROM memory_revisions WHERE memory_id=? ORDER BY revision_no DESC", (mid,))
+    return {"code": 200, "data": [{**r,
+        "before": json.loads(r.pop("before_json")) if r.get("before_json") else None,
+        "after": json.loads(r.pop("after_json")) if r.get("after_json") else None}
+        for r in rows]}
+
+
+@router.post("/memory/{mid}/rollback")
+async def rollback(mid: str, request: Request):
+    body = await request.json()
+    c = _c()
+    rev = c.db.query_one(
+        "SELECT after_json FROM memory_revisions WHERE memory_id=? AND revision_id=?",
+        (mid, body.get("revision_id")))
+    if not rev or not rev.get("after_json"):
+        return {"code": 404, "message": "版本不存在", "trace_id": None, "details": None}
+    snapshot = json.loads(rev["after_json"])
+    fm = snapshot.get("frontmatter") or {}
+    if fm.get("id") != mid:
+        return {"code": 400, "message": "版本与记忆不匹配", "trace_id": None, "details": None}
+    await c.fw.submit("memory", {
+        "op": "update", "memory_id": mid, "frontmatter": fm,
+        "summary": snapshot.get("summary", ""), "detail": snapshot.get("detail", ""),
+        "change_history": snapshot.get("change_history", []),
+        "links": fm.get("links", []), "entities": fm.get("entities", []),
+        "reason": "用户回滚到历史版本", "timeline_event": "updated",
+    }, wait=True)
+    c.oplog.log("memory_rollback", mid)
+    return {"code": 200, "data": {}}
+
+
+@router.post("/memory/feedback")
+async def memory_feedback(request: Request):
+    """记忆级反馈直接进入检索与治理闭环，不依赖回答整体评分。"""
+    body = await request.json()
+    c = _c()
+    mid = body.get("memory_id")
+    kind = body.get("feedback_type")
+    if kind not in {"irrelevant", "stale", "incorrect", "helpful"} or not c.palace.get(mid):
+        return {"code": 400, "message": "无效的记忆反馈", "trace_id": None, "details": None}
+    c.lifecycle.record_feedback(mid, kind, body.get("message_id"), body.get("query_text"))
+    if kind == "stale":
+        await c.lifecycle.downvote_stale(mid)
+    elif kind == "incorrect":
+        row = c.palace.get(mid)
+        c.db.execute(
+            "INSERT INTO memory_governance_items(item_id,item_type,primary_memory_id,"
+            "priority,status,reason,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (f"gov_{uuid.uuid4().hex[:12]}", "memory_incorrect", mid,
+             (row.get("access_count", 0) or 0) + 3, "open", "用户标记记忆内容不正确",
+             json.dumps({"query": body.get("query_text")}, ensure_ascii=False), now_iso()))
+    elif kind == "helpful":
+        await c.lifecycle.upvote_upgrade(mid)
+    return {"code": 200, "data": {}}
+
+
+@router.get("/memory/governance")
+async def governance(status: str = "open", limit: int = 100):
+    c = _c()
+    limit = min(max(1, limit), 200)
+    rows = c.db.query_all(
+        "SELECT g.*,m.title,m.summary,m.confidence,m.lifecycle FROM memory_governance_items g "
+        "LEFT JOIN memories m ON m.id=g.primary_memory_id WHERE g.status=? "
+        "ORDER BY g.priority DESC,g.created_at DESC LIMIT ?", (status, limit))
+    for r in rows:
+        r["detail"] = json.loads(r.pop("detail_json")) if r.get("detail_json") else {}
+    return {"code": 200, "data": rows}
+
+
+@router.post("/memory/governance/{item_id}/resolve")
+async def resolve_governance(item_id: str, request: Request):
+    body = await request.json()
+    action = body.get("action", "dismiss")
+    if action not in {"dismiss", "reviewed"}:
+        return {"code": 400, "message": "无效的治理动作", "trace_id": None, "details": None}
+    _c().db.execute(
+        "UPDATE memory_governance_items SET status=?,resolved_at=? WHERE item_id=? AND status='open'",
+        ("dismissed" if action == "dismiss" else "resolved", now_iso(), item_id))
+    return {"code": 200, "data": {}}
 
 
 @router.put("/memory/{mid}/attributes")

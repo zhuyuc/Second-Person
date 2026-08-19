@@ -77,11 +77,17 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
               "access_count": 0, "created_at": now.strftime("%Y-%m-%d"),
               "updated_at": now.strftime("%Y-%m-%d"),
               "links": links or [], "entities": entities or [],
-              "created_by": "user_explicit"}
+              "created_by": "user_explicit", "verification_state": "direct",
+              "freshness_state": "current", "usefulness_score": 0,
+              "valid_from": now.strftime("%Y-%m-%d"),
+              "evidence_refs": [{"source_type": "user_explicit",
+                                  "excerpt": detail[:500],
+                                  "captured_at": now.isoformat(timespec="seconds")}]}
         await file_writer.submit("memory", {
             "op": "create", "frontmatter": fm, "summary": summary[:30],
             "detail": detail, "change_log": f"[{now:%Y-%m-%d}] 用户主动记忆",
-            "links": links or [], "entities": entities or [], "source": "user"})
+            "links": links or [], "entities": entities or [], "source": "user",
+            "evidence_refs": fm["evidence_refs"]})
         return mid
 
     async def memory_search(query: str, top_k: int = 10, domain: str = None,
@@ -242,7 +248,9 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
               "access_count": 0, "created_at": now.strftime("%Y-%m-%d"),
               "updated_at": now.strftime("%Y-%m-%d"),
               "links": [], "entities": [scenario, "输出格式"],
-              "is_important": True, "created_by": "user_explicit"}
+              "is_important": True, "created_by": "user_explicit",
+              "verification_state": "direct", "freshness_state": "current",
+              "usefulness_score": 0, "valid_from": now.strftime("%Y-%m-%d")}
         detail = (f"适用场景：{scenario}\n\n"
                   f"以下为从用户提供的范例文档中提取的格式骨架，"
                   f"生成{scenario}时必须遵循此结构与风格：\n\n{skeleton}")
@@ -253,7 +261,9 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             "change_log": f"[{now:%Y-%m-%d}] 用户指定输出格式模板",
             "entities": [scenario, "输出格式"],
             "entity_types": {scenario: "concept", "输出格式": "concept"},
-            "source": "user", "reason": "格式绑定"}, wait=True)
+            "source": "user", "reason": "格式绑定",
+            "evidence_refs": [{"source_type": "user_explicit", "excerpt": scenario,
+                                "captured_at": now.isoformat(timespec="seconds")}]}, wait=True)
         return {"ok": True, "memory_id": mid, "scenario": scenario,
                 "note": f"已记住「{scenario}」的输出格式模板，"
                 f"后续写{scenario}时将自动遵循此格式"}

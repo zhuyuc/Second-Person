@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -283,6 +284,23 @@ class FileWriter:
         summary = p.get("summary", "")
         detail = p.get("detail", "")
 
+        # 版本审计在覆盖文件前捕获旧快照；revision 只记录索引中可恢复的
+        # 事实内容，不把向量或运行时计数混入版本 diff。
+        before_snapshot = None
+        if existing_row := self.palace.get(mid):
+            old_path = self.data_dir / existing_row["md_path"]
+            if old_path.exists():
+                try:
+                    old_doc = parse_memory_md(old_path.read_text(encoding="utf-8"))
+                    before_snapshot = {
+                        "frontmatter": old_doc.frontmatter,
+                        "summary": old_doc.summary,
+                        "detail": old_doc.detail,
+                        "change_history": old_doc.change_history,
+                    }
+                except Exception:  # noqa: BLE001
+                    logger.warning("读取记忆旧版本失败：%s", mid, exc_info=True)
+
         # 组装 md 文档 + 变更历史追加
         doc = MemoryDoc(frontmatter=fm, summary=summary, detail=detail,
                         change_history=list(p.get("change_history", [])))
@@ -292,7 +310,6 @@ class FileWriter:
         # 目录移动：update 时 domain 变更需移动 md 文件
         mem_dir = self.data_dir / "memories" / domain
         mem_dir.mkdir(parents=True, exist_ok=True)
-        existing_row = self.palace.get(mid)
         if existing_row and existing_row["md_path"]:
             old_path = self.data_dir / existing_row["md_path"]
             fname = old_path.name
@@ -339,6 +356,45 @@ class FileWriter:
                     p.get("timeline_event")
                     or ("created" if op == "create" else "updated"),
                     p.get("reason", ""))
+                rev_no = conn.execute(
+                    "SELECT COALESCE(MAX(revision_no), 0) + 1 AS n "
+                    "FROM memory_revisions WHERE memory_id=?", (mid,)).fetchone()["n"]
+                after_snapshot = {
+                    "frontmatter": fm,
+                    "summary": summary,
+                    "detail": detail,
+                    "change_history": doc.change_history,
+                }
+                conn.execute(
+                    "INSERT INTO memory_revisions(revision_id,memory_id,revision_no,"
+                    "operation,before_json,after_json,reason,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (f"rev_{uuid.uuid4().hex[:12]}", mid, rev_no, op,
+                     json.dumps(before_snapshot, ensure_ascii=False) if before_snapshot else None,
+                     json.dumps(after_snapshot, ensure_ascii=False),
+                     p.get("reason", ""), now_cst().isoformat(timespec="seconds")))
+                for ev in p.get("evidence_refs", []) or []:
+                    if not isinstance(ev, dict):
+                        continue
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_evidence(evidence_id,memory_id,source_type,"
+                        "source_ref,locator,excerpt,excerpt_hash,captured_at,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?,?)",
+                        (ev.get("evidence_id") or f"ev_{uuid.uuid4().hex[:12]}", mid,
+                         ev.get("source_type", "inference"), ev.get("source_ref"),
+                         ev.get("locator"), ev.get("excerpt"), ev.get("excerpt_hash"),
+                         ev.get("captured_at") or now_cst().isoformat(timespec="seconds"),
+                         now_cst().isoformat(timespec="seconds")))
+                # 没有上游证据定位时仍保留最小来源凭证，使自动沉淀的记忆
+                # 不会成为“无来源”的黑箱。主动记忆会传入更精确的原文证据。
+                if op == "create" and not p.get("evidence_refs"):
+                    conn.execute(
+                        "INSERT INTO memory_evidence(evidence_id,memory_id,source_type,"
+                        "excerpt,captured_at,created_at) VALUES(?,?,?,?,?,?)",
+                        (f"ev_{uuid.uuid4().hex[:12]}", mid,
+                         fm.get("created_by", "distiller"), summary[:500],
+                         now_cst().isoformat(timespec="seconds"),
+                         now_cst().isoformat(timespec="seconds")))
                 # vectors 占位行或直接写入 Distiller 已取到的向量
                 emb = p.get("embedding")
                 if emb:

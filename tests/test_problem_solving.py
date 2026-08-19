@@ -118,6 +118,16 @@ def test_deep_final_answer_prefers_the_deep_analysis_slot():
     assert "self.llm.stream(response_snap, prompt" in source
 
 
+def test_pipeline_initializes_retrieval_state_before_convergence():
+    """追问分支会跳过常规检索，后置处理仍必须有合法的检索状态。"""
+    source = (ROOT / "agent" / "core.py").read_text(encoding="utf-8")
+    branch_start = source.index("if (not onboarding and quick_result and quick_result.needs_convergence")
+    prefix = source[:branch_start]
+    assert "memories: list[dict] = []" in prefix
+    assert "loaded_ids: list[str] = []" in prefix
+    assert "retrieval_diagnostics: dict = {}" in prefix
+
+
 def test_session_persists_safe_analysis_metadata(tmp_path: Path):
     db = Database(tmp_path / "test.db")
     db.run_migrations(ROOT / "migrations")

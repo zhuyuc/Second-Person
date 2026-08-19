@@ -6,7 +6,9 @@
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "test:response-presentation": "node scripts/verify-response-presentation.mjs",
+        "test:inline-mermaid": "node scripts/verify-inline-mermaid-interactions.mjs"
     },
     "dependencies": {
         "@tabler/icons-webfont": "^3.6.0",

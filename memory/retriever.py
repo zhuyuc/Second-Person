@@ -55,6 +55,15 @@ def classify_query(query: str) -> str:
     return "neutral"
 
 
+def has_recall_intent(query: str) -> bool:
+    return any(re.search(p, query) for p in RECALL_INTENT_PATTERNS)
+
+
+def is_continuation(query: str) -> bool:
+    """只有明确承接上文时才把历史对话混入向量线索。"""
+    return bool(re.search(r"(上面|刚才|前面|之前|这个方案|那个方案|按.*(格式|说的)|继续|接着)", query))
+
+
 @dataclass
 class Candidate:
     memory_id: str
@@ -65,6 +74,12 @@ class Candidate:
     bm25_rank: int | None = None
     rrf_score: float = 0.0
     final_score: float = 0.0
+    vector_score: float = 0.0
+    bm25_score: float = 0.0
+    source_type: str = "memory"
+    confidence: str = "medium"
+    verification_state: str = "unverified"
+    freshness_state: str = "current"
 
 
 @dataclass
@@ -125,13 +140,15 @@ class Retriever:
 
         # RRF 融合：rank 从 1 起
         scores: dict[str, Candidate] = {}
-        for rank, (mid, _) in enumerate(vector_hits, start=1):
+        for rank, (mid, score) in enumerate(vector_hits, start=1):
             c = scores.setdefault(mid, Candidate(mid, "", "", "active"))
             c.vector_rank = rank
+            c.vector_score = float(score)
             c.rrf_score += 1.0 / (rrf_k + rank)
-        for rank, (mid, _) in enumerate(fts_hits, start=1):
+        for rank, (mid, score) in enumerate(fts_hits, start=1):
             c = scores.setdefault(mid, Candidate(mid, "", "", "active"))
             c.bm25_rank = rank
+            c.bm25_score = float(score)
             c.rrf_score += 1.0 / (rrf_k + rank)
 
         # 单路补偿：迁移未完成期间 embedding_version=new 的记忆只有 FTS 一路得分，
@@ -143,8 +160,8 @@ class Retriever:
                 if c.vector_rank is None and c.bm25_rank is not None and mid in new_ids:
                     c.rrf_score *= 1.5
 
-        # 补齐元数据 + stale 降权 + 按问题类型调整 memory/knowledge 权重
-        # （均在 RRF 后作用于排序得分，不做准入判据）
+        # 补齐元数据 + 证据/时效准入 + stale 降权 + 按问题类型调整来源权重。
+        # 重要标记只能在资格检查通过后加权，不能复活无关记忆。
         stale_factor = cfg.get("stale_score_factor", 0.7)
         qtype = classify_query(query)
         pk_factor = cfg.get("personal_query_knowledge_factor", 0.7)
@@ -157,6 +174,21 @@ class Retriever:
             if not row or row["lifecycle"] in ("archived", "missing"):
                 continue
             c.title, c.summary, c.lifecycle = row["title"], row["summary"], row["lifecycle"]
+            c.source_type = row["source_type"] or "memory"
+            c.confidence = row["confidence"] or "medium"
+            try:
+                verification = row["verification_state"] or "unverified"
+                freshness = row["freshness_state"] or "current"
+            except (IndexError, KeyError):
+                verification, freshness = "unverified", "current"
+            c.verification_state, c.freshness_state = verification, freshness
+            # 争议事实不直接注入；推断/待复核内容仅在明确回忆时参与。
+            if row["confidence"] == "disputed":
+                continue
+            if verification == "inferred" and not has_recall_intent(query):
+                continue
+            if freshness in ("expired", "review_due") and not has_recall_intent(query):
+                continue
             factor = stale_factor if row["lifecycle"] == "stale" else 1.0
             stype = row["source_type"] or "memory"
             if qtype == "personal" and stype == "knowledge":
@@ -167,6 +199,9 @@ class Retriever:
             try:
                 if row["is_important"]:
                     factor *= important_factor
+                negative = int(row["retrieval_negative_count"] or 0)
+                if negative:
+                    factor *= max(0.35, 1.0 - min(0.65, negative * 0.15))
             except (IndexError, KeyError):
                 pass
             c.final_score = c.rrf_score * factor
@@ -208,12 +243,12 @@ class Retriever:
         diag_fts_hits = 0
         diag_refined_count = 0
         diag_gate = "none"
-        # 检索线索（编码特异性）：向量路用"最近对话上下文 + 当轮提问"，
-        # 当轮提问放末尾优先保留，上下文取尾部（最新）填剩余预算；
-        # 指代型跟进消息（"按上面说的改"）由此获得可用的语义线索
+        # 检索线索只在明确承接上文或回忆历史时携带最近对话，避免旧话题
+        # 被拼进普通提问的向量，导致语义相关但任务无关的误命中。
         q_part = query[:self.EMBED_QUERY_MAX_CHARS]
         budget = self.EMBED_QUERY_MAX_CHARS - len(q_part) - 1
-        if context_text and budget > 0:
+        use_context = bool(context_text) and (is_continuation(query) or has_recall_intent(query))
+        if use_context and budget > 0:
             embed_cue = context_text[-budget:] + "\n" + q_part
         else:
             embed_cue = q_part
@@ -242,6 +277,8 @@ class Retriever:
                 "top_vector_score": round(pre.top_vector_score, 4),
                 "gate": "presearch_empty",
                 "context_chars": len(context_text or ""),
+                "query_type": classify_query(query),
+                "candidate_ids": [], "selected_ids": [], "rejected": [],
                 "retrieval_time_ms": round((time.perf_counter() - _start) * 1000, 2),
                 "refined_count": 0,
             }
@@ -258,7 +295,11 @@ class Retriever:
                 chosen_ids = await asyncio.wait_for(
                     self.llm_refine_fn(
                         query, [{"id": c.memory_id, "title": c.title,
-                                 "summary": c.summary} for c in candidates[:10]],
+                                 "summary": c.summary, "source_type": c.source_type,
+                                 "confidence": c.confidence,
+                                 "verification_state": c.verification_state,
+                                 "freshness_state": c.freshness_state}
+                                for c in candidates[:10]],
                         session_id=session_id, context_text=context_text),
                     timeout=refine_timeout)
                 chosen_ids = chosen_ids[:3]
@@ -266,18 +307,18 @@ class Retriever:
                 if not chosen_ids:
                     diag_gate = "refine_empty"
             except asyncio.TimeoutError:
-                chosen_ids = self._degrade_pick(candidates)
-                result.degraded = "第 2 层精筛超时（>10s），按得分降级注入"
+                chosen_ids = self._degrade_pick(candidates, query)
+                result.degraded = "第 2 层精筛超时（>10s），默认不注入弱相关记忆"
                 diag_refined_count = len(chosen_ids)
                 logger.warning("检索精筛超时，降级挑选 %d 条", len(chosen_ids))
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001
-                chosen_ids = self._degrade_pick(candidates)
-                result.degraded = "第 2 层精筛不可用，按得分降级注入（已过滤弱尾）"
+                chosen_ids = self._degrade_pick(candidates, query)
+                result.degraded = "第 2 层精筛不可用，默认不注入弱相关记忆"
                 diag_refined_count = len(chosen_ids)
         else:
-            chosen_ids = self._degrade_pick(candidates)
+            chosen_ids = self._degrade_pick(candidates, query)
 
         # 第 3 层：加载详情 + 1 跳交叉引用（chosen_ids 为空时自然跳过）
         # _load_detail 含同步读 md 文件，丢工作线程避免磁盘忙时阻塞事件循环
@@ -288,7 +329,8 @@ class Retriever:
                 result.loaded_ids.append(mid)
 
         related = self._expand_one_hop(
-            chosen_ids, limit=2, query_vec=query_vec)
+            chosen_ids, limit=2, query_vec=query_vec,
+            allow_related=has_recall_intent(query) or is_continuation(query))
         for rmid in related:
             detail = await asyncio.to_thread(self._load_detail, rmid)
             if detail:
@@ -309,15 +351,22 @@ class Retriever:
             "top_vector_score": round(pre.top_vector_score, 4),
             "gate": diag_gate,
             "context_chars": len(context_text or ""),
+            "used_context": use_context,
             "retrieval_time_ms": _elapsed_ms,
             "refined_count": diag_refined_count,
+            "query_type": classify_query(query),
+            "candidate_ids": [c.memory_id for c in candidates[:10]],
+            "selected_ids": list(chosen_ids),
+            "rejected": ([{"id": c.memory_id, "reason": "refine_rejected"}
+                          for c in candidates[:10] if c.memory_id not in chosen_ids]),
         }
         return result
 
-    def _degrade_pick(self, candidates: list) -> list[str]:
-        """精筛不可用时的降级挑选：候选已经预筛阀值准入，此处再按相对得分
-        过滤明显弱于首条的尾部，最多取 3 条，至少保留最相关的 1 条。"""
-        if not candidates:
+    def _degrade_pick(self, candidates: list, query: str | None = None) -> list[str]:
+        """精筛不可用时只为明确回忆请求兜底，普通提问宁可不用记忆。"""
+        # query=None 保留内置工具/旧调用方的原有相对得分契约；完整对话路径
+        # 总是传入 query，因此普通问题仍遵守“宁可不用记忆”的新规则。
+        if not candidates or (query is not None and not has_recall_intent(query)):
             return []
         top = candidates[0].final_score or 0.0
         ratio = self.config.get("refine_degrade_score_ratio", 0.5)
@@ -326,13 +375,15 @@ class Retriever:
         return picked or [candidates[0].memory_id]
 
     def _expand_one_hop(self, seed_ids: list[str], limit: int,
-                        query_vec=None) -> list[str]:
+                        query_vec=None, allow_related: bool = False) -> list[str]:
         vthr = self.config.get("vector_threshold", 0.55)
         seen = set(seed_ids)
         # 先收集候选目标再批量取元数据，避免逐条 palace.get 的 N+1
         targets: list[str] = []
         for mid in seed_ids:
             for link in self.palace.outlinks(mid):
+                if link.get("link_type", "related") == "related" and not allow_related:
+                    continue
                 t = link["target_id"]
                 if t not in seen:
                     seen.add(t)
@@ -368,11 +419,13 @@ class Retriever:
         doc = parse_memory_md(f.read_text(encoding="utf-8"))
         return {"id": mid, "title": doc.title, "summary": doc.summary,
                 "detail": doc.detail, "confidence": row["confidence"],
-                "lifecycle": row["lifecycle"], "links": doc.links}
+                "lifecycle": row["lifecycle"], "links": doc.links,
+                "verification_state": row.get("verification_state", "unverified"),
+                "freshness_state": row.get("freshness_state", "current")}
 
     @staticmethod
     def _has_recall_intent(query: str) -> bool:
-        return any(re.search(p, query) for p in RECALL_INTENT_PATTERNS)
+        return has_recall_intent(query)
 
 
 def _fts_escape(query: str) -> str:
@@ -380,4 +433,5 @@ def _fts_escape(query: str) -> str:
     tokens = re.findall(r"[\w\u4e00-\u9fff]+", query)
     if not tokens:
         return ""
-    return " OR ".join(f'"{t}"' for t in tokens[:20])
+    # AND 降低泛词命中带来的噪声；单 token 保持原有召回能力。
+    return " AND ".join(f'"{t}"' for t in tokens[:8])

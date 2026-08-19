@@ -46,18 +46,29 @@ class Palace:
             """INSERT INTO memories(id,title,summary,domain,confidence,lifecycle,
                  source_type,access_count,last_accessed,is_important,implicit_use_count,
                  md_missing,user_marked_stale,dedup_pending,created_by,md_path,
-                 created_at,updated_at)
+                 created_at,updated_at,verification_state,freshness_state,
+                 usefulness_score,valid_from,review_after,superseded_by,
+                 retrieval_negative_count)
                VALUES(:id,:title,:summary,:domain,:confidence,:lifecycle,:source_type,
                  :access_count,:last_accessed,:is_important,:implicit_use_count,
                  :md_missing,:user_marked_stale,:dedup_pending,:created_by,:md_path,
-                 :created_at,:updated_at)
+                 :created_at,:updated_at,:verification_state,:freshness_state,
+                 :usefulness_score,:valid_from,:review_after,:superseded_by,
+                 :retrieval_negative_count)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, summary=excluded.summary, domain=excluded.domain,
                  confidence=excluded.confidence, lifecycle=excluded.lifecycle,
                  source_type=excluded.source_type, is_important=excluded.is_important,
                  md_missing=excluded.md_missing, user_marked_stale=excluded.user_marked_stale,
                  dedup_pending=excluded.dedup_pending, md_path=excluded.md_path,
-                 updated_at=excluded.updated_at""",
+                 updated_at=excluded.updated_at,
+                 verification_state=excluded.verification_state,
+                 freshness_state=excluded.freshness_state,
+                 usefulness_score=excluded.usefulness_score,
+                 valid_from=excluded.valid_from,
+                 review_after=excluded.review_after,
+                 superseded_by=excluded.superseded_by,
+                 retrieval_negative_count=excluded.retrieval_negative_count""",
             {
                 "id": fm["id"], "title": fm.get("title", "") or "untitled", "summary": summary,
                 "domain": fm.get("domain", "general"),
@@ -75,6 +86,13 @@ class Palace:
                 "md_path": md_path,
                 "created_at": fm.get("created_at", _now()),
                 "updated_at": _now(),
+                "verification_state": fm.get("verification_state", "unverified"),
+                "freshness_state": fm.get("freshness_state", "current"),
+                "usefulness_score": fm.get("usefulness_score", 0),
+                "valid_from": fm.get("valid_from"),
+                "review_after": fm.get("review_after"),
+                "superseded_by": fm.get("superseded_by"),
+                "retrieval_negative_count": fm.get("retrieval_negative_count", 0),
             },
         )
 

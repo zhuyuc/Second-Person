@@ -19,7 +19,7 @@ const confirm = useConfirm()
 const { busy, run } = useBusy()
 const sessStore = useSessions()
 const tab = ref(0)
-const tabs = ['知识图谱', '记忆列表', '时间线', '用户画像', '健康度', '知识库']
+const tabs = ['知识图谱', '记忆列表', '时间线', '用户画像', '健康度', '知识库', '治理队列']
 
 // 记忆列表
 const memList = ref([])
@@ -41,6 +41,7 @@ const soul = ref({ soul_core: '', soul_style: {} })
 const outputStyle = ref({})
 // 健康度
 const health = ref(null)
+const governance = ref([])
 
 async function loadList() {
   const d = await api.post('/memory/list', {
@@ -186,6 +187,12 @@ async function confirmPending(pid, approved) {
   toast.push('success', approved ? '已确认，本次对话开始生效' : '已忽略')
 }
 async function loadHealth() { health.value = await api.get('/memory/health') }
+async function loadGovernance() { governance.value = await api.get('/memory/governance') }
+async function resolveGovernance(item, action = 'reviewed') {
+  await api.post(`/memory/governance/${item.item_id}/resolve`, { action })
+  governance.value = governance.value.filter(x => x.item_id !== item.item_id)
+  toast.push('success', action === 'dismiss' ? '已忽略治理事项' : '已标记为已处理')
+}
 
 // 重复检测：并排对比两条疑似重复记忆（携建议对象，弹窗内可直接裁决）
 const dupCompare = ref(null)
@@ -535,6 +542,7 @@ function selectTab(i) {
   else if (i === 3) loadProfile()
   else if (i === 4) { loadHealth(); loadConflicts() }
   else if (i === 5) { loadDocs(); loadLocalDirs() }
+  else if (i === 6) loadGovernance()
 }
 
 onMounted(() => selectTab(0))
@@ -937,6 +945,33 @@ onActivated(() => selectTab(tab.value))
         <button class="btn-sm btn-danger" @click="deleteDoc(d)"><i class="ti ti-trash"></i>
           删除</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 记忆治理队列：把不相关、错误、过时反馈集中处理，避免反馈只停留在单轮对话 -->
+  <div v-else-if="tab === 6">
+    <div class="section-row">
+      <div>
+        <div class="section-sub">待处理事项</div>
+        <div class="muted">用户反馈和后台检查会在这里汇总，并影响后续检索。</div>
+      </div>
+      <button class="btn-sm" @click="loadGovernance"><i class="ti ti-refresh"></i> 刷新</button>
+    </div>
+    <div v-if="!governance.length" class="empty"><i class="ti ti-circle-check"></i>暂无待处理事项<br>记忆状态保持良好</div>
+    <div v-for="g in governance" :key="g.item_id" class="cw list-row">
+      <div class="row">
+        <div style="min-width:0">
+          <div class="list-title">{{ g.title || g.primary_memory_id }}</div>
+          <div class="list-sub">{{ g.reason }}</div>
+          <div class="muted mt-1">优先级 {{ Math.round(g.priority || 0) }} · {{ formatTimeFull(g.created_at) }}</div>
+        </div>
+        <div class="fg" style="gap:6px;flex-shrink:0">
+          <button class="btn-xs" @click="openDetail(g.primary_memory_id)"><i class="ti ti-eye"></i> 查看</button>
+          <button class="btn-xs" @click="resolveGovernance(g, 'dismiss')">忽略</button>
+          <button class="btn-xs btn-primary" @click="resolveGovernance(g)">已处理</button>
+        </div>
+      </div>
+      <div v-if="g.detail?.query" class="muted mt-1">触发问题：{{ g.detail.query }}</div>
     </div>
   </div>
 

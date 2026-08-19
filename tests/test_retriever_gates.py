@@ -2,7 +2,7 @@
 
 保护契约：
 1. 否决门：第 2 层精筛判空 → 注入 0 条，gate=refine_empty，不再强制兜底 top-2
-2. 降级链：精筛异常 → 仍注入 top-3 未精筛（原有降级语义保留）
+2. 降级链：普通问题精筛异常 → 不注入；明确回忆请求才按得分兜底
 3. 扩散衰减门：1 跳关联记忆与线索余弦低于准入线 → 不注入
 4. 线索门：向量路 embed 输入含上下文且当轮提问在末尾；FTS 路仅当轮提问
 运行：python tests/test_retriever_gates.py（退出码 0 = 全部通过）
@@ -90,15 +90,17 @@ async def main() -> int:
         failures.append(
             f"gate 应为 refine_empty，实际 {res.diagnostics.get('gate')}")
 
-    # ---- 2. 降级链：精筛异常 → top-3 未精筛 ----
+    # ---- 2. 降级链：普通问题异常不注入，回忆请求才兜底 ----
     async def refine_boom(query, cands, session_id=None, context_text=None):
         raise RuntimeError("llm down")
     r = _mk_retriever(tmp, _FakeVS(hits), _FakePalace(rows), refine_boom, [])
     res = await r.retrieve("随便问点什么")
-    # md 文件不存在 → _load_detail 走 summary 兜底，仍应有 2 条（候选只有 2）
-    if len(res.hits) != 2 or "精筛不可用" not in res.degraded:
+    if res.hits or "精筛不可用" not in res.degraded:
         failures.append(
-            f"降级链失效：hits={len(res.hits)} degraded={res.degraded!r}")
+            f"普通问题降级仍注入：hits={len(res.hits)} degraded={res.degraded!r}")
+    res = await r.retrieve("你还记得我之前说过什么吗？")
+    if len(res.hits) != 2:
+        failures.append(f"回忆请求降级兜底失效：hits={len(res.hits)}")
 
     # ---- 3. 扩散衰减门：低余弦关联不注入，高余弦注入 ----
     async def refine_pick_a(query, cands, session_id=None, context_text=None):

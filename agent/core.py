@@ -35,7 +35,6 @@ from .degradation import (
     decide_degradation,
 )
 from .intent_parser import (
-    INTENT_TYPE_LABELS,
     AttentionFocuser,
     DegradationError,
     EmotionState,
@@ -169,10 +168,8 @@ def _format_intent_thinking(intents) -> str:
     lines = ["【意图理解】"]
     for i, it in enumerate(intents):
         summary = getattr(it, "intent_summary", "") or "（无摘要）"
-        itype = INTENT_TYPE_LABELS.get(
-            getattr(it, "intent_type", ""), getattr(it, "intent_type", ""))
         tools = getattr(it, "tools_needed", []) or []
-        line = f"{i + 1}. {summary}（{itype}）"
+        line = f"{i + 1}. {summary}"
         if tools:
             line += f"，计划调用工具：{'、'.join(tools)}"
         deps = getattr(it, "depends_on", []) or []
@@ -802,6 +799,11 @@ class AgentCore:
         self._material_slots: list[str] = []
         max_rounds = self.config.get("convergence_max_rounds", 2)
         _convergence_done = False
+        # 收敛、快速检索和追问分支都会在后置处理阶段消费这些状态；先给出
+        # 空值，避免追问分支跳过检索时留下未初始化的局部变量。
+        memories: list[dict] = []
+        loaded_ids: list[str] = []
+        retrieval_diagnostics: dict = {}
         if (not onboarding and quick_result and quick_result.needs_convergence
                 and llm_available):
             understanding, conv_memories = await self._convergence_loop(
@@ -831,10 +833,6 @@ class AgentCore:
                     rich_intent=understanding.rich_intent,
                     focus=understanding.focus,
                     emotion=understanding.emotion_state)
-        else:
-            # 快速通道或引导模式
-            memories = []
-            loaded_ids: list[str] = []
         cited_ids: list[str] = []
 
         if not onboarding:
@@ -846,7 +844,7 @@ class AgentCore:
 
         async def _run_retrieval():
             """第 3 步 记忆检索（query 用真实提问，不含附件正文）。"""
-            nonlocal memories, loaded_ids
+            nonlocal memories, loaded_ids, retrieval_diagnostics
             _sp = tracer.span_start("memory_retrieval", input={
                 "query": core_query, "llm_available": llm_available,
                 "retrieval_context": mark_preview(
@@ -857,6 +855,7 @@ class AgentCore:
                     context_text=retrieval_context)
                 memories = retrieval.hits + retrieval.related
                 loaded_ids = retrieval.loaded_ids
+                retrieval_diagnostics = getattr(retrieval, "diagnostics", None) or {}
                 if memories:
                     await emit("memory_retrieved",
                                {"count": len(memories),
@@ -1689,7 +1688,8 @@ class AgentCore:
                     _pending_proposal["message_id"])
             self._turn_partials.pop(sid, None)
             _signal_shape = await self._post_process(sid, msg_id, assistant_text, loaded_ids, cited_ids,
-                                                     message, onboarding, user_msg_id=user_msg_id, intents=intents)
+                                                     message, onboarding, user_msg_id=user_msg_id, intents=intents,
+                                                     retrieval_diagnostics=retrieval_diagnostics)
             _sp.end(output={"message_id": msg_id, "cited": cited_ids,
                             "signal_shape": _signal_shape, "budget_checked": True})
         except Exception:
@@ -3339,7 +3339,8 @@ class AgentCore:
                    [{"role": "user", "content": message}]
 
     async def _post_process(self, sid, msg_id, content, loaded_ids, cited_ids,
-                            message, onboarding, user_msg_id=None, intents=None):
+                            message, onboarding, user_msg_id=None, intents=None,
+                            retrieval_diagnostics=None):
         if onboarding:
             return None  # 引导期只写 conversations（已在 append 完成）
         # 信号采集阶段一（context_label 复用第 4 步意图类型，零额外 LLM 成本）
@@ -3364,6 +3365,9 @@ class AgentCore:
         self.lifecycle.update_access_stats(loaded_ids, cited_ids)
         # 引用明细落表：记忆/知识库统一溯源（被哪条消息、何时引用）
         self.lifecycle.record_citations(cited_ids, msg_id, sid)
+        if retrieval_diagnostics:
+            self.lifecycle.record_retrieval_event(
+                sid, msg_id, message, retrieval_diagnostics)
         # stale 命中恢复（强化门：仅真正被引用才恢复——候选池冒泡不算真实使用，
         # 避免噪声检索污染生命周期与意识提示通路）
         for mid in cited_ids:

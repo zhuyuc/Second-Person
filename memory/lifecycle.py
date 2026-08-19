@@ -14,6 +14,7 @@ Lifecycle —— 生命周期五态流转（产品文档 §生命周期流转规
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import timedelta
 from pathlib import Path
 
@@ -62,7 +63,7 @@ class LifecycleManager:
             "frontmatter": doc.frontmatter, "summary": doc.summary,
             "detail": doc.detail, "change_history": doc.change_history,
             "links": doc.links, "entities": doc.entities, "reason": reason,
-        })
+        }, wait=True)
 
     # ---- active → stable（第 8 步 access_count 更新时检查） ---------------
     async def check_stable_upgrade(self, mid: str) -> bool:
@@ -90,6 +91,7 @@ class LifecycleManager:
             return False
         if row["lifecycle"] == "stale" and not row["user_marked_stale"]:
             doc.frontmatter["lifecycle"] = "active"
+            doc.frontmatter["freshness_state"] = "current"
             doc.change_history.insert(
                 0, f"[{now_cst():%Y-%m-%d}] 检索命中，stale → active")
             # 自动归档周期计数清零（已恢复活跃）
@@ -109,6 +111,7 @@ class LifecycleManager:
             return False
         fm = doc.frontmatter
         fm["lifecycle"] = "stale"
+        fm["freshness_state"] = "expired"
         fm["confidence"] = _downgrade_confidence(row["confidence"])
         fm["is_important"] = False
         fm["user_marked_stale"] = True
@@ -120,12 +123,13 @@ class LifecycleManager:
     # ---- 点赞升级：引用该记忆的回复被点赞 → medium → strong -----------
     async def upvote_upgrade(self, mid: str) -> bool:
         row, doc = self._load_doc(mid)
-        if not row or not doc or row["confidence"] != "medium":
+        if not row or not doc:
             return False
-        doc.frontmatter["confidence"] = "strong"
+        score = min(10, float(row["usefulness_score"] or 0) + 1)
+        doc.frontmatter["usefulness_score"] = score
         doc.change_history.insert(
-            0, f"[{now_cst():%Y-%m-%d}] 用户点赞引用回复，confidence: medium → strong")
-        await self._submit_update(doc, "点赞升级")
+            0, f"[{now_cst():%Y-%m-%d}] 用户点赞引用回复，使用价值 +1")
+        await self._submit_update(doc, "点赞反馈")
         return True
 
     # ---- low 待确认：用户在对话中明确认可 → low → medium ----------------
@@ -175,11 +179,40 @@ class LifecycleManager:
             "AND last_accessed IS NOT NULL AND last_accessed < ?", (cutoff,))
         return [r["id"] for r in rows]
 
+    def detect_review_due(self) -> list[str]:
+        """按记忆自身 review_after 到期，不把“被加载”误算为复核。"""
+        today = now_cst().strftime("%Y-%m-%d")
+        rows = self.db.query_all(
+            "SELECT id FROM memories WHERE lifecycle IN ('active','stable','stale') "
+            "AND COALESCE(freshness_state,'current')='current' "
+            "AND review_after IS NOT NULL AND review_after <= ?", (today,))
+        return [r["id"] for r in rows]
+
+    async def mark_review_due(self, mid: str) -> bool:
+        row, doc = self._load_doc(mid)
+        if not row or not doc:
+            return False
+        if (row.get("freshness_state") or "current") != "current":
+            return False
+        doc.frontmatter["freshness_state"] = "review_due"
+        doc.change_history.insert(
+            0, f"[{now_cst():%Y-%m-%d}] 到达 review_after，标记待复核")
+        await self._submit_update(doc, "记忆到期待复核")
+        now = now_cst().isoformat(timespec="seconds")
+        self.db.execute(
+            "INSERT INTO memory_governance_items(item_id,item_type,primary_memory_id,"
+            "priority,status,reason,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (f"gov_{uuid.uuid4().hex[:12]}", "freshness_review", mid,
+             (row.get("access_count", 0) or 0) + 1, "open", "记忆到达复核时间",
+             json.dumps({"review_after": row.get("review_after")}, ensure_ascii=False), now))
+        return True
+
     async def mark_stale(self, mid: str) -> None:
         row, doc = self._load_doc(mid)
         if not row or not doc or row["lifecycle"] != "active":
             return
         doc.frontmatter["lifecycle"] = "stale"
+        doc.frontmatter["freshness_state"] = "review_due"
         doc.change_history.insert(
             0, f"[{now_cst():%Y-%m-%d}] 过期检测：active → stale")
         await self._submit_update(doc, "过期降级")
@@ -189,37 +222,16 @@ class LifecycleManager:
         """批量更新频次；走索引表直接更新（frontmatter 由后续 update 同步）。
         全部改 executemany 批处理，避免逐条 execute 的 N+1。"""
         now = now_cst().isoformat(timespec="seconds")
-        if loaded_ids:
+        # 只有正文实际引用的记忆才算使用。候选被加载但未引用，不应阻止
+        # 过期流转，否则错误召回会形成“越误命中越不会过期”的反馈回路。
+        if cited_ids:
             self.db.executemany(
                 "UPDATE memories SET last_accessed=? WHERE id=?",
-                [(now, mid) for mid in loaded_ids])
+                [(now, mid) for mid in cited_ids])
         if cited_ids:
             self.db.executemany(
                 "UPDATE memories SET access_count=access_count+1 WHERE id=?",
                 [(mid,) for mid in cited_ids])
-        # implicit：加载了但未引用的，累计 3 转 1 次 access_count
-        implicit = [m for m in loaded_ids if m not in cited_ids]
-        if not implicit:
-            return
-        rows_map = self.palace.get_many(implicit)
-        reset_rows: list[tuple] = []   # 达 3：置 0 + access_count+1
-        inc_rows: list[tuple] = []     # 未达 3：累加
-        for mid in implicit:
-            row = rows_map.get(mid)
-            if not row:
-                continue
-            new_cnt = (row["implicit_use_count"] or 0) + 1
-            if new_cnt >= 3:
-                reset_rows.append((mid,))
-            else:
-                inc_rows.append((new_cnt, mid))
-        if reset_rows:
-            self.db.executemany(
-                "UPDATE memories SET implicit_use_count=0, "
-                "access_count=access_count+1 WHERE id=?", reset_rows)
-        if inc_rows:
-            self.db.executemany(
-                "UPDATE memories SET implicit_use_count=? WHERE id=?", inc_rows)
 
     # ---- 引用明细（第 8 步）：记忆/知识库统一引用溯源 -------------------
     def record_citations(self, cited_ids: list[str], message_id: int,
@@ -246,3 +258,42 @@ class LifecycleManager:
             "session_id,cited_at) VALUES(?,?,?,?,?)",
             [(mid, doc_map.get(mid), message_id, session_id, now)
              for mid in cited_ids])
+
+    def record_feedback(self, memory_id: str, feedback_type: str,
+                        message_id: int | None = None,
+                        query_text: str | None = None) -> None:
+        """记录记忆级反馈；反馈与回答总体评分分离，便于检索策略学习。"""
+        now = now_cst().isoformat(timespec="seconds")
+        self.db.execute(
+            "INSERT INTO memory_feedback(memory_id,message_id,feedback_type,"
+            "query_text,created_at) VALUES(?,?,?,?,?)",
+            (memory_id, message_id, feedback_type, query_text, now))
+        if feedback_type == "irrelevant":
+            self.db.execute(
+                "UPDATE memories SET retrieval_negative_count="
+                "COALESCE(retrieval_negative_count, 0) + 1 WHERE id=?",
+                (memory_id,))
+            row = self.palace.get(memory_id)
+            if row:
+                priority = (row["access_count"] or 0) + 1
+                self.db.execute(
+                    "INSERT INTO memory_governance_items(item_id,item_type,"
+                    "primary_memory_id,priority,status,reason,detail_json,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (f"gov_{uuid.uuid4().hex[:12]}", "retrieval_irrelevant",
+                     memory_id, priority, "open", "用户标记本轮检索无关",
+                     json.dumps({"query": query_text}, ensure_ascii=False), now))
+
+    def record_retrieval_event(self, session_id: str | None, message_id: int | None,
+                               query: str, diagnostics: dict) -> None:
+        """保存轻量检索轨迹，供误命中回放和阈值校准使用。"""
+        now = now_cst().isoformat(timespec="seconds")
+        self.db.execute(
+            "INSERT INTO retrieval_events(session_id,message_id,query_text,query_type,"
+            "gate,candidates_json,selected_json,rejected_json,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (session_id, message_id, query, diagnostics.get("query_type"),
+             diagnostics.get("gate"),
+             json.dumps(diagnostics.get("candidate_ids", []), ensure_ascii=False),
+             json.dumps(diagnostics.get("selected_ids", []), ensure_ascii=False),
+             json.dumps(diagnostics.get("rejected", []), ensure_ascii=False), now))

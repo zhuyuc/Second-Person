@@ -200,6 +200,10 @@ class LintAgent:
         # 过期检测 → 标 stale
         for mid in self.lifecycle.detect_stale_candidates():
             await self.lifecycle.mark_stale(mid)
+        # 记忆自身复核周期到期 → 降为待复核，避免旧事实继续作为当前事实使用
+        review_due = 0
+        for mid in self.lifecycle.detect_review_due():
+            review_due += int(await self.lifecycle.mark_review_due(mid))
         # stale → archived：连续两个 Lint 周期未恢复则自动归档
         archived = await self._auto_archive_stale()
         # 矛盾检测（先于重复检测：contradicts 对会被重复检测排斥）
@@ -220,8 +224,8 @@ class LintAgent:
             from infrastructure.event_bus import EVT_LINT_COMPLETED
             await self.bus.publish(EVT_LINT_COMPLETED, {"score": score})
         return {"health_score": score, "counts": counts,
-                "auto_archived": archived, "conflicts_found": conflicts,
-                "drift_fixed": drift_fixed}
+            "auto_archived": archived, "conflicts_found": conflicts,
+                "drift_fixed": drift_fixed, "review_due": review_due}
 
     async def _auto_archive_stale(self) -> int:
         """stale_lint_runs 计数：每个 Lint 周期对处于 stale 的记忆 +1，

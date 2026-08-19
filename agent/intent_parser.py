@@ -40,18 +40,6 @@ INTENT_TYPES = [
 ]
 
 
-# 默认中文标签
-INTENT_TYPE_LABELS = {
-    "query_memory": "检索记忆", "query_knowledge": "查询知识库",
-    "query_external": "查询外部信息", "compute": "计算任务",
-    "file_op": "文件操作", "remember_intent": "记忆指令",
-    "remember_confirm": "重要信息待确认",
-    "soul_feedback": "风格反馈", "output_preference_feedback": "输出偏好反馈",
-    "meta": "系统相关", "chat": "日常对话",
-    "unknown": "意图不明",
-}
-
-
 def extract_explicit_requirements(message: str) -> list[str]:
     """保守提取用户明确列出的事项，供深度路径的本地兜底使用。"""
     message = (message or "").strip()
