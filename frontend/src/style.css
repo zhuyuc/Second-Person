@@ -1397,6 +1397,30 @@ code {
     background: var(--brand-soft)
 }
 
+/* 引用组：徽章与其专属反馈按钮同组，按钮悬停/聚焦时才展开，避免整排重复按钮 */
+.cite-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-right: 6px;
+    white-space: nowrap
+}
+
+.cite-feedback {
+    display: inline-flex;
+    gap: 2px;
+    max-width: 0;
+    overflow: hidden;
+    opacity: 0;
+    transition: max-width var(--dur-fast), opacity var(--dur-fast)
+}
+
+.cite-group:hover .cite-feedback,
+.cite-group:focus-within .cite-feedback {
+    max-width: 180px;
+    opacity: 1
+}
+
 /* 思考过程面板：生成中展开流式展示，正文首字后自动折叠，可点击展开/收起 */
 .think-panel {
     margin-bottom: 10px;

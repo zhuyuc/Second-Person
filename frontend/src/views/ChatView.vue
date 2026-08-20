@@ -1178,14 +1178,16 @@ onUnmounted(() => {
                     v-html="render(cachedWebSrc(m.content).list)"></div>
                 </div>
                 <div v-if="m.citations && m.citations.length" class="muted" style="margin-top:8px">
-                  <i class="ti ti-quote"></i> 引用记忆：<span v-for="(c, ci) in m.citations" :key="ci" class="cite-link"
-                    title="点击查看记忆详情" @click="openMemory(c.id)">[{{ ci + 1 }}] {{
-                      c.title || c.id }} </span>
-                  <span v-for="c in m.citations" :key="'fb' + c.id" class="cite-feedback">
-                    <button class="btn-xs" title="这条记忆与本轮无关"
-                      @click.stop="memoryFeedback(c, m, 'irrelevant')"><i class="ti ti-link-off"></i> 不相关</button>
-                    <button class="btn-xs" title="这条记忆已过时"
-                      @click.stop="memoryFeedback(c, m, 'stale')"><i class="ti ti-clock-off"></i> 过时</button>
+                  <i class="ti ti-quote"></i> 引用记忆：<span v-for="(c, ci) in m.citations" :key="c.id || ci"
+                    class="cite-group">
+                    <span class="cite-link" title="点击查看记忆详情" @click="openMemory(c.id)">[{{ ci + 1 }}] {{
+                      c.title || c.id }}</span>
+                    <span class="cite-feedback">
+                      <button class="btn-xs" title="这条记忆与本轮无关"
+                        @click.stop="memoryFeedback(c, m, 'irrelevant')"><i class="ti ti-link-off"></i> 不相关</button>
+                      <button class="btn-xs" title="这条记忆已过时"
+                        @click.stop="memoryFeedback(c, m, 'stale')"><i class="ti ti-clock-off"></i> 过时</button>
+                    </span>
                   </span>
                 </div>
                 <!-- 版本翻页器（AI 回复有多版本时显示） -->
