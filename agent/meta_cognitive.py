@@ -265,7 +265,6 @@ class ProblemModelBuilder:
                 [{"role": "system", "content": PROMPTS.load_raw("agent/prompts/problem_model")},
                  {"role": "user", "content": "\n\n".join(context)}],
                 source="problem_model", session_id=session_id, json_mode=True,
-                extra_body={"thinking_enabled": False},
             )
             data = repair_json(response.get("content", ""))
             return self._from_llm(data, message, fallback) if isinstance(data, dict) else fallback

@@ -62,6 +62,11 @@ def test_validation_error_uses_unified_error_envelope(client: TestClient):
     assert body["details"]
 
 
+def test_non_object_json_body_uses_unified_error_envelope(client: TestClient):
+    resp = client.post("/api/onboarding/test-connection", json=[])
+    _assert_error_envelope(resp, 400, "request body must be an object")
+
+
 def test_success_response_keeps_code_data_envelope(client: TestClient):
     resp = client.post("/api/chat/session/create")
     assert resp.status_code == 200
@@ -71,15 +76,26 @@ def test_success_response_keeps_code_data_envelope(client: TestClient):
     assert body["data"]["session_id"]
 
 
+@pytest.mark.parametrize("payload", [
+    {"message": 123},
+    {"message": "测试", "edit_message_id": "bad-id"},
+    {"message": "测试", "images": {"name": "x.png"}},
+])
+def test_chat_send_rejects_invalid_request_fields(client: TestClient, payload: dict):
+    resp = client.post("/api/chat/send", json=payload)
+    _assert_error_envelope(resp, 400)
+
+
 @pytest.mark.parametrize("sent, expected", [
     (None, "auto"),
     ("invalid", "auto"),
+    ({"unexpected": "object"}, "auto"),
     ("quick", "quick"),
     ("deep", "deep"),
 ])
 def test_chat_sse_normalizes_and_forwards_think_mode(
         client: TestClient, monkeypatch: pytest.MonkeyPatch,
-        sent: str | None, expected: str):
+        sent, expected: str):
     """auto 是默认路由控制，quick/deep 仅作为显式执行覆盖。"""
     captured = []
     crid = f"cr-{expected}-{sent}"

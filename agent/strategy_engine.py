@@ -236,8 +236,10 @@ class StrategyEngine:
     @staticmethod
     def should_trigger_meta(strategy: ResponseStrategy, intent_type: str,
                             enabled: bool) -> bool:
-        return (enabled and strategy.complexity_score >= 4
-                and not strategy.fallback_used
+        """用策略建议作加速提示，同时保留复杂度和意图的确定性安全门。"""
+        return (enabled and not strategy.fallback_used
+                and (strategy.should_run_meta_cognitive
+                     or strategy.complexity_score >= 4)
                 and intent_type not in META_EXCLUDED_INTENTS)
 
     # ---- 追问式补充信息：clarification_router（elicitation §05 触发与门槛） ---

@@ -1,7 +1,8 @@
 // useSSE：连接 /api/chat/send，处理 keepalive/断线重连/轮询降级/多标签接管
 // （开发文档 §断线重连与缓冲区规则 / §6.21）
 // 支持 handoff_ready 事件（会话上下文管理方案 v2）
-import { postJsonStream } from '@/api/streamClient'
+import { parseSSE, postJsonStream } from '@/api/streamClient'
+import { normalizeThinkMode } from '@/utils/chatContract'
 
 export function useSSE() {
     let controller = null
@@ -30,7 +31,7 @@ export function useSSE() {
                     location: location || undefined,
                     handoff_path: handoffPath || undefined,
                     // auto=模型自主路由；quick/deep 为用户显式覆盖。
-                    think_mode: thinkMode,
+                    think_mode: normalizeThinkMode(thinkMode),
                 }, { signal: controller.signal })
                 const reader = resp.body.getReader()
                 const decoder = new TextDecoder()
@@ -70,16 +71,6 @@ export function useSSE() {
     }
 
     return { send, abort }
-}
-
-export function parseSSE(chunk) {
-    let event = 'message', data = ''
-    for (const line of chunk.split(/\r?\n/)) {
-        if (line.startsWith('event:')) event = line.slice(6).trim()
-        else if (line.startsWith('data:')) data += line.slice(5).trim()
-    }
-    if (!data) return null
-    try { return { event, data: JSON.parse(data) } } catch { return { event, data: {} } }
 }
 
 function genId() {

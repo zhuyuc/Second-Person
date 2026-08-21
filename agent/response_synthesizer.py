@@ -29,6 +29,9 @@ class QualityReport:
     missing_requirements: list[str] = field(default_factory=list)
     missing_dimensions: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    critical_failures: list[str] = field(default_factory=list)
+    failure_codes: list[str] = field(default_factory=list)
+    dimension_scores: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -40,6 +43,9 @@ class QualityReport:
             "total": len(self.coverage),
             "missing_requirements": self.missing_requirements[:8],
             "missing_dimensions": self.missing_dimensions[:5],
+            "critical_failures": self.critical_failures[:5],
+            "failure_codes": self.failure_codes[:8],
+            "dimension_scores": self.dimension_scores,
         }
 
 
@@ -82,6 +88,11 @@ class QualityGate:
 
     def validate(self, response: str, model: ProblemModel) -> QualityReport:
         response = response or ""
+        critical_failures: list[str] = []
+        failure_codes: list[str] = []
+        if not response.strip():
+            critical_failures.append("回答为空")
+            failure_codes.append("empty_response")
         response_words = _problem_keywords(response)
         coverage: dict[str, bool] = {}
         missing: list[str] = []
@@ -105,12 +116,26 @@ class QualityGate:
             dimensions.append("缺少依赖、风险或验收说明")
         if model.assumptions and not any(marker in response for marker in ("假设", "待验证", "不确定")):
             dimensions.append("未区分待验证假设")
+        covered_count = sum(1 for value in coverage.values() if value)
+        total_count = len(coverage)
+        dimension_scores = {
+            "requirement_coverage": round(
+                covered_count / total_count, 3) if total_count else 1.0,
+            "actionability": 0.0 if "缺少可执行解法" in dimensions else 1.0,
+            "risk_awareness": 0.0 if "缺少依赖、风险或验收说明" in dimensions else 1.0,
+            "assumption_labeling": 0.0 if "未区分待验证假设" in dimensions else 1.0,
+        }
         return QualityReport(
-            passed=not missing and not dimensions,
+            passed=not critical_failures and not missing and not dimensions,
             coverage=coverage,
             missing_requirements=missing,
             missing_dimensions=dimensions,
-            notes=[] if not (missing or dimensions) else ["质量门发现可修复的交付缺口"],
+            notes=[] if not (critical_failures or missing or dimensions)
+            else ["质量门发现可修复的交付缺口"],
+            critical_failures=critical_failures,
+            failure_codes=failure_codes + (["requirement_coverage"] if missing else [])
+            + (["delivery_dimensions"] if dimensions else []),
+            dimension_scores=dimension_scores,
         )
 
 
@@ -129,7 +154,6 @@ async def generate_complete_section(llm, snap, system: str, user: str,
             ])
         response = await llm.chat(
             snap, messages, source="delivery_section", session_id=session_id,
-            extra_body={"thinking_enabled": False},
         )
         chunk = str(response.get("content") or "")
         if not chunk or chunk in parts:

@@ -3,6 +3,7 @@ Second Person 启动入口（产品文档 §运行方式 / 开发文档 §6.15 �
 
 python start.py                 一键启动，浏览器自动打开
 python start.py --port 8001     指定端口
+python start.py --data-dir D:/second-person-data  指定运行数据目录
 python start.py --rebuild-index 从 md 重建 SQLite 索引后退出
 python start.py --recompile     从 raw_docs+conversations 重建记忆 md 后退出
 
@@ -430,12 +431,15 @@ def _cmd_install_service(port: int) -> None:
 
 
 def main():
+    global DATA_DIR
     parser = argparse.ArgumentParser(description="Second Person")
     parser.add_argument("command", nargs="?", default="start",
                         choices=["start", "stop", "status", "restart",
                                  "install-service"],
                         help="服务命令（默认 start）")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--data-dir", type=Path,
+                        help="运行数据目录，默认项目下 data/")
     parser.add_argument("--rebuild-index", action="store_true")
     parser.add_argument("--recompile", action="store_true")
     parser.add_argument("--rededup", action="store_true",
@@ -446,6 +450,9 @@ def main():
     parser.add_argument("--no-services", action="store_true",
                         help="不拉起 config.yaml 声明的外部服务（PostgreSQL/Langfuse 等）")
     args = parser.parse_args()
+
+    if args.data_dir is not None:
+        DATA_DIR = args.data_dir.resolve()
 
     _bootstrap_data()
 

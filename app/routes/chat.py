@@ -14,11 +14,13 @@ import json
 import logging
 import time
 
-from fastapi import APIRouter, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from app.contracts import ContractValidationError, parse_chat_send, read_json_object
 from infrastructure.prompt_loader import PROMPTS
+from infrastructure.sse_contract import SSEContractError, validate_sse_event
 
 router = APIRouter()
 
@@ -129,22 +131,19 @@ async def _follow(buf: dict):
 
 @router.post("/chat/send")
 async def chat_send(request: Request):
-    body = await request.json()
-    sid = body.get("session_id")
-    message = body.get("message", "")
-    crid = body.get("client_request_id")
-    images = body.get("images") or None
-    regen_id = body.get("regenerate_message_id")
-    edit_message_id = body.get("edit_message_id")
-    # 浏览器定位（可选）：前端 Geolocation + 逆地理编码后随消息携带
-    location = (body.get("location") or "").strip()[:60] or None
-    # handoff 摘要附件路径（会话上下文管理方案 v2）
-    handoff_path = (body.get("handoff_path") or "").strip() or None
-    # 思考模式用户指定：auto=模型决策 / quick=快速回复 / deep=深度思考；
-    # 缺失或非法 → auto（保留模型判断，IM 等无 UI 渠道兜底）
-    think_mode = body.get("think_mode")
-    if think_mode not in ("auto", "quick", "deep"):
-        think_mode = "auto"
+    try:
+        payload = parse_chat_send(await read_json_object(request))
+    except (ContractValidationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sid = payload.session_id
+    message = payload.message
+    crid = payload.client_request_id
+    images = payload.images
+    regen_id = payload.regenerate_message_id
+    edit_message_id = payload.edit_message_id
+    location = payload.location
+    handoff_path = payload.handoff_path
+    think_mode = payload.think_mode
     c = _c()
 
     _gc_buffers()
@@ -168,7 +167,7 @@ async def chat_send(request: Request):
     if edit_message_id:
         orig = c.db.query_one(
             "SELECT id, parent_id, version_group_id, images, content FROM conversations WHERE id=?",
-            (int(edit_message_id),))
+            (edit_message_id,))
         if orig:
             edit_parent_id = orig["parent_id"]
             edit_version_group_id = orig["version_group_id"] or orig["id"]
@@ -213,7 +212,7 @@ async def chat_send(request: Request):
     if regen_id and not edit_message_id:
         orig = c.db.query_one(
             "SELECT id, parent_id, version_group_id FROM conversations WHERE id=?",
-            (int(regen_id),))
+            (regen_id,))
         if orig:
             regen_parent_id = orig["parent_id"]
             regen_version_group_id = orig["version_group_id"] or orig["id"]
@@ -256,6 +255,14 @@ async def chat_send(request: Request):
                                         think_mode=think_mode,
                                         edit_parent_id=_ep,
                                         edit_version_group_id=_evg):
+                try:
+                    validate_sse_event(evt.get("event", ""), evt.get("data"))
+                except SSEContractError as exc:
+                    logging.getLogger("second_person.chat").error(
+                        "SSE event contract violation: %s", exc)
+                    buf["events"].append({"event": "error", "data": {
+                        "code": 500, "message": "服务端事件协议错误"}})
+                    break
                 if (evt.get("event") == "mode_decision"
                         and evt.get("data", {}).get("effective_mode") == "deep"):
                     buf["deep_delivery"] = True

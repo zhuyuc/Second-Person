@@ -57,3 +57,15 @@ export async function postFormStream(path, form, { signal } = {}) {
     }
     return resp
 }
+
+// SSE 文本解析属于传输层，页面与组合式逻辑不得各自实现不同版本。
+export function parseSSE(chunk) {
+    let event = 'message'
+    let data = ''
+    for (const line of chunk.split(/\r?\n/)) {
+        if (line.startsWith('event:')) event = line.slice(6).trim()
+        else if (line.startsWith('data:')) data += line.slice(5).trim()
+    }
+    if (!data) return null
+    try { return { event, data: JSON.parse(data) } } catch { return { event, data: {} } }
+}

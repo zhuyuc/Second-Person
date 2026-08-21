@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, UploadFile, File
+from app.contracts import read_json_object
 from infrastructure.timeutil import now_cst
 
 router = APIRouter()
@@ -22,7 +23,7 @@ async def onboarding_status():
 
 @router.post("/onboarding/test-connection")
 async def test_connection(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     cfg = body.get("provider_config", {})
     from tools.web_fetch import validate_base_url
@@ -43,7 +44,7 @@ async def test_connection(request: Request):
 
 @router.post("/onboarding/test-embedding")
 async def test_embedding(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     cfg = body.get("provider_config", {})
     from tools.web_fetch import validate_base_url
@@ -84,7 +85,7 @@ async def welcome_finish(request: Request):
 
 @router.post("/onboarding/soul/confirm")
 async def soul_confirm(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     if body.get("soul_core"):
         c.soul.write_core(body["soul_core"])
@@ -179,7 +180,7 @@ async def list_documents():
 @router.post("/import/documents/{doc_id}/confirm")
 async def confirm_import(doc_id: str, request: Request):
     """预览导入确认：silent_doc_import=false 时用户勾选后写入。"""
-    body = await request.json()
+    body = await read_json_object(request)
     try:
         result = await _c().ingest.confirm_import(doc_id, body.get("selected", []))
     except KeyError:
@@ -239,7 +240,7 @@ async def list_local_dirs():
 
 @router.post("/import/local-dirs")
 async def add_local_dir(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     try:
         item = c.folder_scanner.add_dir(
@@ -253,7 +254,7 @@ async def add_local_dir(request: Request):
 
 @router.put("/import/local-dirs/{dir_id}")
 async def update_local_dir(dir_id: int, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     if "enabled" in body:
         c.folder_scanner.set_enabled(dir_id, bool(body["enabled"]))
@@ -317,7 +318,7 @@ async def download_generated_file(stored_name: str):
 @router.post("/im/webhook/{platform}")
 async def im_webhook(platform: str, request: Request):
     c = _c()
-    payload = await request.json()
+    payload = await read_json_object(request)
     # 飞书 URL 验证挑战
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge")}

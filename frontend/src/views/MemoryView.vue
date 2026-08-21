@@ -6,7 +6,7 @@ import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useSessions } from '@/stores/sessions'
 import { useBusy } from '@/composables/useBusy'
-import { parseSSE } from '@/composables/useSSE'
+import { uploadDocumentStream } from '@/api/imports'
 import KnowledgeGraph from '@/components/graph/KnowledgeGraph.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import { domainLabel, loadDomainLabels } from '@/utils/domainLabel'
@@ -353,26 +353,6 @@ function docQueueIcon(s) {
   if (s === 'failed') return 'ti-circle-x'
   return 'ti-clock'
 }
-// 单文件流式导入：读 SSE 进度事件，逐阶段回调 onEvent(event, data)
-async function uploadDocStream(file, onEvent) {
-  const fd = new FormData(); fd.append('file', file)
-  const resp = await fetch('/api/import/document/stream', { method: 'POST', body: fd })
-  if (!resp.ok || !resp.body) throw new Error('上传失败')
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split(/\r?\n\r?\n/)
-    buffer = parts.pop()
-    for (const part of parts) {
-      const evt = parseSSE(part)
-      if (evt) onEvent(evt.event, evt.data)
-    }
-  }
-}
 async function uploadDocs(fileList) {
   const files = Array.from(fileList || [])
   if (!files.length || docUploading.value) return
@@ -390,7 +370,7 @@ async function uploadDocs(fileList) {
       }
       let result = null, errored = false
       try {
-        await uploadDocStream(f, (event, data) => {
+        await uploadDocumentStream(f, (event, data) => {
           if (event === 'progress') {
             docProgress.value = {
               ...docProgress.value, stage: data.stage,

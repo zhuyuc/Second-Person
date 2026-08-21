@@ -2,6 +2,7 @@
 from __future__ import annotations
 from infrastructure.timeutil import now_cst, now_iso
 from fastapi import APIRouter, Request, UploadFile, File
+from app.contracts import read_json_object
 
 import asyncio
 import logging
@@ -30,7 +31,7 @@ async def list_providers():
 
 @router.post("/settings/providers")
 async def add_provider(request: Request):
-    body = _clean_provider_fields(await request.json())
+    body = _clean_provider_fields(await read_json_object(request))
     c = _c()
     # 保存只做入库，不做连通性测试：测试由“测试连接”按钮独立触发，
     # 两个按钮职责分离，保存即点即成；仅做必填非空校验（零网络请求）
@@ -64,7 +65,7 @@ async def add_provider(request: Request):
 
 @router.put("/settings/providers/{pid}")
 async def edit_provider(pid: str, request: Request):
-    body = _clean_provider_fields(await request.json())
+    body = _clean_provider_fields(await read_json_object(request))
     _c().providers.update_provider(pid, body, body.get("api_key"))
     return {"code": 200, "data": {}}
 
@@ -99,7 +100,7 @@ async def get_provider_key(pid: str):
 @router.post("/settings/providers/test-connection")
 async def test_connection_config(request: Request):
     """仅测试连接性（根据表单配置，不入库）。"""
-    body = await request.json()
+    body = await read_json_object(request)
     # 空参数前置拦截，提示友好错误而非底层 httpx 异常
     if not (body.get("base_url") or "").strip():
         return {"code": 200, "data": {"ok": False, "error": "请先填写 Base URL"}}
@@ -196,7 +197,7 @@ async def get_assignment():
 @router.put("/settings/model-assignment")
 async def set_assignment(request: Request):
     from infrastructure.provider_registry import TASK_SLOTS
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     for slot in TASK_SLOTS.values():
         key = f"{slot.key}_model"
@@ -218,7 +219,7 @@ async def embedding_estimate(request: Request):
 
 @router.post("/settings/embedding/migrate")
 async def embedding_migrate(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     if not body.get("confirm"):
         return {"code": 400, "message": "需二次确认", "trace_id": None, "details": None}
     c = _c()
@@ -250,7 +251,7 @@ async def get_params():
 
 @router.put("/settings/params")
 async def put_params(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     c.config.update_params(body)
     c.oplog.log("param_update", ",".join(body.keys()))
@@ -270,7 +271,7 @@ async def list_connectors():
 
 @router.post("/settings/connectors")
 async def add_connector(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     cid = await c.connectors.add(body["name"], body["transport"], body["config"],
                                  body.get("timeout", 120), body.get("tools_filter"))
@@ -280,7 +281,7 @@ async def add_connector(request: Request):
 
 @router.put("/settings/connectors/{cid}")
 async def edit_connector(cid: str, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     await c.connectors.update(cid, body["name"], body["transport"], body["config"],
                               body.get("timeout", 120), body.get("tools_filter"))
@@ -298,7 +299,7 @@ async def delete_connector(cid: str):
 
 @router.post("/settings/connectors/{cid}/toggle")
 async def toggle_connector(cid: str, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     await _c().connectors.toggle(cid, bool(body.get("enabled")))
     return {"code": 200, "data": {}}
 
@@ -312,7 +313,7 @@ async def refresh_tools(cid: str):
 @router.post("/settings/connectors/test")
 async def test_connector(request: Request):
     """仅测试连接器连通性，不入库。"""
-    body = await request.json()
+    body = await read_json_object(request)
     cfg = {
         "name": body.get("name", "test"),
         "transport": body["transport"],
@@ -474,7 +475,7 @@ async def list_backups():
 
 @router.post("/settings/backups/create")
 async def create_backup(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     data = await c.backup.create(body.get("label"))
     c.oplog.log("backup_create", data.get("filename", ""))
@@ -483,7 +484,7 @@ async def create_backup(request: Request):
 
 @router.post("/settings/backups/restore")
 async def restore_backup(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     from memory.recovery import rebuild_index
     await c.backup.restore(body["backup_id"], lambda: rebuild_index(c.db, c.data_dir))
@@ -640,7 +641,7 @@ async def list_platforms():
 
 @router.post("/settings/platforms")
 async def add_platform(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     ptype = (body.get("platform_type") or "").strip()
     if not ptype or ptype == "web":
@@ -707,7 +708,7 @@ async def platform_detail(pid: str):
 
 @router.put("/settings/platforms/{pid}")
 async def edit_platform(pid: str, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     row = c.db.query_one("SELECT * FROM platforms WHERE id=?", (pid,))
     if not row:
@@ -921,7 +922,7 @@ async def disable_platform(pid: str):
 @router.post("/settings/platforms/test")
 async def test_platform(request: Request):
     """仅测试 IM 平台连通性，不入库不启用。"""
-    body = await request.json()
+    body = await read_json_object(request)
     ptype = body.get("platform_type", "")
     cfg = {"bot_token": body.get("bot_token"), "app_secret": body.get("app_secret"),
            "whitelist_user_id": body.get("whitelist_user_id", ""),

@@ -49,6 +49,7 @@ python start.py
 ```bash
 python start.py                 # 启动（默认 8000，被占用依次尝试 8001-8010）
 python start.py --port 8001     # 指定端口
+python start.py --data-dir D:/second-person-data  # 指定运行数据目录
 python start.py --rebuild-index # 从 md 文件重建 SQLite 索引
 python start.py --recompile     # 从 raw_docs + 对话原文重建记忆 md（停机）
 ```
@@ -74,7 +75,7 @@ memory/         记忆宫殿（palace / retriever / distiller / linker / lint / 
 tools/          工具系统（base / builtin / sandbox / hooks / web_fetch）
 connectors/     MCP 连接器（mcp_client / credential_store / manager）
 soul/           人格系统（soul_manager / skill_manager / constants）
-profile/        用户画像
+user_profile/   用户画像
 scheduler/      调度 / 备份 / 文档导入
 gateway/        多端接入（platforms / notifications）
 infrastructure/ event_bus / llm_provider / config_manager / observability / db / context_entry
@@ -83,6 +84,10 @@ migrations/     SQLite 迁移脚本
 frontend/       Vue 3 + Vite 前端源码（构建产物输出到 app/static/）
 data/           所有用户数据（md 主副本 + palace.db + config.yaml）
 ```
+
+工程边界和文件放置规则见 `docs/ARCHITECTURE_RULES.md`；公开接口和 SSE
+事件见 `docs/API_CONTRACT.md`；Prompt 与 UI 分别遵循
+`docs/PROMPT_REGISTRY.md` 和 `docs/UI_UX_SPEC.md`。
 
 ## 数据与备份
 

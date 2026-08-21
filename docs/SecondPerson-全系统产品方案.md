@@ -1,7 +1,7 @@
 # Second Person 全系统产品方案
 
-> 本方案由当前系统代码（v1.0.0）逆向提炼生成，与实际实现逐一对齐。
-> 生成日期：2026-07-28
+> 本方案描述产品目标和用户行为。公开接口、SSE 字段和工程边界以
+> `docs/API_CONTRACT.md`、`docs/ARCHITECTURE_RULES.md` 及其自动化测试为准。
 
 ---
 
@@ -82,14 +82,13 @@
 | 3 记忆检索 | 三级联动混合检索（详见 3.3.4），命中即发 `memory_retrieved` 事件；stale 命中自动恢复 | 检索 query 剥离附件正文（保护本地 embedding） |
 | 4 意图识别 | LLM 结构化输出拆解多意图（11 种枚举），JSON 修复链 + 重试 3 次 | 失败降级单 chat 意图 |
 | 5 流程编排 | DAG 拓扑分层（Kahn），同层并行；环检测降级单意图直出；技能按需注入 | 依赖容错：非法依赖丢弃、未注册工具剔除 |
-| 6 工具执行 | 按层 asyncio 并行；LLM function_call 推断参数；破坏性操作弹确认（300s 超时）；失败 Replan 补救（每请求 1 次） | 空结果重试 1 次；凭证脱敏 |
+| 6 工具执行 | 按层 asyncio 并行；LLM function_call 推断参数；直接执行；失败 Replan 补救（每请求 1 次） | 参数校验、超时、空结果重试、凭证脱敏与外部内容防护 |
 | 7 响应合成 | `auto` 路由到 quick/deep；deep 先建立任务合同与问题模型，逐项覆盖质量门通过后交付；长文按可恢复章节生成 | 单次模型物理上限只影响单节，不截短整篇交付 |
 | 8 后置处理 | 回复落库（安全分析元数据、策略、骨架）；信号采集阶段一；主动记忆检测；频次更新；引用溯源；预算告警 | fire-and-forget，不阻塞回复 |
 
 **意图类型枚举（11 种）**：`query_memory` / `query_knowledge` / `query_external` / `compute` / `file_op` / `remember_intent`（明确记忆指令，直接写入）/ `remember_confirm`（重要性表态，需确认）/ `soul_feedback` / `output_preference_feedback` / `meta` / `chat`。
 
-**SSE 事件类型全集**：
-`queued`（排队）、`error`、`memory_retrieved`、`thinking_delta`（安全分析摘要）、`mode_decision`（自动路由结果）、`analysis_progress`、`delivery_progress`、`quality_status`、`degrade`（降级提示）、`tool_executing`、`tool_confirm`（破坏性待确认）、`tool_confirm_timeout`、`content_delta`、`citations`、`turn_completed`。不传输或保存模型原生链式思维。
+**SSE 事件类型**：事件名、字段和终态语义由 `docs/API_CONTRACT.md` 统一定义并由运行时契约校验。对话界面显示处理进度和可验证结论；Langfuse 向开发者提供结构化的路由、上下文、工具和质量调试记录。
 
 **并发与可靠性**：
 
@@ -286,7 +285,7 @@ Agent 视角只有一种工具；底层分内置（进程内直调）与 MCP（�
 #### 3.5.3 安全边界
 
 - **沙箱**：文件访问限定 `data/workspace/` + 可配置白名单，realpath 规范化防穿越与符号链接逃逸；命令高危黑名单（rm -rf / mkfs / dd / format / Remove-Item…）；执行环境剥离含 KEY/TOKEN/SECRET 的环境变量；违规原因返回 LLM 不终止本轮；
-- **pre_tool hook**：破坏性确认摘要（工具/意图/关键参数/影响范围/是否可逆/超时）+ 必填参数校验；
+- **pre_tool hook**：工具/意图/关键参数审计 + 必填参数校验；
 - **post_tool hook**：空结果自动重试 1 次 + 凭证泄漏扫描脱敏（sk- / ghp_ / Bearer / AKIA 等模式 → [REDACTED]）。
 
 #### 3.5.4 MCP 连接器
@@ -420,7 +419,7 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 - 全部枚举值/状态文案中文化展示（提交仍用英文值）；日期统一格式化；
 - AI 回复链接新标签页打开；流式输出中代码块与思考面板自动吸底跟随；scroll-latest 按钮 sticky 定位；
 - scrollbar-gutter: stable 防布局跳变；弹窗 z-index 分层规范；
-- 破坏性操作一律走系统确认弹窗并等待真正落库（wait=True）后反馈。
+- 设置和记忆页面由用户主动发起的变更操作走系统确认弹窗并等待真正落库（`wait=True`）后反馈；Agent 工具调用直接执行，并保留执行审计和结果反馈。
 
 ---
 
@@ -428,7 +427,7 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 
 | 域 | 端点（方法 路径） |
 | --- | --- |
-| 对话 | POST /chat/send（SSE）、POST /chat/tool-confirm、GET /chat/session/{sid}/active-request、GET /chat/sessions、GET /chat/messages、POST /chat/feedback、POST /chat/session/rename·create·pin、POST /chat/attachment、DELETE /chat/session/{sid}、GET /chat/session/{sid}/usage |
+| 对话 | POST /chat/send（SSE）、POST /chat/cancel、GET /chat/session/{sid}/active-request、GET /chat/sessions、GET /chat/messages、POST /chat/feedback、POST /chat/session/rename·create·pin、POST /chat/attachment、DELETE /chat/session/{sid}、GET /chat/session/{sid}/usage |
 | 记忆 | POST /memory/list、GET /memory/domains·domain-labels·detail、PUT /memory/{id}/attributes、POST /memory/archive·restore·delete、GET /memory/graph·graph/entity/{id}/memories·neighbors·graph/search、GET /memory/timeline、GET /memory/health、POST /memory/lint/run·suggestions/accept·dismiss、POST /memory/orphans/relink、GET /memory/conflicts、POST /memory/conflicts/resolve |
 | 引导 | GET /onboarding/status、POST /onboarding/test-connection·test-embedding·welcome-chat/start·finish·soul/confirm |
 | 知识库 | POST /import/document·url、GET /import/documents·/{id}、POST /import/documents/{id}/confirm、DELETE /import/documents/{id}、GET /files/{name} |

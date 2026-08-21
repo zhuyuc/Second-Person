@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from langfuse.integration.config import LangfuseConfig
 from langfuse.integration.tracer import PipelineTracer
+from infrastructure.developer_trace import build_developer_trace, initial_developer_trace
 
 
 class _FakeClient:
@@ -113,3 +114,26 @@ def test_disabled_tracer_is_noop_and_never_enqueues():
     trace.end(output={"ignored": True})
 
     assert fake.events == []
+
+
+def test_developer_trace_is_structured_and_excludes_raw_reasoning():
+    initial = initial_developer_trace(
+        requested_mode="deep", client_request_id="cr-1")
+    assert initial["status"] == "running"
+
+    trace = build_developer_trace(
+        requested_mode="deep", effective_mode="deep", route_reason="需要多步骤分析",
+        history_messages=6, raw_rounds=3, compressed=False,
+        memories=[{"id": "m1", "title": "偏好", "source_type": "memory",
+                   "confidence": "high", "detail": "不应进入调试摘要的全文"}],
+        retrieval_diagnostics={"gate": "passed", "vector_hits": 3},
+        intents=[type("Intent", (), {"intent_type": "query_knowledge"})()],
+        tool_results=[{"tool": "web_search", "ok": True, "result": "完整工具原文"}],
+        problem_model=None, quality_report=None, delivery_job_id=None,
+        latency_ms=123, llm_call_count=2, model_id="model-a")
+
+    assert trace["schema_version"] == "developer-trace-v1"
+    assert trace["route"]["effective_mode"] == "deep"
+    assert trace["context"]["selected_memories"][0]["title"] == "偏好"
+    assert "detail" not in trace["context"]["selected_memories"][0]
+    assert "result" not in trace["execution"]["tools"][0]

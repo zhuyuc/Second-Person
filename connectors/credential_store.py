@@ -41,7 +41,14 @@ def _ensure_master_key(data_dir: Path) -> bytes:
 def _lock_permissions(path: Path) -> None:
     try:
         if sys.platform.startswith("win"):
-            user = os.environ.get("USERNAME", "")
+            # ``USERNAME`` 可能来自启动器环境，而服务进程运行在另一 Windows
+            # 身份下。优先取 whoami，避免把刚写入的主密钥锁到不可读取的主体。
+            completed = subprocess.run(["whoami"], capture_output=True,
+                                       text=True, check=False)
+            user = completed.stdout.strip() or os.environ.get("USERNAME", "")
+            if not user:
+                logger.warning("无法识别当前 Windows 身份，跳过 .master_key 权限收紧")
+                return
             subprocess.run(["icacls", str(path), "/inheritance:r",
                             "/grant:r", f"{user}:F"],
                            capture_output=True, check=False)

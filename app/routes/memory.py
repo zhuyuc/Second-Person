@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Request
+from app.contracts import read_json_object
 
 from infrastructure.timeutil import now_cst, now_iso
 from memory.md_file import parse_memory_md
@@ -22,7 +23,7 @@ def _c():
 
 @router.post("/memory/list")
 async def memory_list(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     keyword = body.get("keyword")
     domain = body.get("domain")
@@ -177,7 +178,7 @@ async def revisions(mid: str):
 
 @router.post("/memory/{mid}/rollback")
 async def rollback(mid: str, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     rev = c.db.query_one(
         "SELECT after_json FROM memory_revisions WHERE memory_id=? AND revision_id=?",
@@ -202,7 +203,7 @@ async def rollback(mid: str, request: Request):
 @router.post("/memory/feedback")
 async def memory_feedback(request: Request):
     """记忆级反馈直接进入检索与治理闭环，不依赖回答整体评分。"""
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     mid = body.get("memory_id")
     kind = body.get("feedback_type")
@@ -239,7 +240,7 @@ async def governance(status: str = "open", limit: int = 100):
 
 @router.post("/memory/governance/{item_id}/resolve")
 async def resolve_governance(item_id: str, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     action = body.get("action", "dismiss")
     if action not in {"dismiss", "reviewed"}:
         return {"code": 400, "message": "无效的治理动作", "trace_id": None, "details": None}
@@ -251,7 +252,7 @@ async def resolve_governance(item_id: str, request: Request):
 
 @router.put("/memory/{mid}/attributes")
 async def attributes(mid: str, request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     row = c.palace.get(mid)
     if not row:
@@ -286,21 +287,21 @@ async def attributes(mid: str, request: Request):
 
 @router.post("/memory/archive")
 async def archive(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     await _c().fw.submit("memory", {"op": "archive", "memory_id": body["id"]}, wait=True)
     return {"code": 200, "data": {}}
 
 
 @router.post("/memory/restore")
 async def restore(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     await _c().fw.submit("memory", {"op": "restore", "memory_id": body["id"]}, wait=True)
     return {"code": 200, "data": {}}
 
 
 @router.post("/memory/delete")
 async def delete(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     await c.fw.submit("memory", {"op": "delete", "memory_id": body["id"]}, wait=True)
     c.oplog.log("memory_delete", body["id"])
@@ -465,7 +466,7 @@ async def lint_run():
 
 @router.post("/memory/lint/suggestions/accept")
 async def accept_suggestion(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     sid = body["suggestion_id"]
     row = c.db.query_one(
@@ -493,7 +494,7 @@ async def accept_suggestion(request: Request):
 
 @router.post("/memory/lint/suggestions/dismiss")
 async def dismiss_suggestion(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     c.db.execute("UPDATE lint_suggestions SET status='dismissed', dismiss_reason=?, "
                  "resolved_at=? WHERE suggestion_id=?",
@@ -506,7 +507,7 @@ async def resolve_duplicate(request: Request):
     """重复检测四选一裁决（交互与矛盾处理对齐）：keep_a/keep_b 删另一条并给
     幸存者记 merged 时间线；keep_both 视为非重复关闭建议；delete_both 两条都删。
     删除复用单条记忆物理删除链（图谱边/md/向量/矛盾自愈同事务清理）。"""
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     sid, res = body["suggestion_id"], body.get("resolution")
     if res not in ("keep_a", "keep_b", "keep_both", "delete_both"):
@@ -549,7 +550,7 @@ async def conflicts():
 
 @router.post("/memory/conflicts/resolve")
 async def resolve_conflict(request: Request):
-    body = await request.json()
+    body = await read_json_object(request)
     c = _c()
     await c.conflict.resolve(body["conflict_id"], body["resolution"])
     c.oplog.log("conflict_resolve",

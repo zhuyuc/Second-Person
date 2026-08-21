@@ -19,6 +19,7 @@ import { withQuery } from '@/utils/query'
 import { sanitizeHtml } from '@/utils/sanitize'
 import { enhanceResponseHtml } from '@/utils/responsePresentation'
 import { bindInlineMermaidInteractions, cleanupInlineMermaidInteractions, resetInlineMermaid, zoomInlineMermaid } from '@/utils/inlineMermaidInteractions'
+import { normalizeThinkMode } from '@/utils/chatContract'
 
 // Mermaid 主题：CSS 变量驱动（与 MermaidChart 同源），自动跟随系统深浅色；手动触发 run
 applyMermaidTheme()
@@ -67,7 +68,7 @@ const input = ref('')
 const generating = ref(false)
 const streamText = ref('')
 const thinkText = ref('')     // 安全分析摘要与进度，不展示模型原生推理
-const thinkOpen = ref(true)   // 思考面板展开状态：思考中展开，正文首字出现后自动折叠
+const thinkOpen = ref(true)   // 处理进度面板：生成中展开，正文首字出现后自动折叠
 const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认收起
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
 const streamVisuals = ref([])  // 本轮 tool 产出图形 [{type, data}]
@@ -129,14 +130,18 @@ async function switchModel(pid) {
 // ---- 自动模式默认；quick/deep 是用户对模型路由的显式覆盖。 ----
 const thinkMode = ref('auto')
 const thinkMenuOpen = ref(false)
-const THINK_MODES = [
+const THINK_MODE_OPTIONS = [
   { value: 'auto', label: '自动模式' },
   { value: 'quick', label: '快速回答' },
   { value: 'deep', label: '深度思考' },
 ]
 const thinkModeLabel = computed(() =>
-  (THINK_MODES.find(m => m.value === thinkMode.value) || THINK_MODES[0]).label)
-function pickThinkMode(v) { thinkMode.value = v; thinkMenuOpen.value = false }
+  (THINK_MODE_OPTIONS.find(m => m.value === thinkMode.value)
+    || THINK_MODE_OPTIONS[0]).label)
+function pickThinkMode(v) {
+  thinkMode.value = normalizeThinkMode(v)
+  thinkMenuOpen.value = false
+}
 // 点击面板外部关闭思考模式菜单（菜单与胶囊按钮自身的事件已 stop）
 function onDocClickThink(e) {
   if (!thinkMenuOpen.value) return
@@ -483,13 +488,34 @@ async function send() {
   if (hPath) { handoffStatus.value = null; handoffData.value = null }
 }
 
+// ---- 流式正文渲染节流（P0-3）----
+// 原实现每个 content_delta 都同步改写 streamText，触发 v-html 全量重渲染
+// （stripTail → marked.parse → groupSections → sanitize），回复越长单次渲染成本
+// 越高（整体 O(N²)），长回复中途明显卡顿。改为 chunk 先入缓冲、requestAnimationFrame
+// 合并刷新：每帧至多一次重渲染（浏览器绘制帧率上限即 60fps，更频繁写入纯属浪费）。
+let streamChunkBuf = ''
+let streamRaf = 0
+function flushStreamText() {
+  if (streamRaf) { cancelAnimationFrame(streamRaf); streamRaf = 0 }
+  if (!streamChunkBuf) return
+  streamText.value += streamChunkBuf
+  streamChunkBuf = ''
+  maybeScroll()
+  scrollStreamCode()
+}
+function pushStreamText(text) {
+  if (!text) return
+  // 正文首字出现 → 自动折叠处理进度，开始流式输出回复正文
+  if (!streamText.value && !streamChunkBuf) thinkOpen.value = false
+  streamChunkBuf += text
+  if (!streamRaf) streamRaf = requestAnimationFrame(flushStreamText)
+}
+
 function handleEvent(ev, data) {
   // memory_retrieved 保留事件兼容，检索结果已由后端并入 thinking_delta 展示
   if (ev === 'thinking_delta') { thinkText.value += data.text; maybeScroll(); scrollThink() }
   else if (ev === 'content_delta') {
-    // 正文首字出现 → 自动折叠思考过程，开始流式输出回复正文
-    if (!streamText.value && data.text) thinkOpen.value = false
-    streamText.value += data.text; maybeScroll(); scrollStreamCode()
+    pushStreamText(data.text)
   }
   else if (ev === 'mode_decision') {
     const path = data.effective_mode === 'deep' ? '深度分析' : '快速回答'
@@ -566,16 +592,18 @@ function handleThreshold(threshold) {
 let lastCitations = []
 let streamAnalysisMetadata = null
 function finishStream(msgId) {
+  // 先合并节流缓冲中尚未渲染的正文，避免中断/结束时丢失尾段
+  flushStreamText()
   // 跨会话保护：用户已切到其他会话时不把回复插进当前列表
   //（回复已按 session 落库，切回原会话时 openSession 会重新加载）
   const sameSession = streamSid.value === sessStore.currentSid
   // 中断终止（停止/出错/断连，无 msgId）时已输出的内容必须保留：
-  // 哪怕只输出了思考过程也要留下，否则流式区一清空内容就全部丢失
+  // 哪怕只输出了处理进度也要留下，否则流式区一清空内容就全部丢失
   if ((streamText.value || thinkText.value) && sameSession) {
     const body = stripTail(streamText.value, streamVisuals.value)
     const m = {
       id: msgId, role: 'assistant',
-      content: body || (msgId ? '' : '> ⚠️ 本回复未完成：生成已中断，仅输出了思考过程'),
+      content: body || (msgId ? '' : '> ⚠️ 本回复未完成：生成已中断，仅输出了处理进度'),
       citations: lastCitations, feedback: 0,
       create_time: nowLocalIso(),
       thinking: thinkText.value || '', thinkOpen: false,
@@ -926,7 +954,7 @@ function scrollStreamCode() {
     })
   })
 }
-// 流式思考过程（think-body 限高 260px 内部滚动）同样吸底跟随最新内容。
+// 流式处理进度（think-body 限高 260px 内部滚动）同样吸底跟随最新内容。
 // 插值渲染 DOM 不重建，scrollTop 会停在原地；仅当用户未主动上翻（距底部很近）
 // 时吸底，上翻阅读时不强行拉回（与外层消息区的智能跟随同一交互语义）
 const liveThink = ref(null)
@@ -1159,10 +1187,10 @@ onUnmounted(() => {
             <div v-else class="msg-ai">
               <div class="avatar"><i class="ti ti-brain"></i></div>
               <div class="body">
-                <!-- 思考过程（默认折叠，点击展开） -->
+                <!-- 安全处理进度（默认折叠，点击展开） -->
                 <div v-if="m.thinking" class="think-panel">
                   <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
-                    <i class="ti ti-bulb"></i><span>思考过程</span>
+                    <i class="ti ti-bulb"></i><span>处理进度</span>
                     <i class="ti" :class="m.thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                   </div>
                   <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
@@ -1213,23 +1241,23 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 生成中：思考过程流式展示（展开）→ 正文首字后自动折叠并流式输出正文 -->
+          <!-- 生成中：安全处理进度（展开）→ 正文首字后自动折叠并流式输出正文 -->
           <!-- 生成中：仅在发起请求的会话内展示（切会话后不泄漏到其他会话） -->
           <div v-if="(generating || streamText) && streamSid === sessStore.currentSid" class="msg-ai">
             <div class="avatar"><i class="ti ti-brain"></i></div>
             <div class="body">
               <div v-if="thinkText" class="think-panel">
                 <div class="think-head" @click="thinkOpen = !thinkOpen">
-                  <i class="ti ti-bulb"></i><span>思考过程</span>
+                  <i class="ti ti-bulb"></i><span>处理进度</span>
                   <span v-if="!streamText" class="think-live"><span
                       class="think-dots"><span></span><span></span><span></span></span></span>
                   <i class="ti" :class="thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </div>
                 <div v-show="thinkOpen" ref="liveThink" class="think-body">{{ thinkText }}</div>
               </div>
-              <!-- 尚无任何输出：思考中占位 -->
+              <!-- 尚无任何输出：处理中占位 -->
               <div v-if="!streamText && !thinkText" class="content" style="display:flex;align-items:center;gap:8px">
-                <span class="muted">思考中</span>
+                <span class="muted">处理中</span>
                 <span class="think-dots"><span></span><span></span><span></span></span>
               </div>
               <!-- 图形组件 -->
@@ -1325,7 +1353,7 @@ onUnmounted(() => {
                   <i class="ti think-mode-arrow" :class="thinkMenuOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </button>
                 <div v-if="thinkMenuOpen" class="think-mode-menu" role="menu" @click.stop>
-                  <button v-for="opt in THINK_MODES" :key="opt.value" type="button" class="think-mode-opt"
+                  <button v-for="opt in THINK_MODE_OPTIONS" :key="opt.value" type="button" class="think-mode-opt"
                     :class="{ active: thinkMode === opt.value }" role="menuitemradio" :aria-checked="thinkMode === opt.value" @click="pickThinkMode(opt.value)">
                     <span>{{ opt.label }}</span>
                     <i v-if="thinkMode === opt.value" class="ti ti-check"></i>

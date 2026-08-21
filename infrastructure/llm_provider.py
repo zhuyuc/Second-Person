@@ -93,6 +93,14 @@ def _normalize_extra_body(snap, extra_body: dict | None) -> dict:
     return eb
 
 
+def _observability_parameters(kw: dict, extra_body: dict | None = None) -> dict | None:
+    """生成 Langfuse 可记录的调用参数，不把任意透传体当作业务字段。"""
+    params = {k: kw[k] for k in ("temperature", "max_tokens") if k in kw}
+    if extra_body and "thinking_enabled" in extra_body:
+        params["thinking_enabled"] = bool(extra_body["thinking_enabled"])
+    return params or None
+
+
 @dataclass
 class CircuitBreaker:
     model: str
@@ -210,9 +218,10 @@ class LLMClient:
         gen = get_tracer().generation_start(
             name=f"llm.{source}", model=snap.model_id, input=messages,
             metadata={"source": source, "session_id": session_id,
-                      "images": len(images) if images else 0},
-            model_parameters={k: kw[k] for k in ("temperature", "max_tokens")
-                              if k in kw} or None)
+                      "images": len(images) if images else 0,
+                      "thinking_enabled": (extra_body or {}).get(
+                          "thinking_enabled")},
+            model_parameters=_observability_parameters(kw, extra_body))
         try:
             if extra_body:
                 kw["extra_body"] = extra_body
@@ -265,9 +274,11 @@ class LLMClient:
             name=f"llm.{source}", model=snap.model_id, input=messages,
             metadata={"source": source, "session_id": session_id,
                       "images": len(images) if images else 0,
+                      "thinking_enabled": (kw.get("extra_body") or {}).get(
+                          "thinking_enabled"),
                       "builtin_tools": len(extra_tools) if extra_tools else 0},
-            model_parameters={k: kw[k] for k in ("temperature", "max_tokens")
-                              if k in kw} or None)
+            model_parameters=_observability_parameters(
+                kw, kw.get("extra_body")))
         breaker = self.breaker(snap.model_id)
         if not breaker.allow():
             gen.end(level="ERROR", status_message="熔断中")

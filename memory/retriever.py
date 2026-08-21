@@ -415,11 +415,17 @@ class Retriever:
             logger.warning("md 文件缺失，summary 兜底：%s", mid)
             return {"id": mid, "title": row["title"], "summary": row["summary"],
                     "detail": row["summary"], "confidence": row["confidence"],
+                    "lifecycle": row["lifecycle"],
+                    "source_type": row.get("source_type", "memory"),
+                    "verification_state": row.get("verification_state", "unverified"),
+                    "freshness_state": row.get("freshness_state", "current"),
                     "degraded": True}
         doc = parse_memory_md(f.read_text(encoding="utf-8"))
         return {"id": mid, "title": doc.title, "summary": doc.summary,
                 "detail": doc.detail, "confidence": row["confidence"],
-                "lifecycle": row["lifecycle"], "links": doc.links,
+                "lifecycle": row["lifecycle"],
+                "source_type": row.get("source_type", "memory"),
+                "domain": row.get("domain", "general"), "links": doc.links,
                 "verification_state": row.get("verification_state", "unverified"),
                 "freshness_state": row.get("freshness_state", "current")}
 
