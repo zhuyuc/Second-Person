@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-SSE_CONTRACT_VERSION = "2026-08-21"
+SSE_CONTRACT_VERSION = "2026-08-24"
 
 
 class SSEContractError(ValueError):
@@ -27,11 +27,16 @@ SSE_EVENT_SPECS: dict[str, SSEEventSpec] = {
     "error": SSEEventSpec("本轮生成失败或被停止", frozenset({"code", "message"})),
     "memory_retrieved": SSEEventSpec("已选中的记忆摘要", frozenset({"count", "titles"})),
     "thinking_delta": SSEEventSpec("面向用户的处理进度摘要", frozenset({"text"})),
+    "turn_started": SSEEventSpec("持久化任务轮次已创建", frozenset({"turn_id", "reasoning_effort"})),
+    "step_started": SSEEventSpec("模型/工具循环的新步骤", frozenset({"turn_id", "step"})),
     "mode_decision": SSEEventSpec("思考模式路由结果", frozenset({"requested_mode", "effective_mode", "reason"})),
     "analysis_progress": SSEEventSpec("问题建模或交付阶段进度", frozenset({"stage", "status"})),
     "delivery_progress": SSEEventSpec("长文交付进度", frozenset({"status", "current", "total"})),
     "quality_status": SSEEventSpec("需求覆盖质量检查结果"),
     "tool_executing": SSEEventSpec("工具调用状态", frozenset({"tool_name", "status"})),
+    "tool_pending_approval": SSEEventSpec("等待用户确认的副作用工具", frozenset({"turn_id", "approval_id", "tool_name", "risk_level"})),
+    "tool_blocked": SSEEventSpec("被宿主策略阻断的工具", frozenset({"turn_id", "tool_name", "reason"})),
+    "tool_result": SSEEventSpec("工具执行结果摘要", frozenset({"turn_id", "tool_name", "ok"})),
     "tool_visual": SSEEventSpec("工具生成的可视化", frozenset({"type", "data"})),
     "content_delta": SSEEventSpec("回复正文增量", frozenset({"text"})),
     "citations": SSEEventSpec("回复引用", frozenset({"refs"})),

@@ -1,7 +1,6 @@
 // 对话请求契约：值与后端 agent/contracts.py 保持一致。
-export const THINK_MODES = Object.freeze(['auto', 'quick', 'deep'])
+export const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max'])
 
-export function normalizeThinkMode(value) {
-  return THINK_MODES.includes(value) ? value : 'auto'
+export function normalizeReasoningEffort(value) {
+  return REASONING_EFFORTS.includes(value) ? value : 'high'
 }
-

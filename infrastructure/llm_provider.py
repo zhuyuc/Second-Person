@@ -81,6 +81,18 @@ def _normalize_extra_body(snap, extra_body: dict | None) -> dict:
     - 其他 OpenAI 兼容厂商：保持透传语义不变
     """
     eb = dict(extra_body or {})
+    # The agent runtime has one four-level contract.  Map it at the provider
+    # boundary; never expose vendor-specific request fields to callers.
+    effort = eb.pop("reasoning_effort", None)
+    if effort is not None:
+        if effort not in {"off", "low", "high", "max"}:
+            raise ValueError("reasoning_effort must be off, low, high, or max")
+        if "deepseek" in (snap.base_url or "").lower():
+            eb["thinking"] = {"type": "disabled" if effort == "off" else "enabled"}
+            if effort != "off":
+                eb["reasoning_effort"] = effort
+        elif snap.provider_type not in ("anthropic", "google"):
+            eb["reasoning_effort"] = effort
     if "thinking_enabled" not in eb:
         return eb
     enabled = bool(eb.pop("thinking_enabled"))
@@ -98,6 +110,8 @@ def _observability_parameters(kw: dict, extra_body: dict | None = None) -> dict 
     params = {k: kw[k] for k in ("temperature", "max_tokens") if k in kw}
     if extra_body and "thinking_enabled" in extra_body:
         params["thinking_enabled"] = bool(extra_body["thinking_enabled"])
+    if extra_body and "reasoning_effort" in extra_body:
+        params["reasoning_effort"] = extra_body["reasoning_effort"]
     return params or None
 
 
@@ -344,6 +358,122 @@ class LLMClient:
             gen.end(level="ERROR", status_message=str(e))
             raise
 
+    async def stream_chat(self, snap: ProviderSnapshot, messages: list[dict],
+                          source: str = "agent_step",
+                          session_id: str | None = None,
+                          tools: list[dict] | None = None,
+                          images: list[str] | None = None,
+                          extra_body: dict | None = None,
+                          **kw) -> AsyncIterator[tuple]:
+        """流式带工具调用：yield 结构化事件供 agent 步循环消费。
+
+        - ("content", str)：正文增量（可多次）
+        - ("reasoning", str)：思考增量（推理模型；调用方决定是否外露）
+        - ("annotations", list)：内置搜索引用（首包）
+        - ("done", {"content": str, "tool_calls": list, "usage": {...}})：
+          终态事件，一定出现一次
+
+        契约与 chat() 对齐：
+        - 空返回护栏：内容与 tool_calls 都为空视作可重试异常（模型只思考没给答复）
+        - 熔断口径：首包（含内容与 tool_call）前允许 3 次退避重试，全败才计 1 次
+          熔断失败；4xx（除 429）快速失败不计熔断；首包后中途失败不重试。
+        - 已把 tool_call delta 从"面向调用方产出"排除：如果只有 tool_call 尚在累积
+          且流式失败，仍可重试（不会造成重复输出）；一旦有 content 增量被 yield
+          出去，即视为 started 不再重试。
+        """
+        from langfuse.integration import get_tracer
+        gen = get_tracer().generation_start(
+            name=f"llm.{source}", model=snap.model_id, input=messages,
+            metadata={"source": source, "session_id": session_id,
+                      "images": len(images) if images else 0,
+                      "thinking_enabled": (extra_body or {}).get(
+                          "thinking_enabled"),
+                      "tools": len(tools) if tools else 0},
+            model_parameters=_observability_parameters(kw, extra_body))
+        breaker = self.breaker(snap.model_id)
+        if not breaker.allow():
+            gen.end(level="ERROR", status_message="熔断中")
+            raise CircuitOpenError(f"模型 {snap.model_id} 熔断中")
+        if extra_body:
+            kw["extra_body"] = extra_body
+        started = False   # 是否已向调用方 yield 过 content（仅 content 计入）
+        try:
+            content_parts: list[str] = []
+            tool_calls_acc: dict = {}
+            usage = {"input_tokens": 0, "output_tokens": 0}
+            for i, delay in enumerate([0.0] + RETRY_DELAYS):
+                if delay:
+                    await asyncio.sleep(delay)
+                # 重试新一轮前清空累积（started=True 时不会进入这里）
+                content_parts.clear()
+                tool_calls_acc.clear()
+                try:
+                    async for kind, chunk in self._do_stream(
+                            snap, messages, usage, images=images,
+                            tools=tools, **kw):
+                        if kind == "content":
+                            started = True
+                            content_parts.append(chunk)
+                            yield "content", chunk
+                        elif kind == "reasoning":
+                            yield "reasoning", chunk
+                        elif kind == "annotations":
+                            yield "annotations", chunk
+                        elif kind == "tool_call":
+                            _merge_tool_call_delta(tool_calls_acc, chunk)
+                    if not content_parts and not tool_calls_acc:
+                        # 空返回护栏：走退避重试；不带 response 属性，
+                        # 不会被外层 4xx 快速失败误判
+                        raise EmptyCompletionError(
+                            f"模型 {snap.model_id} 返回空内容"
+                            f"（疑似输出全被思考内容占用）")
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if started:
+                        raise
+                    status = getattr(getattr(e, "response", None),
+                                     "status_code", None)
+                    if status is not None and 400 <= status < 500 and status != 429:
+                        raise
+                    logger.warning("流式 LLM(带工具)连接失败(第 %d 次)：%s", i + 1, e)
+                    if i == len(RETRY_DELAYS):
+                        breaker.record_failure()
+                        raise
+            breaker.record_success()
+            final_content = "".join(content_parts)
+            final_tool_calls = _finalize_tool_calls(tool_calls_acc)
+            if self.recorder:
+                inp, outp = usage["input_tokens"], usage["output_tokens"]
+                if inp == 0 and outp == 0 and (final_content or final_tool_calls):
+                    last_user_msg = ""
+                    for m in reversed(messages):
+                        if m.get("role") == "user":
+                            last_user_msg = m.get("content", "") or ""
+                            break
+                    inp = estimate_tokens(
+                        [{"role": "user", "content": last_user_msg}]) if last_user_msg else 0
+                    outp = estimate_tokens(final_content)
+                    usage["input_tokens"], usage["output_tokens"] = inp, outp
+                self.recorder.record(snap.model_id, source,
+                                     inp, outp, session_id,
+                                     input_price=snap.input_price,
+                                     output_price=snap.output_price)
+            gen_output: Any = final_content
+            if final_tool_calls:
+                gen_output = {"content": final_content,
+                              "tool_calls": final_tool_calls}
+            gen.end(output=gen_output, usage={
+                "input": usage["input_tokens"], "output": usage["output_tokens"],
+                "total": usage["input_tokens"] + usage["output_tokens"],
+                "unit": "TOKENS"})
+            yield "done", {"content": final_content,
+                           "tool_calls": final_tool_calls,
+                           "usage": {"input_tokens": usage["input_tokens"],
+                                     "output_tokens": usage["output_tokens"]}}
+        except Exception as e:  # noqa: BLE001
+            gen.end(level="ERROR", status_message=str(e))
+            raise
+
     # ---- 重试封装 ---------------------------------------------------------
     async def _call_with_retry(self, snap, source, session_id, fn):
         breaker = self.breaker(snap.model_id)
@@ -486,36 +616,49 @@ class LLMClient:
         return [item["embedding"] for item in data["data"]]
 
     async def _do_stream(self, snap, messages, usage, images=None,
-                         extra_tools=None, **kw) -> AsyncIterator[tuple]:
+                         extra_tools=None, tools=None,
+                         **kw) -> AsyncIterator[tuple]:
         """先带 stream_options.include_usage 请求（OpenAI 官方系必须显式开启才返回
         流式 usage）；个别网关不认识该参数报 400 时去掉降级重试一次（400 发生在
         首 chunk 之前，重试不会产生重复内容）。"""
         try:
             async for item in self._stream_request(snap, messages, usage,
                                                    images=images, include_usage=True,
-                                                   extra_tools=extra_tools, **kw):
+                                                   extra_tools=extra_tools,
+                                                   tools=tools, **kw):
                 yield item
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 400:
                 raise
             async for item in self._stream_request(snap, messages, usage,
                                                    images=images, include_usage=False,
-                                                   extra_tools=extra_tools, **kw):
+                                                   extra_tools=extra_tools,
+                                                   tools=tools, **kw):
                 yield item
 
     async def _stream_request(self, snap, messages, usage, images=None,
                               include_usage=True, extra_tools=None,
-                              **kw) -> AsyncIterator[tuple]:
-        """yield (kind, text)：kind 为 content / reasoning（推理模型思考增量）/
-        annotations（内置搜索引用源，chunk 为 list）。"""
+                              tools=None, **kw) -> AsyncIterator[tuple]:
+        """yield (kind, payload)：kind 为
+        content / reasoning（推理模型思考增量）/
+        annotations（内置搜索引用源，payload 为 list）/
+        tool_call（OpenAI 流式 function call delta，payload 为单条 delta dict，
+        含 index/id/type/function 增量，需在调用方按 index 累积）。"""
         messages = _inject_images(messages, images)
         body = {"model": snap.model_id, "messages": messages, "stream": True}
         if include_usage:
             body["stream_options"] = {"include_usage": True}
+        # 函数调用工具与厂商内置工具（如 mimo web_search）共用同一个 tools 数组
+        all_tools = []
+        if tools:
+            all_tools.extend(tools)
         if extra_tools:
-            body["tools"] = extra_tools
+            all_tools.extend(extra_tools)
+        if all_tools:
+            body["tools"] = all_tools
         body.update({k: v for k, v in kw.items()
                     if k in ("temperature", "max_tokens")})
+        body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         # 流式回复可持续数分钟：读超时按 chunk 间隔计时，用 stream 长超时
         async with httpx.AsyncClient(timeout=timeout_for("stream")) as c:
             async with c.stream("POST", f"{snap.base_url.rstrip('/')}/chat/completions",
@@ -550,8 +693,37 @@ class LLMClient:
                         content = delta.get("content")
                         if content:
                             yield "content", content
+                        tc_deltas = delta.get("tool_calls")
+                        if tc_deltas:
+                            for tcd in tc_deltas:
+                                yield "tool_call", tcd
                     if obj.get("usage"):
                         usage["input_tokens"] = obj["usage"].get(
                             "prompt_tokens", 0)
                         usage["output_tokens"] = obj["usage"].get(
                             "completion_tokens", 0)
+
+
+def _merge_tool_call_delta(acc: dict, delta: dict) -> None:
+    """按 index 累积 OpenAI 流式 tool_call 增量：id/type 覆盖，
+    function.name/arguments 拼接。"""
+    idx = delta.get("index", 0)
+    slot = acc.get(idx)
+    if slot is None:
+        slot = {"id": delta.get("id") or "",
+                "type": delta.get("type") or "function",
+                "function": {"name": "", "arguments": ""}}
+        acc[idx] = slot
+    if delta.get("id"):
+        slot["id"] = delta["id"]
+    if delta.get("type"):
+        slot["type"] = delta["type"]
+    fn_delta = delta.get("function") or {}
+    if fn_delta.get("name"):
+        slot["function"]["name"] += fn_delta["name"]
+    if fn_delta.get("arguments"):
+        slot["function"]["arguments"] += fn_delta["arguments"]
+
+
+def _finalize_tool_calls(acc: dict) -> list[dict]:
+    return [acc[k] for k in sorted(acc.keys())] if acc else []

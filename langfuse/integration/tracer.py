@@ -136,7 +136,7 @@ class _Trace:
                level=None, status_message=None) -> None:
         body: dict = {"id": self.id, "timestamp": _now()}
         if output is not None:
-            body["output"] = _trim(output)
+            body["output"] = self._t._content(output)
         if metadata is not None:
             # 深度合并：保留已有 metadata 字段，新值覆盖同名 key
             existing = getattr(self, "_metadata", None)
@@ -183,7 +183,7 @@ class _Span:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "timestamp": _now()}
         if self._output is not None:
-            body["output"] = _trim(self._output)
+            body["output"] = self._t._content(self._output)
         if self._meta is not None:
             body["metadata"] = _trim(self._meta)
         self._t._emit("span-update", body)
@@ -198,7 +198,7 @@ class _Span:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if self._output is not None:
-            body["output"] = _trim(self._output)
+            body["output"] = self._t._content(self._output)
         if self._meta is not None:
             body["metadata"] = _trim(self._meta)
         if level:
@@ -227,7 +227,7 @@ class _Generation:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if output is not None:
-            body["output"] = _trim(output)
+            body["output"] = self._t._content(output)
         if usage:
             body["usage"] = usage
         if level:
@@ -292,6 +292,18 @@ class PipelineTracer:
             self._client.enqueue(
                 {"id": _uid(), "type": etype, "timestamp": _now(), "body": body})
 
+    def _content(self, value: Any) -> Any:
+        """Keep Langfuse operational metadata useful without exporting chat text by default."""
+        if self.config.content_mode == "full":
+            return _trim(value)
+        if isinstance(value, str):
+            return {"redacted": True, "chars": len(value)}
+        if isinstance(value, list):
+            return {"redacted": True, "items": len(value)}
+        if isinstance(value, dict):
+            return {"redacted": True, "keys": sorted(str(k) for k in value)[:20]}
+        return _trim(value)
+
     # ---- trace ----
     def trace_start(self, name: str, *, session_id: str | None = None,
                     user_id: str | None = None, input: Any = None,
@@ -305,7 +317,7 @@ class PipelineTracer:
         if user_id is not None:
             body["userId"] = user_id
         if input is not None:
-            body["input"] = _trim(input)
+            body["input"] = self._content(input)
         if metadata is not None:
             body["metadata"] = _trim(metadata)
         if tags:
@@ -334,7 +346,7 @@ class PipelineTracer:
         body: dict = {"id": sid, "traceId": tid, "name": name, "startTime": _now(),
                       "parentObservationId": parent_observation_id or _active_obs.get()}
         if input is not None:
-            body["input"] = _trim(input)
+            body["input"] = self._content(input)
         if metadata is not None:
             body["metadata"] = _trim(metadata)
         self._emit("span-create", body)
@@ -354,7 +366,7 @@ class PipelineTracer:
         if model_parameters is not None:
             body["modelParameters"] = _trim(model_parameters)
         if input is not None:
-            body["input"] = _trim(input, max_str=_MAX_GEN_INPUT)
+            body["input"] = self._content(input)
         if metadata is not None:
             body["metadata"] = _trim(metadata)
         self._emit("generation-create", body)

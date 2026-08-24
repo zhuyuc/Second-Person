@@ -11,6 +11,21 @@ from typing import Any
 DEVELOPER_TRACE_SCHEMA_VERSION = "developer-trace-v1"
 
 
+def build_agent_trace(*, turn_id: str, reasoning_effort: str, steps: int,
+                      llm_call_count: int, latency_ms: int,
+                      end_reason: str) -> dict[str, Any]:
+    """Compact v2 runtime facts, deliberately excluding hidden reasoning."""
+    return {
+        "schema_version": "agent-runtime-v2",
+        "turn_id": turn_id,
+        "reasoning_effort": reasoning_effort,
+        "steps": steps,
+        "llm_call_count": llm_call_count,
+        "latency_ms": latency_ms,
+        "end_reason": end_reason,
+    }
+
+
 def initial_developer_trace(*, requested_mode: str,
                             client_request_id: str | None) -> dict[str, Any]:
     return {

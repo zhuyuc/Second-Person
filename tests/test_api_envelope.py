@@ -86,40 +86,50 @@ def test_chat_send_rejects_invalid_request_fields(client: TestClient, payload: d
     _assert_error_envelope(resp, 400)
 
 
-@pytest.mark.parametrize("sent, expected", [
-    (None, "auto"),
-    ("invalid", "auto"),
-    ({"unexpected": "object"}, "auto"),
-    ("quick", "quick"),
-    ("deep", "deep"),
+@pytest.mark.parametrize("payload, expected", [
+    ({}, "high"),
+    ({"think_mode": "quick"}, "low"),
+    ({"think_mode": "deep"}, "max"),
+    ({"reasoning_effort": "off"}, "off"),
+    ({"reasoning_effort": "max"}, "max"),
 ])
-def test_chat_sse_normalizes_and_forwards_think_mode(
+def test_chat_sse_forwards_reasoning_effort(
         client: TestClient, monkeypatch: pytest.MonkeyPatch,
-        sent, expected: str):
-    """auto 是默认路由控制，quick/deep 仅作为显式执行覆盖。"""
+        payload, expected: str):
     captured = []
-    crid = f"cr-{expected}-{sent}"
+    crid = f"cr-{expected}-{id(payload)}"
 
     async def fake_run(_sid, _message, _crid, **kwargs):
-        captured.append(kwargs["think_mode"])
-        yield {"event": "mode_decision", "data": {
-            "requested_mode": kwargs["think_mode"],
-            "effective_mode": "deep" if expected == "deep" else "quick",
-            "reason": "测试路由",
+        captured.append(kwargs["reasoning_effort"])
+        yield {"event": "turn_started", "data": {
+            "turn_id": "turn_test", "reasoning_effort": kwargs["reasoning_effort"],
         }}
-        yield {"event": "turn_completed", "data": {"message_id": 1}}
+        yield {"event": "turn_completed", "data": {"message_id": 1, "turn_id": "turn_test"}}
 
     monkeypatch.setattr(get_container().core, "run", fake_run)
     body = {"session_id": "sse-mode-contract", "message": "测试", "client_request_id": crid}
-    if sent is not None:
-        body["think_mode"] = sent
+    body.update(payload)
     response = client.post("/api/chat/send", json=body)
     assert response.status_code == 200
     assert captured == [expected]
-    assert "event: mode_decision" in response.text
-    if expected == "deep":
-        assert chat._BUFFERS[crid]["deep_requested"] is True
-        assert chat._BUFFERS[crid]["deep_delivery"] is True
+    assert "event: turn_started" in response.text
+    assert chat._BUFFERS[crid]["reasoning_effort"] == expected
+
+
+def test_tool_approval_route_is_owned_by_the_host(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    core = get_container().core
+    monkeypatch.setattr(core, "decide_tool_approval", lambda approval_id, approved: {
+        "turn_id": "turn_approval", "call_id": "call_approval",
+        "id": approval_id, "status": "approved" if approved else "rejected",
+    })
+    response = client.post(
+        "/api/chat/turns/turn_approval/approvals/apr_approval",
+        json={"approved": True})
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "approval_id": "apr_approval", "turn_id": "turn_approval", "status": "approved",
+    }
 
 
 def test_active_buffer_is_not_cancelled_by_fixed_wall_clock_limit(monkeypatch: pytest.MonkeyPatch):
@@ -153,4 +163,4 @@ def test_unconfigured_onboarding_chat_ends_with_friendly_sse_message(client: Tes
     })
     assert response.status_code == 200
     assert "当前对话模型不可用，请在设置页检查模型配置。" in response.text
-    assert "event: turn_completed" in response.text
+    assert "event: error" in response.text

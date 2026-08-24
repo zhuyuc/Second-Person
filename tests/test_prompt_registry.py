@@ -94,7 +94,7 @@ def placeholders_of(name: str) -> set[str]:
 
 
 # LLM 调用点扫描：receiver 为 llm / *.llm（如 self.llm、c.llm）的三个方法
-LLM_METHODS = ("chat", "stream", "function_call")
+LLM_METHODS = ("chat", "stream", "stream_chat", "function_call")
 
 
 def collect_llm_call_sites() -> dict[str, set[str]]:

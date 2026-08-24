@@ -39,7 +39,13 @@ def test_chat_request_contract_normalizes_only_documented_compatibility_fields()
     })
     assert request.client_request_id == "request-1"
     assert request.think_mode == "auto"
+    assert request.reasoning_effort == "high"
     assert request.edit_message_id == 42
+
+    assert parse_chat_send({"message": "测试", "reasoning_effort": "max"}).reasoning_effort == "max"
+    assert parse_chat_send({"message": "测试", "think_mode": "quick"}).reasoning_effort == "low"
+    with pytest.raises(ContractValidationError, match="reasoning_effort"):
+        parse_chat_send({"message": "测试", "reasoning_effort": "automatic"})
 
     with pytest.raises(ContractValidationError, match="images"):
         parse_chat_send({"message": "测试", "images": {"bad": True}})
@@ -55,6 +61,8 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
         "analysis_progress", "delivery_progress", "quality_status", "tool_executing",
         "tool_visual", "content_delta", "citations", "elicitation",
         "elicitation_status", "handoff_ready", "mood_updated", "turn_completed",
+        "turn_started", "step_started", "tool_pending_approval", "tool_blocked",
+        "tool_result",
     }
     assert expected == set(SSE_EVENT_SPECS)
     assert SSE_TERMINAL_EVENTS == {"turn_completed", "error"}
@@ -62,6 +70,10 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
 
     validate_sse_event("mode_decision", {
         "requested_mode": "auto", "effective_mode": "quick", "reason": "simple",
+    })
+    validate_sse_event("tool_pending_approval", {
+        "turn_id": "turn_1", "approval_id": "apr_1", "tool_name": "file_write",
+        "risk_level": "destructive",
     })
     with pytest.raises(SSEContractError, match="missing fields"):
         validate_sse_event("content_delta", {})
@@ -96,8 +108,8 @@ def test_routes_use_the_shared_json_object_reader():
         assert "read_json_object" in source, filename
 
 
-def test_product_document_uses_direct_agent_tool_execution():
+def test_product_document_declares_host_owned_tool_approval():
     product_doc = (ROOT / "docs/SecondPerson-全系统产品方案.md").read_text(encoding="utf-8")
     assert "POST /chat/tool-confirm" not in product_doc
     assert "tool_confirm" not in product_doc
-    assert "Agent 工具调用直接执行" in product_doc
+    assert "获得用户确认后执行" in product_doc

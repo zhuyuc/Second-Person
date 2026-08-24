@@ -121,14 +121,12 @@ class ConnectorManager:
             parameters=tool.get(
                 "inputSchema", {"type": "object", "properties": {}}),
             source="mcp", connector_id=connector_id,
-            destructive=self._guess_destructive(raw_name))
+            # MCP descriptions are not a trustworthy security declaration.
+            # Until a connector supplies reviewed metadata, each call waits
+            # for the user instead of relying on tool-name guesswork.
+            risk_level="external_side_effect", approval_policy="every_call",
+            parallel_safe=False)
         self.registry.register_function(spec, _invoke)
-
-    @staticmethod
-    def _guess_destructive(name: str) -> bool:
-        # 与前端 SettingsView.toolBadge 启发式同口径；add/fork 为写入类操作（如 add_issue_comment/fork_repository）
-        return any(k in name.lower() for k in
-                   ("create", "delete", "update", "write", "remove", "merge", "push", "add", "fork"))
 
     async def toggle(self, connector_id: str, enabled: bool) -> None:
         if enabled:

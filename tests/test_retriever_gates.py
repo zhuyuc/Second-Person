@@ -48,7 +48,12 @@ class _FakePalace:
         return {mid: self._rows[mid] for mid in ids if mid in self._rows}
 
     def outlinks(self, mid):
-        return [{"target_id": t} for t in self._links.get(mid, [])]
+        # The production retriever expands causal/reference edges by default;
+        # generic ``related`` links require an explicit recall/continuation
+        # signal. This fixture exercises the cosine gate, so model that
+        # eligible edge type instead of relying on an omitted default.
+        return [{"target_id": t, "link_type": "expands"}
+                for t in self._links.get(mid, [])]
 
 
 class _Cfg(dict):

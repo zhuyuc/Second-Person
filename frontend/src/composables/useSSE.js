@@ -2,12 +2,12 @@
 // （开发文档 §断线重连与缓冲区规则 / §6.21）
 // 支持 handoff_ready 事件（会话上下文管理方案 v2）
 import { parseSSE, postJsonStream } from '@/api/streamClient'
-import { normalizeThinkMode } from '@/utils/chatContract'
+import { normalizeReasoningEffort } from '@/utils/chatContract'
 
 export function useSSE() {
     let controller = null
 
-    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, editMessageId, location, onEvent, onError, handoffPath, thinkMode = 'auto' }) {
+    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, editMessageId, location, onEvent, onError, handoffPath, reasoningEffort = 'high' }) {
         const crid = clientRequestId || genId()
         sessionStorage.setItem('sp_active_crid', crid)
         // 首次发送携带 message；断线重连时同 crid 重推（服务端缓冲区断点续推）
@@ -30,8 +30,7 @@ export function useSSE() {
                     edit_message_id: editMessageId || undefined,
                     location: location || undefined,
                     handoff_path: handoffPath || undefined,
-                    // auto=模型自主路由；quick/deep 为用户显式覆盖。
-                    think_mode: normalizeThinkMode(thinkMode),
+                    reasoning_effort: normalizeReasoningEffort(reasoningEffort),
                 }, { signal: controller.signal })
                 const reader = resp.body.getReader()
                 const decoder = new TextDecoder()

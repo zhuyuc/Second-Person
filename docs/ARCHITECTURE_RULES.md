@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | `app/routes` | HTTP/SSE 适配、输入校验、响应封装 | `app/contracts` 与各业务服务 |
 | `app/contracts.py` | 公开 HTTP 请求模型和规范化 | `agent/contracts` 中的共享枚举 |
-| `agent` | 任务编排、思考路由、工具调度、回复合成 | `memory`、`tools`、`infrastructure` |
+| `agent` | 事件化任务编排、推理等级、工具调度、回复合成 | `memory`、`tools`、`infrastructure` |
 | `memory` | 记忆写入、检索、压缩、索引和生命周期 | `infrastructure` |
 | `tools` | 工具规格、参数校验和执行实现 | `infrastructure` |
 | `connectors` | MCP 和外部连接器生命周期 | `tools`、`infrastructure` |
@@ -51,8 +51,9 @@
 - JSON 成功响应使用 `{code: 200, data}`；错误响应使用 `{code, message, trace_id, details}`。
 - 对话请求由 `app/contracts.py` 的 `ChatSendRequest` 规范化。
 - 对话 SSE 事件由 `infrastructure/sse_contract.py` 注册并在路由出口验证；EventBus 事件只用于后端模块间通信。
-- `auto`、`quick`、`deep` 是唯一思考模式，前后端分别从 `agent/contracts.py` 和 `frontend/src/utils/chatContract.js` 使用同一语义。
-- Agent 调度的工具调用直接执行；工具参数校验、超时、脱敏、注入防护、重试和 Replan 是执行质量保障。
+- `off`、`low`、`high`、`max` 是唯一的公开推理等级，前后端分别从 `agent/contracts.py` 和 `frontend/src/utils/chatContract.js` 使用同一语义。`think_mode` 仅保留输入兼容映射，不得参与常规对话路由。
+- 普通 Agent 轮次使用 `agent_turns` 和 `agent_events` 作为可恢复事实链：宿主构造上下文和 schema，模型提出工具调用，宿主执行或等待确认，再把结果事件回填给下一步模型。
+- 工具参数校验、超时、脱敏、注入防护和重试属于执行质量保障。`write`、`destructive`、`external_side_effect` 工具必须由 `ToolPolicy` 在执行前确认；前端无权直接声明工具或授权执行。
 
 ## 5. 数据与写入
 
@@ -64,8 +65,9 @@
 ## 6. 开发者观测
 
 - 每个 LLM 调用显式声明 `source`，每轮 Agent 任务使用 Langfuse trace/span/generation 链路。
-- 开发者通过 Langfuse 查看结构化调试记录：模式路由、上下文选择、检索、工具、质量检查、修复和性能结果。
+- 开发者通过 Langfuse 查看结构化调试记录：推理等级、上下文选择、检索、工具、确认、性能和结束原因。
 - `infrastructure/developer_trace.py` 定义调试摘要字段；它只记录可验证的决策和执行证据，不保存原始隐藏推理 token 流。
+- Langfuse 默认使用 `redacted` 内容模式；除非显式启用 `full`，调用输入输出只上传长度和结构元数据。
 - 面向用户的 `thinking_delta` 仅展示处理进度与可验证结论。
 
 ## 7. 自动化门禁

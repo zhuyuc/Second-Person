@@ -10,9 +10,13 @@ import json
 from typing import Any
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
-from agent.contracts import normalize_think_mode
+from agent.contracts import (
+    legacy_think_mode_effort,
+    normalize_reasoning_effort,
+    normalize_think_mode,
+)
 
 
 class ContractValidationError(ValueError):
@@ -60,8 +64,9 @@ def _optional_id(value: Any, field: str) -> int | None:
 class ChatSendRequest(BaseModel):
     """Public contract for ``POST /api/chat/send``.
 
-    ``think_mode`` deliberately degrades unknown values to ``auto`` so older
-    clients and IM channels keep model-controlled routing semantics.
+    ``reasoning_effort`` is the canonical four-level request control.  The
+    retired ``think_mode`` input remains read-only compatibility for clients
+    that have not upgraded yet.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -74,7 +79,8 @@ class ChatSendRequest(BaseModel):
     edit_message_id: int | None = None
     location: str | None = None
     handoff_path: str | None = None
-    think_mode: str = "auto"
+    reasoning_effort: str | None = None
+    think_mode: str | None = None
 
     @field_validator("session_id", mode="before")
     @classmethod
@@ -126,6 +132,29 @@ class ChatSendRequest(BaseModel):
     @classmethod
     def _normalize_think_mode(cls, value: Any) -> str:
         return normalize_think_mode(value)
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _normalize_reasoning_effort(cls, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        normalized = normalize_reasoning_effort(value)
+        if normalized != value:
+            raise ValueError("reasoning_effort must be off, low, high, or max")
+        return normalized
+
+    @model_validator(mode="after")
+    def _fill_reasoning_effort(self) -> "ChatSendRequest":
+        if self.reasoning_effort is None:
+            self.reasoning_effort = (legacy_think_mode_effort(self.think_mode)
+                                     if self.think_mode else "high")
+        return self
+
+
+class ToolApprovalDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    approved: bool
 
 
 def parse_chat_send(body: Any) -> ChatSendRequest:

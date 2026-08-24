@@ -30,17 +30,20 @@
 | `regenerate_message_id` / `edit_message_id` | positive integer | 可选版本操作目标 |
 | `location` | string | 可选位置摘要，最长 60 字符 |
 | `handoff_path` | string | 可选会话交接摘要路径，最长 240 字符 |
-| `think_mode` | `auto` / `quick` / `deep` | 缺失或未知值按 `auto` 处理 |
+| `reasoning_effort` | `off` / `low` / `high` / `max` | 单轮推理预算；缺省为 `high` |
+| `think_mode` | `auto` / `quick` / `deep` | 仅兼容旧客户端：分别映射为 `high` / `low` / `max`；新客户端不得发送 |
 
 同一会话的生成串行执行。断线重连使用相同 `client_request_id` 读取服务端缓冲；只有 `POST /api/chat/cancel` 会取消正在执行的任务。
 
-## 工具执行
+## 任务与工具执行
 
-Agent 规划后直接执行工具，不设置工具确认接口。每个调用仍经过参数校验、超时、结果脱敏、外部内容注入防护、空结果重试和 Replan。用户在设置或记忆页面主动发起的删除、恢复等界面操作，继续由页面确认组件保护。
+正常对话使用短的事件化循环：宿主组装上下文和工具 schema，模型选择是否提出工具调用，宿主按工具策略执行，然后把工具结果事件投影回下一步模型上下文。`agent_events` 是单轮模型上下文的事实来源；`conversations` 保留用户可见消息历史。
+
+工具 schema 由宿主程序注册，前端只传用户消息与 `reasoning_effort`，不能指定工具或绕过策略。`read` 工具可直接执行；`write`、`destructive` 以及未审核 MCP 工具会创建持久化确认记录并等待用户。确认接口为 `POST /api/chat/turns/{turn_id}/approvals/{approval_id}`，请求体为 `{"approved": true|false}`。
 
 ## SSE 事件
 
-契约版本：`2026-08-21`。每个事件使用：
+契约版本：`2026-08-24`。每个事件使用：
 
 ```text
 event: <event_name>
@@ -51,12 +54,16 @@ data: <JSON object>
 | --- | --- | --- |
 | `queued` | `session_id` | 同会话排队提示 |
 | `thinking_delta` | `text` | 处理进度摘要 |
-| `mode_decision` | `requested_mode`, `effective_mode`, `reason` | 思考模式路由 |
+| `turn_started` | `turn_id`, `reasoning_effort` | 已创建持久化任务轮次 |
+| `step_started` | `turn_id`, `step` | 模型/工具循环的新步骤 |
 | `memory_retrieved` | `count`, `titles` | 已选择的记忆摘要 |
 | `analysis_progress` | `stage`, `status` | 问题建模和交付进度 |
 | `delivery_progress` | `status`, `current`, `total` | 长文交付进度 |
 | `quality_status` | - | 需求覆盖质量结果 |
 | `tool_executing` | `tool_name`, `status` | 工具执行状态 |
+| `tool_pending_approval` | `turn_id`, `approval_id`, `tool_name`, `risk_level` | 等待确认的副作用操作 |
+| `tool_blocked` | `turn_id`, `tool_name`, `reason` | 被宿主策略阻断 |
+| `tool_result` | `turn_id`, `tool_name`, `ok` | 工具结果摘要 |
 | `tool_visual` | `type`, `data` | 工具生成的图形 |
 | `content_delta` | `text` | 回复正文增量 |
 | `citations` | `refs` | 回复引用 |
@@ -71,4 +78,4 @@ data: <JSON object>
 
 ## 开发者调试记录
 
-Langfuse 的 `developer_trace` 元数据包含模式决策、被选上下文、检索诊断、意图、工具结果、问题模型、质量结果及耗时。它是开发分析入口，不属于面向用户的 SSE 内容。
+Langfuse 的 `developer_trace` 元数据记录可验证的运行事实（任务 ID、推理等级、步骤数、调用数、耗时和结束原因），不记录模型隐藏推理。默认 `LANGFUSE_CONTENT_MODE=redacted`，仅上报文本结构和长度；显式设为 `full` 才上报调用输入输出。它是开发分析入口，不属于面向用户的 SSE 内容。

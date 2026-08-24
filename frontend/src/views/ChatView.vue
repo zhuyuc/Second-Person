@@ -19,7 +19,7 @@ import { withQuery } from '@/utils/query'
 import { sanitizeHtml } from '@/utils/sanitize'
 import { enhanceResponseHtml } from '@/utils/responsePresentation'
 import { bindInlineMermaidInteractions, cleanupInlineMermaidInteractions, resetInlineMermaid, zoomInlineMermaid } from '@/utils/inlineMermaidInteractions'
-import { normalizeThinkMode } from '@/utils/chatContract'
+import { normalizeReasoningEffort } from '@/utils/chatContract'
 
 // Mermaid 主题：CSS 变量驱动（与 MermaidChart 同源），自动跟随系统深浅色；手动触发 run
 applyMermaidTheme()
@@ -78,6 +78,7 @@ const ta = ref(null)          // 输入框，用于自适应高度
 
 // 追问状态（elicitation）
 const activeElicitation = ref(null)  // { toolUseId, questions, reason } | null
+const pendingToolApproval = ref(null)
 const thresholdBreached = ref(null)  // null / 'soft' / 'hard'
 const softToastShown = ref(false)
 // handoff 附件状态
@@ -110,6 +111,10 @@ function removeHandoff() {
 // 模型选择器
 const providers = ref([])
 const chatModelId = ref(null)
+const modelControlOpen = ref(false)
+const modelControlPanel = ref('overview')
+const selectedModelLabel = computed(() =>
+  providers.value.find(p => p.id === chatModelId.value)?.display_name || '未配置模型')
 async function loadProviders() {
   const all = await api.get('/settings/providers')
   const a = await api.get('/settings/model-assignment')
@@ -127,26 +132,59 @@ async function switchModel(pid) {
   toast.push('success', '已切换，下一轮对话生效')
 }
 
-// ---- 自动模式默认；quick/deep 是用户对模型路由的显式覆盖。 ----
-const thinkMode = ref('auto')
-const thinkMenuOpen = ref(false)
-const THINK_MODE_OPTIONS = [
-  { value: 'auto', label: '自动模式' },
-  { value: 'quick', label: '快速回答' },
-  { value: 'deep', label: '深度思考' },
+// ---- 每轮统一由宿主传递推理等级，模型在该预算内自行决定工具调用。 ----
+const reasoningEffort = ref('high')
+const REASONING_EFFORT_OPTIONS = [
+  { value: 'off', label: '关闭推理' },
+  { value: 'low', label: '低推理' },
+  { value: 'high', label: '高推理' },
+  { value: 'max', label: '最大推理' },
 ]
-const thinkModeLabel = computed(() =>
-  (THINK_MODE_OPTIONS.find(m => m.value === thinkMode.value)
-    || THINK_MODE_OPTIONS[0]).label)
-function pickThinkMode(v) {
-  thinkMode.value = normalizeThinkMode(v)
-  thinkMenuOpen.value = false
+const reasoningEffortLabel = computed(() =>
+  (REASONING_EFFORT_OPTIONS.find(m => m.value === reasoningEffort.value)
+    || REASONING_EFFORT_OPTIONS[2]).label)
+const reasoningEffortCompactLabel = computed(() => ({
+  off: 'Off', low: 'Low', high: 'High', max: 'Max',
+}[reasoningEffort.value] || 'High'))
+
+function toggleModelControl() {
+  modelControlOpen.value = !modelControlOpen.value
+  if (modelControlOpen.value) modelControlPanel.value = 'overview'
 }
-// 点击面板外部关闭思考模式菜单（菜单与胶囊按钮自身的事件已 stop）
-function onDocClickThink(e) {
-  if (!thinkMenuOpen.value) return
-  if (e.target.closest('.think-mode-menu') || e.target.closest('.think-mode-btn')) return
-  thinkMenuOpen.value = false
+
+function openModelControlPanel(panel) {
+  modelControlPanel.value = panel
+}
+
+function closeModelControl() {
+  modelControlOpen.value = false
+  modelControlPanel.value = 'overview'
+}
+
+async function pickChatModel(pid) {
+  if (pid !== chatModelId.value) await switchModel(pid)
+  closeModelControl()
+}
+
+function pickReasoningEffort(v) {
+  reasoningEffort.value = normalizeReasoningEffort(v)
+  closeModelControl()
+}
+
+async function decideToolApproval(approved) {
+  const item = pendingToolApproval.value
+  if (!item) return
+  try {
+    await api.post(`/chat/turns/${item.turn_id}/approvals/${item.approval_id}`, { approved })
+    pendingToolApproval.value = null
+    toast.push('success', approved ? '已允许执行' : '已拒绝执行')
+  } catch { /* API layer displays the failure and the pending prompt remains */ }
+}
+// 点击面板外部关闭模型与推理等级菜单（菜单与入口按钮自身的事件已 stop）
+function onDocClickModelControl(e) {
+  if (!modelControlOpen.value) return
+  if (e.target.closest('.model-control-menu') || e.target.closest('.model-control-btn')) return
+  closeModelControl()
 }
 
 // 仅提示类系统通知：Web 端已在导入时用 toast 实时反馈，无需在对话流中留存横幅（含历史）
@@ -477,7 +515,7 @@ async function send() {
     images: imgs.length ? imgs : undefined,
     location: geoEnabled.value ? cachedLocation() : undefined,
     handoffPath: hPath,
-    thinkMode: thinkMode.value,
+    reasoningEffort: reasoningEffort.value,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
   })
@@ -517,9 +555,19 @@ function handleEvent(ev, data) {
   else if (ev === 'content_delta') {
     pushStreamText(data.text)
   }
-  else if (ev === 'mode_decision') {
-    const path = data.effective_mode === 'deep' ? '深度分析' : '快速回答'
-    thinkText.value += `【执行路径】${path}：${data.reason || '模型自动判断'}\n`
+  // turn_started / step_started 仍作为事件对下游可见（回放、可观测性），
+  // 但不再作为文案追加到思考面板：对读者零信息量，与后端持久化对齐。
+  else if (ev === 'tool_executing') {
+    thinkText.value += `【工具】正在执行 ${data.tool_name}\n`
+    maybeScroll(); scrollThink()
+  }
+  else if (ev === 'tool_result') {
+    thinkText.value += `【工具】${data.tool_name}${data.ok ? '已完成' : '未完成'}\n`
+    maybeScroll(); scrollThink()
+  }
+  else if (ev === 'tool_pending_approval') {
+    pendingToolApproval.value = data
+    thinkText.value += `【工具】等待确认：${data.tool_name}\n`
     maybeScroll(); scrollThink()
   }
   else if (ev === 'analysis_progress') {
@@ -552,6 +600,7 @@ function handleEvent(ev, data) {
     finishStream(data.message_id)
     // 清理追问状态
     activeElicitation.value = null
+    pendingToolApproval.value = null
     if (data.threshold) handleThreshold(data.threshold)
   }
   else if (ev === 'elicitation') {
@@ -560,7 +609,7 @@ function handleEvent(ev, data) {
   else if (ev === 'elicitation_status') {
     if (data.status === 'done' || data.status === 'closed' || data.status === 'expired') activeElicitation.value = null
   }
-  else if (ev === 'error') { toast.push('error', friendlyError(data.message)); finishStream() }
+  else if (ev === 'error') { pendingToolApproval.value = null; toast.push('error', friendlyError(data.message)); finishStream() }
   // handoff 摘要就绪（会话上下文管理方案 v2）
   else if (ev === 'handoff_ready') {
     handoffStatus.value = data.status
@@ -736,7 +785,7 @@ async function submitEdit(msg) {
     sessionId: sessStore.currentSid, message: text,
     editMessageId: editMsgId,
     location: geoEnabled.value ? cachedLocation() : undefined,
-    thinkMode: thinkMode.value,
+    reasoningEffort: reasoningEffort.value,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
   })
@@ -801,7 +850,7 @@ async function regenerate(msg) {
     sessionId: sessStore.currentSid, message: userMsg.content,
     regenerateMessageId: msg.id,
     location: geoEnabled.value ? cachedLocation() : undefined,
-    thinkMode: thinkMode.value,
+    reasoningEffort: reasoningEffort.value,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
   })
@@ -1002,7 +1051,7 @@ onMounted(() => {
   if (sessStore.currentSid && !messages.value.length) openSession(sessStore.currentSid)
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)
-  document.addEventListener('click', onDocClickThink)
+  document.addEventListener('click', onDocClickModelControl)
   mermaidObserver = new MutationObserver(() => scheduleMermaidScoped())
   mermaidObserver.observe(scroller.value, { childList: true, subtree: true })
   scheduleMermaidScoped()
@@ -1102,7 +1151,7 @@ onUnmounted(() => {
   window.removeEventListener('sp-open-session', onOpenSession)
   document.removeEventListener('click', handleMermaidActions)
   document.removeEventListener('click', onDocClickEmoji)
-  document.removeEventListener('click', onDocClickThink)
+  document.removeEventListener('click', onDocClickModelControl)
   mermaidObserver?.disconnect()
   cleanupInlineMermaidInteractions(scroller.value)
 })
@@ -1344,34 +1393,55 @@ onUnmounted(() => {
               <i class="ti ti-mood-smile emoji-toggle"
                 style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="表情" @mousedown.prevent
                 @click.stop="emojiOpen = !emojiOpen"></i>
-              <!-- 自动模式默认启用；quick/deep 是用户对模型路由的显式覆盖。 -->
-              <div class="think-mode-wrap">
-                <button type="button" class="think-mode-btn" :title="'思考模式：' + thinkModeLabel" @mousedown.prevent
-                  :aria-expanded="thinkMenuOpen" aria-haspopup="menu" @click.stop="thinkMenuOpen = !thinkMenuOpen">
-                  <i class="ti" :class="thinkMode === 'deep' ? 'ti-bulb' : 'ti-bolt'"></i>
-                  <span>{{ thinkModeLabel }}</span>
-                  <i class="ti think-mode-arrow" :class="thinkMenuOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+            </div>
+            <div class="composer-actions">
+              <input ref="fileInput" type="file" multiple style="display:none" @change="onFilePick" />
+              <!-- 单一入口展示当前模型和推理等级；选择在上方两级菜单中完成。 -->
+              <div class="model-control-wrap">
+                <button type="button" class="model-control-btn" :title="`模型：${selectedModelLabel}；推理等级：${reasoningEffortLabel}`"
+                  :aria-expanded="modelControlOpen" aria-haspopup="dialog" @mousedown.prevent @click.stop="toggleModelControl">
+                  <span class="model-control-name">{{ selectedModelLabel }}</span>
+                  <span class="model-control-effort">{{ reasoningEffortCompactLabel }}</span>
+                  <i class="ti" :class="modelControlOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </button>
-                <div v-if="thinkMenuOpen" class="think-mode-menu" role="menu" @click.stop>
-                  <button v-for="opt in THINK_MODE_OPTIONS" :key="opt.value" type="button" class="think-mode-opt"
-                    :class="{ active: thinkMode === opt.value }" role="menuitemradio" :aria-checked="thinkMode === opt.value" @click="pickThinkMode(opt.value)">
-                    <span>{{ opt.label }}</span>
-                    <i v-if="thinkMode === opt.value" class="ti ti-check"></i>
-                  </button>
+                <div v-if="modelControlOpen" class="model-control-menu" role="dialog" aria-label="模型与推理等级" @click.stop>
+                  <template v-if="modelControlPanel === 'overview'">
+                    <button type="button" class="model-control-row" @click="openModelControlPanel('model')">
+                      <span>模型</span>
+                      <span class="model-control-row-value">{{ selectedModelLabel }}<i class="ti ti-chevron-right"></i></span>
+                    </button>
+                    <button type="button" class="model-control-row" @click="openModelControlPanel('reasoning')">
+                      <span>推理等级</span>
+                      <span class="model-control-row-value">{{ reasoningEffortCompactLabel }}<i class="ti ti-chevron-right"></i></span>
+                    </button>
+                  </template>
+                  <template v-else-if="modelControlPanel === 'model'">
+                    <button type="button" class="model-control-back" @click="openModelControlPanel('overview')">
+                      <i class="ti ti-chevron-left"></i> 模型
+                    </button>
+                    <button v-for="provider in providers" :key="provider.id" type="button" class="model-control-option"
+                      :class="{ active: provider.id === chatModelId }" role="menuitemradio" :aria-checked="provider.id === chatModelId"
+                      @click="pickChatModel(provider.id)">
+                      <span>{{ provider.display_name }}</span>
+                      <i v-if="provider.id === chatModelId" class="ti ti-check"></i>
+                    </button>
+                  </template>
+                  <template v-else>
+                    <button type="button" class="model-control-back" @click="openModelControlPanel('overview')">
+                      <i class="ti ti-chevron-left"></i> 推理等级
+                    </button>
+                    <button v-for="opt in REASONING_EFFORT_OPTIONS" :key="opt.value" type="button" class="model-control-option"
+                      :class="{ active: reasoningEffort === opt.value }" role="menuitemradio" :aria-checked="reasoningEffort === opt.value"
+                      @click="pickReasoningEffort(opt.value)">
+                      <span>{{ opt.label }}</span>
+                      <i v-if="reasoningEffort === opt.value" class="ti ti-check"></i>
+                    </button>
+                  </template>
                 </div>
               </div>
-              <!-- option 不允许子元素：状态色直接作用于选项文字 -->
-              <select v-if="providers.length" v-model="chatModelId" @change="switchModel(chatModelId)"
-                style="padding:4px 8px;font-size:var(--fs-sm);max-width:140px">
-                <option v-for="p in providers" :key="p.id" :value="p.id"
-                  :style="{ color: p.status === 'healthy' ? 'var(--succtx)' : p.status === 'half_open' ? 'var(--warntx)' : 'var(--muted)' }">
-                  {{ p.display_name }}
-                </option>
-              </select>
+              <button v-if="!generating" class="send-btn" @click="send"><i class="ti ti-arrow-up"></i></button>
+              <button v-else class="send-btn" @click="abort"><i class="ti ti-player-stop-filled"></i></button>
             </div>
-            <input ref="fileInput" type="file" multiple style="display:none" @change="onFilePick" />
-            <button v-if="!generating" class="send-btn" @click="send"><i class="ti ti-arrow-up"></i></button>
-            <button v-else class="send-btn" @click="abort"><i class="ti ti-player-stop-filled"></i></button>
           </div>
         </div>
       </div>
@@ -1394,6 +1464,15 @@ onUnmounted(() => {
     <p class="modal-subtitle">发送下一条消息时，系统会自动把该摘要注入新会话上下文。</p>
     <template #footer>
       <button type="button" @click="handoffPreview = null">关闭</button>
+    </template>
+  </BaseModal>
+
+  <BaseModal v-if="pendingToolApproval" title="确认工具操作" size="sm" stacked @close="decideToolApproval(false)">
+    <p class="modal-subtitle">{{ pendingToolApproval.tool_name }} 将执行{{ pendingToolApproval.risk_level === 'destructive' ? '破坏性' : '写入或外部' }}操作。</p>
+    <pre style="max-height:180px;overflow:auto;white-space:pre-wrap">{{ JSON.stringify(pendingToolApproval.params, null, 2) }}</pre>
+    <template #footer>
+      <button type="button" @click="decideToolApproval(false)">拒绝</button>
+      <button type="button" class="btn-primary" @click="decideToolApproval(true)">允许</button>
     </template>
   </BaseModal>
 

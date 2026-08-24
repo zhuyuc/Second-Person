@@ -18,7 +18,12 @@ from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from app.contracts import ContractValidationError, parse_chat_send, read_json_object
+from app.contracts import (
+    ContractValidationError,
+    ToolApprovalDecisionRequest,
+    parse_chat_send,
+    read_json_object,
+)
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.sse_contract import SSEContractError, validate_sse_event
 
@@ -143,7 +148,7 @@ async def chat_send(request: Request):
     edit_message_id = payload.edit_message_id
     location = payload.location
     handoff_path = payload.handoff_path
-    think_mode = payload.think_mode
+    reasoning_effort = payload.reasoning_effort
     c = _c()
 
     _gc_buffers()
@@ -157,7 +162,7 @@ async def chat_send(request: Request):
 
     buf = {"events": [], "dropped": 0, "done": False, "started": time.time(),
            "finished": None, "size": 0, "sid": sid, "task": None,
-           "nudge": asyncio.Event(), "deep_requested": think_mode == "deep"}
+           "nudge": asyncio.Event(), "reasoning_effort": reasoning_effort}
     if crid:
         _BUFFERS[crid] = buf
 
@@ -252,7 +257,7 @@ async def chat_send(request: Request):
                                         regenerate_message_id=regen_id,
                                         location=location,
                                         handoff_path=handoff_path,
-                                        think_mode=think_mode,
+                                        reasoning_effort=reasoning_effort,
                                         edit_parent_id=_ep,
                                         edit_version_group_id=_evg):
                 try:
@@ -263,9 +268,6 @@ async def chat_send(request: Request):
                     buf["events"].append({"event": "error", "data": {
                         "code": 500, "message": "服务端事件协议错误"}})
                     break
-                if (evt.get("event") == "mode_decision"
-                        and evt.get("data", {}).get("effective_mode") == "deep"):
-                    buf["deep_delivery"] = True
                 if evt.get("event") == "delivery_progress":
                     buf["long_delivery"] = True
                 buf["events"].append(evt)
@@ -287,6 +289,45 @@ async def chat_send(request: Request):
 
     buf["task"] = asyncio.create_task(produce())
     return EventSourceResponse(_follow(buf), ping=5)
+
+
+@router.get("/chat/reasoning-efforts")
+async def reasoning_efforts():
+    """The frontend consumes the same public contract as the runtime."""
+    return {"code": 200, "data": [
+        {"value": "off", "label": "关闭推理"},
+        {"value": "low", "label": "低"},
+        {"value": "high", "label": "高"},
+        {"value": "max", "label": "最大"},
+    ]}
+
+
+@router.get("/chat/turns/{turn_id}")
+async def get_turn(turn_id: str):
+    turn = _c().core.get_turn(turn_id)
+    if not turn:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"code": 200, "data": turn}
+
+
+@router.get("/chat/turns/{turn_id}/events")
+async def get_turn_events(turn_id: str, after_seq: int = 0):
+    if not _c().core.get_turn(turn_id):
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return {"code": 200, "data": _c().core.get_turn_events(turn_id, after_seq)}
+
+
+@router.post("/chat/turns/{turn_id}/approvals/{approval_id}")
+async def decide_tool_approval(turn_id: str, approval_id: str,
+                               body: ToolApprovalDecisionRequest):
+    row = _c().core.decide_tool_approval(approval_id, body.approved)
+    if not row or row["turn_id"] != turn_id:
+        raise HTTPException(status_code=404, detail="待确认工具不存在或已处理")
+    return {"code": 200, "data": {
+        "approval_id": approval_id,
+        "turn_id": turn_id,
+        "status": row["status"],
+    }}
 
 
 class SwitchVersionRequest(BaseModel):

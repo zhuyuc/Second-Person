@@ -22,6 +22,12 @@ class ToolSpec:
     destructive: bool = False
     source: str = "builtin"           # builtin / mcp
     connector_id: str | None = None
+    # Host-owned execution metadata. The model can request a tool but never
+    # grants itself permission to perform a side effect.
+    risk_level: str = "read"          # read / write / destructive / external_side_effect
+    approval_policy: str = "never"    # never / once_per_turn / every_call
+    parallel_safe: bool = True
+    scope: dict[str, Any] | None = None
 
 
 class BaseTool:
@@ -84,6 +90,19 @@ class ToolRegistry:
                 "parameters": t.spec.parameters,
             },
         } for t in self._tools.values()]
+
+    def openai_schemas_for(self, names: set[str] | None = None) -> list[dict]:
+        """Return schemas constrained by a host-selected allowlist."""
+        if names is None:
+            return self.openai_schemas()
+        return [{
+            "type": "function",
+            "function": {
+                "name": tool.spec.name,
+                "description": tool.spec.description,
+                "parameters": tool.spec.parameters,
+            },
+        } for tool in self._tools.values() if tool.spec.name in names]
 
     def is_destructive(self, name: str) -> bool:
         t = self._tools.get(name)
