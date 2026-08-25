@@ -251,13 +251,18 @@ async def memory_feedback(request: Request):
     if kind == "stale":
         await c.lifecycle.downvote_stale(mid)
     elif kind == "incorrect":
-        row = c.palace.get(mid)
-        c.db.execute(
-            "INSERT INTO memory_governance_items(item_id,item_type,primary_memory_id,"
-            "priority,status,reason,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
-            (f"gov_{uuid.uuid4().hex[:12]}", "memory_incorrect", mid,
-             (row.get("access_count", 0) or 0) + 3, "open", "用户标记记忆内容不正确",
-             json.dumps({"query": body.get("query_text")}, ensure_ascii=False), now_iso()))
+        # 幂等：同一 memory 已有 open 的 memory_incorrect 事项则不重复入队
+        already_open = c.db.query_one(
+            "SELECT 1 FROM memory_governance_items WHERE primary_memory_id=? "
+            "AND item_type='memory_incorrect' AND status='open' LIMIT 1", (mid,))
+        if not already_open:
+            row = c.palace.get(mid)
+            c.db.execute(
+                "INSERT INTO memory_governance_items(item_id,item_type,primary_memory_id,"
+                "priority,status,reason,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (f"gov_{uuid.uuid4().hex[:12]}", "memory_incorrect", mid,
+                 (row.get("access_count", 0) or 0) + 3, "open", "用户标记记忆内容不正确",
+                 json.dumps({"query": body.get("query_text")}, ensure_ascii=False), now_iso()))
     elif kind == "helpful":
         await c.lifecycle.upvote_upgrade(mid)
     return {"code": 200, "data": {}}

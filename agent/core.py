@@ -145,7 +145,9 @@ class AgentCore:
                                step: int | None = None,
                                handoff_path: str | None = None) -> dict:
         """Load model snapshot, history, and dynamic context for this step."""
-        snap = self.providers.snapshot_for("agent") or self.providers.snapshot_for("chat")
+        # 用户主对话槽位优先：ChatView 里切换模型会写入 chat 槽位，此处必须读它；
+        # agent 槽位专供记忆蒸馏/压缩/被动回顾等后台任务，仅作 chat 未配置时的兜底
+        snap = self.providers.snapshot_for("chat") or self.providers.snapshot_for("agent")
         if not snap:
             raise RuntimeError("未配置可用对话模型")
         history = self.sessions.load_recovery_context(session_id)

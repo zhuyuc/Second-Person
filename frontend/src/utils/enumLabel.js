@@ -31,7 +31,7 @@ export const PLATFORM_MAP = { web: 'Web', feishu: '飞书', telegram: 'Telegram'
 // 用量来源
 export const SOURCE_NAMES = {
     main_chat: 'AI对话', agent: 'Agent对话', agent_step: 'Agent步骤',
-    system_agent: '系统Agent', title_gen: '标题生成', embedding: '向量分析',
+    system_agent: '系统Agent', title_gen: '标题生成',
     vision: '图片解析', tool_infer: '工具推断', handoff_summary: '交接摘要生成',
     profile_conflict: '画像冲突扫描',
 }

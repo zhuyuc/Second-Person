@@ -262,7 +262,21 @@ class LifecycleManager:
     def record_feedback(self, memory_id: str, feedback_type: str,
                         message_id: int | None = None,
                         query_text: str | None = None) -> None:
-        """记录记忆级反馈；反馈与回答总体评分分离，便于检索策略学习。"""
+        """记录记忆级反馈；幂等：同一 (memory_id, message_id, feedback_type)
+        重复调用只落一条，避免前端重复触发/网络重试污染治理队列与降权计数。"""
+        # 幂等去重：同一 (memory_id, message_id, feedback_type) 已记则跳过
+        if message_id is None:
+            dup = self.db.query_one(
+                "SELECT 1 FROM memory_feedback WHERE memory_id=? "
+                "AND message_id IS NULL AND feedback_type=? LIMIT 1",
+                (memory_id, feedback_type))
+        else:
+            dup = self.db.query_one(
+                "SELECT 1 FROM memory_feedback WHERE memory_id=? "
+                "AND message_id=? AND feedback_type=? LIMIT 1",
+                (memory_id, message_id, feedback_type))
+        if dup:
+            return
         now = now_cst().isoformat(timespec="seconds")
         self.db.execute(
             "INSERT INTO memory_feedback(memory_id,message_id,feedback_type,"
@@ -273,16 +287,22 @@ class LifecycleManager:
                 "UPDATE memories SET retrieval_negative_count="
                 "COALESCE(retrieval_negative_count, 0) + 1 WHERE id=?",
                 (memory_id,))
-            row = self.palace.get(memory_id)
-            if row:
-                priority = (row["access_count"] or 0) + 1
-                self.db.execute(
-                    "INSERT INTO memory_governance_items(item_id,item_type,"
-                    "primary_memory_id,priority,status,reason,detail_json,created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
-                    (f"gov_{uuid.uuid4().hex[:12]}", "retrieval_irrelevant",
-                     memory_id, priority, "open", "用户标记本轮检索无关",
-                     json.dumps({"query": query_text}, ensure_ascii=False), now))
+            # 治理队列同样幂等：同一 memory 已有 open 事项则不再新建
+            already_open = self.db.query_one(
+                "SELECT 1 FROM memory_governance_items WHERE primary_memory_id=? "
+                "AND item_type='retrieval_irrelevant' AND status='open' LIMIT 1",
+                (memory_id,))
+            if not already_open:
+                row = self.palace.get(memory_id)
+                if row:
+                    priority = (row["access_count"] or 0) + 1
+                    self.db.execute(
+                        "INSERT INTO memory_governance_items(item_id,item_type,"
+                        "primary_memory_id,priority,status,reason,detail_json,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?)",
+                        (f"gov_{uuid.uuid4().hex[:12]}", "retrieval_irrelevant",
+                         memory_id, priority, "open", "用户标记本轮检索无关",
+                         json.dumps({"query": query_text}, ensure_ascii=False), now))
 
     def record_retrieval_event(self, session_id: str | None, message_id: int | None,
                                query: str, diagnostics: dict) -> None:

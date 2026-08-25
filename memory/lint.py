@@ -233,15 +233,6 @@ class LintEngine:
             logger.info("目录漂移修复：同步 %d 条索引", fixed)
         return fixed
 
-    # ---- 待确认检测：confidence=low 超 30 天 ------------------------------
-    def detect_low_unconfirmed(self) -> list[str]:
-        cutoff = (now_cst() - timedelta(days=30)
-                  ).isoformat(timespec="seconds")
-        rows = self.db.query_all(
-            "SELECT id FROM memories WHERE confidence='low' "
-            "AND (created_at < ? OR created_at IS NULL)", (cutoff,))
-        return [r["id"] for r in rows]
-
     def lint_details(self, counts: dict) -> list[dict]:
         # 孤立建议：查 primary_memory_id → 取 title/summary
         orphans = self.db.query_all(
@@ -265,6 +256,17 @@ class LintEngine:
                      "memory_b": {"id": r["related_memory_id"],
                                   "title": r["t2"] or r["related_memory_id"],
                                   "summary": r["s2"] or ""}} for r in dups]
+        # 低置信未确认：暴露具体条目，前端可直接查看/确认
+        cutoff = (now_cst() - timedelta(days=30)
+                  ).isoformat(timespec="seconds")
+        low_rows = self.db.query_all(
+            "SELECT id, title, summary, created_at FROM memories "
+            "WHERE confidence='low' AND (created_at < ? OR created_at IS NULL) "
+            "ORDER BY created_at ASC LIMIT 50", (cutoff,))
+        open_low = [{"id": r["id"], "memory_id": r["id"],
+                     "title": r["title"] or r["id"],
+                     "summary": r["summary"] or "",
+                     "created_at": r["created_at"] or ""} for r in low_rows]
         return [
             {"check": "过期检测", "desc": "90 天未访问", "count": counts["stale"],
              "status": "ok" if counts["stale"] == 0 else "warning"},
@@ -278,7 +280,9 @@ class LintEngine:
              "suggestion_ids": open_dup},
             {"check": "低置信度未确认", "desc": "confidence=low 且超 30 天",
              "count": counts["low_unconfirmed"],
-             "status": "ok" if counts["low_unconfirmed"] == 0 else "info"},
+             "status": "ok" if counts["low_unconfirmed"] == 0 else "info",
+             "actionable": counts["low_unconfirmed"] > 0,
+             "suggestion_ids": open_low},
             {"check": "missing 记忆", "desc": "md 文件缺失", "count": counts["missing"],
              "status": "ok" if counts["missing"] == 0 else "warning"},
             {"check": "failed 写入", "desc": "pending_writes 状态 failed",

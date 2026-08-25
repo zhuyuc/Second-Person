@@ -416,12 +416,11 @@ class SessionStore:
             pass
 
     # ---- 会话恢复（Head-Summary-Tail） -----------------------------------
-    def load_recovery_context(self, sid: str,
-                              head_protected_rounds: int = 2) -> list[dict]:
+    def load_recovery_context(self, sid: str) -> list[dict]:
         """返回消息列表（含 id 字段供压缩水位推进，送 LLM 前需剔除）。
 
         仅加载当前活跃分支的消息（is_active=1）。
-        Head：会话最初 head_protected_rounds 轮（存在压缩摘要时才拼入）；
+        Head：会话最初 2 轮（存在压缩摘要时才拼入）；
         Summary：压缩摘要（有则拼入）；Tail：水位之后的全部原文。
         """
         row = self.db.query_one(
@@ -436,7 +435,7 @@ class SessionStore:
                 _, summary_text = split_frontmatter(
                     p.read_text(encoding="utf-8"))
         watermark = row["last_compressed_message_id"]
-        head_msgs = head_protected_rounds * 2  # 轮 → 条
+        head_msgs = 4  # 2 轮 × 每轮 2 条（user + assistant）
 
         # 活跃分支过滤条件
         active_filter = "AND (is_active=1 OR is_active IS NULL)"

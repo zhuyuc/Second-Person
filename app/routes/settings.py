@@ -389,9 +389,22 @@ async def usage_distribution(source: str = "", model: str = ""):
     mdl = c.db.query_all(
         "SELECT model_name, SUM(input_tokens+output_tokens) t FROM token_usage "
         "WHERE 1=1" + extra + " GROUP BY model_name", eargs)
+    by_model = [{"name": r["model_name"], "tokens": r["t"]} for r in mdl]
+    # 无筛选态下，补齐"已配置但暂无消耗"的模型（tokens=0），
+    # 让筛选下拉和列表能提前看到新加入的 provider，无需等第一次调用；
+    # embedding 槽位的 provider 不产生 token_usage 记录，排除掉避免混淆
+    if not source and not model:
+        seen = {m["name"] for m in by_model}
+        for r in c.db.query_all(
+                "SELECT DISTINCT model_id FROM providers "
+                "WHERE id NOT IN (SELECT provider_id FROM model_assignment "
+                "WHERE task_type='embedding')"):
+            mid = r["model_id"]
+            if mid and mid not in seen:
+                by_model.append({"name": mid, "tokens": 0})
     return {"code": 200, "data": {
         "by_source": [{"name": r["source"], "tokens": r["t"]} for r in src],
-        "by_model": [{"name": r["model_name"], "tokens": r["t"]} for r in mdl]}}
+        "by_model": by_model}}
 
 
 @router.get("/settings/usage/trend")

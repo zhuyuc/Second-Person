@@ -241,6 +241,11 @@ async function acceptSug(id) {
   await refreshMemoryViews()
 }
 async function dismissSug(id) { await api.post('/memory/lint/suggestions/dismiss', { suggestion_id: id, reason: 'not_duplicate' }); await refreshMemoryViews() }
+async function confirmLowConf(memory_id) {
+  await api.put(`/memory/${memory_id}/attributes`, { confidence: 'medium' })
+  await refreshMemoryViews()
+  toast.push('success', '已确认，置信度升级为中')
+}
 async function resolveConflict(cid, res) {
   await api.post('/memory/conflicts/resolve', { conflict_id: cid, resolution: res })
   conflictCompare.value = null
@@ -822,6 +827,7 @@ onActivated(() => selectTab(tab.value))
           <template v-if="chk.check === '孤立检测'">{{ sug.title || sug }}</template>
           <template v-else-if="chk.check === '重复检测'">{{ sug.memory_a?.title || sug.memory_a?.id }} ↔ {{
             sug.memory_b?.title || sug.memory_b?.id }}</template>
+          <template v-else-if="chk.check === '低置信度未确认'">{{ sug.title }}</template>
           <template v-else>{{ sug.id || sug }}</template>
         </span>
         <div class="lint-sug-actions">
@@ -829,6 +835,11 @@ onActivated(() => selectTab(tab.value))
               class="ti ti-eye"></i> 查看</button>
           <template v-if="chk.check === '重复检测'">
             <button class="btn-xs" @click="openDupCompare(sug)"><i class="ti ti-columns"></i> 对比查看</button>
+          </template>
+          <template v-else-if="chk.check === '低置信度未确认'">
+            <button class="btn-xs" @click="openDetail(sug.memory_id)"><i class="ti ti-eye"></i> 查看</button>
+            <button class="btn-xs btn-primary" :disabled="busy('low' + sug.memory_id)"
+              @click="run('low' + sug.memory_id, () => confirmLowConf(sug.memory_id))">确认</button>
           </template>
           <template v-else>
             <button class="btn-xs" :disabled="busy('sug' + (sug.id || sug))"
