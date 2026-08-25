@@ -26,12 +26,13 @@ logger = logging.getLogger("second_person.sysagent")
 # 回顾 Agent
 # ---------------------------------------------------------------------------
 class ReviewAgent:
-    def __init__(self, db, distiller, config, data_dir=None):
+    def __init__(self, db, distiller, config, data_dir=None, memory_gate=None):
         self.db = db
         self.distiller = distiller
         self.config = config
         from pathlib import Path
         self.data_dir = Path(data_dir) if data_dir else None
+        self.memory_gate = memory_gate
 
     async def run(self) -> int:
         """读近 N 天对话原文 + 会话压缩摘要 + 新导入文档 → Distiller。
@@ -71,6 +72,9 @@ class ReviewAgent:
         total += await self._distill_recent_docs(cutoff)
         # 4) 主动记忆检测候选：窗口外的单独补提炼（窗口内已被第 1 步覆盖）
         total += await self._distill_review_candidates(cutoff)
+        # 候选经过跨会话证据/用户确认后才允许进入 L3。
+        if self.memory_gate is not None:
+            total += await self.memory_gate.promote_ready(self.distiller)
         # 发布 review.completed 事件（提炼出记忆时视为有效完成）
         if total > 0:
             from app.main import get_container
@@ -84,7 +88,7 @@ class ReviewAgent:
         return total
 
     async def _distill_review_candidates(self, cutoff: str) -> int:
-        """消费 review_candidates：第 8 步标记的含新事实消息优先提炼后清表。"""
+        """兼容消费旧 review_candidates，并转换为新候选池。"""
         try:
             rows = self.db.query_all(
                 "SELECT rc.message_id, c.content, c.create_time FROM review_candidates rc "
@@ -96,9 +100,20 @@ class ReviewAgent:
             if (r["create_time"] or "") >= cutoff:
                 continue  # 窗口内的已由全量扫描覆盖
             try:
-                written = await self.distiller.distill(
-                    f"user: {r['content']}", source_type="memory")
-                total += len(written)
+                if self.memory_gate is not None:
+                    self.memory_gate.enqueue(
+                        {"title": str(r["content"] or "")[:30],
+                         "summary": str(r["content"] or "")[:200],
+                         "detail": str(r["content"] or ""),
+                         "attribution": "verified", "domain": "general"},
+                        "memory", evidence={"source_type": "conversation",
+                                              "source_ref": str(r["message_id"]),
+                                              "excerpt": str(r["content"] or "")[:500],
+                                              "captured_at": r["create_time"]})
+                else:
+                    written = await self.distiller.distill(
+                        f"user: {r['content']}", source_type="memory")
+                    total += len(written)
             except Exception:  # noqa: BLE001
                 logger.warning("回顾候选提炼失败：msg=%s",
                                r["message_id"], exc_info=True)

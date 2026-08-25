@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -76,6 +78,41 @@ def test_success_response_keeps_code_data_envelope(client: TestClient):
     assert body["data"]["session_id"]
 
 
+def test_new_session_uses_new_chat_title_placeholder(client: TestClient):
+    created = client.post("/api/chat/session/create").json()["data"]
+    sessions = client.get("/api/chat/sessions?page_size=500").json()["data"]["list"]
+
+    session = next(s for s in sessions if s["session_id"] == created["session_id"])
+
+    assert session["title"] == "新对话"
+    assert session["title_source"] == "auto"
+
+
+def test_generated_title_replaces_new_chat_placeholder():
+    class _Providers:
+        def snapshot_for(self, _role):
+            return {"model": "test-model"}
+
+    class _Llm:
+        async def chat(self, *_args, **_kwargs):
+            return {"content": '{"title":"模型生成标题"}'}
+
+    class _Sessions:
+        def __init__(self):
+            self.titles = []
+
+        def set_auto_title(self, sid, title):
+            self.titles.append((sid, title))
+
+    sessions = _Sessions()
+    container = SimpleNamespace(
+        providers=_Providers(), llm=_Llm(), sessions=sessions)
+
+    asyncio.run(chat._gen_title(container, "sess_title_test", "用户的原始提问"))
+
+    assert sessions.titles == [("sess_title_test", "模型生成标题")]
+
+
 @pytest.mark.parametrize("payload", [
     {"message": 123},
     {"message": "测试", "edit_message_id": "bad-id"},
@@ -88,8 +125,6 @@ def test_chat_send_rejects_invalid_request_fields(client: TestClient, payload: d
 
 @pytest.mark.parametrize("payload, expected", [
     ({}, "high"),
-    ({"think_mode": "quick"}, "low"),
-    ({"think_mode": "deep"}, "max"),
     ({"reasoning_effort": "off"}, "off"),
     ({"reasoning_effort": "max"}, "max"),
 ])

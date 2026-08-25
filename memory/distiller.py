@@ -22,6 +22,7 @@ import logging
 from datetime import timedelta
 from typing import Any, Awaitable, Callable
 from infrastructure.timeutil import now_cst
+from .write_gate import MemoryWriteGate
 
 logger = logging.getLogger("second_person.distiller")
 
@@ -60,7 +61,8 @@ class Distiller:
                  soul_feedback_fn: Callable[[dict],
                                             Awaitable[None]] | None = None,
                  merge_judge_fn: Callable[[dict, dict],
-                                          Awaitable[dict]] | None = None):
+                                          Awaitable[dict]] | None = None,
+                 memory_gate: MemoryWriteGate | None = None):
         self.db = db
         self.palace = palace
         self.vs = vector_store
@@ -73,6 +75,7 @@ class Distiller:
         self.skill_draft_fn = skill_draft_fn
         self.soul_feedback_fn = soul_feedback_fn
         self.merge_judge_fn = merge_judge_fn
+        self.memory_gate = memory_gate or MemoryWriteGate(db, config)
         # 回溯去重本次会话已删除的重复条目（FileWriter 删除异步，
         # 删除未落库前 palace.get 仍可返回行，靠此集合避免重复处理）。
         self._rededup_deleted: set[str] = set()
@@ -87,6 +90,14 @@ class Distiller:
             # session_fact/skill 而丢弃（参见 project_tech_stack 记忆）
             if source_type == "knowledge":
                 item["attribution"] = "imported"
+            # 非显式对话提炼只生成候选，不允许绕过候选池直接进入 L3。
+            if source_type == "memory" and item.get("attribution", "verified") \
+                    in {"verified", "inferred"}:
+                self.memory_gate.enqueue(
+                    item, source_type, evidence={"source_type": "conversation",
+                                                  "excerpt": str(text)[:500],
+                                                  "captured_at": now_cst().isoformat(timespec="seconds")})
+                continue
             mid = await self._route(item, source_type)
             if mid:
                 written.append(mid)
@@ -109,10 +120,12 @@ class Distiller:
             preview.append(item)
         return preview
 
-    async def write_item(self, item: dict, source_type: str = "knowledge") -> str | None:
+    async def write_item(self, item: dict, source_type: str = "knowledge",
+                         *, force_write: bool = True) -> str | None:
         """预览确认后写入单条（归属已判定，直接走记忆写入路径）。"""
         attribution = item.get("attribution", "imported")
-        return await self._write_memory(item, attribution, source_type)
+        return await self._write_memory(item, attribution, source_type,
+                                        force_write=force_write)
 
     async def _route(self, item: dict[str, Any], source_type: str) -> str | None:
         attribution = item.get("attribution", "verified")
@@ -129,7 +142,8 @@ class Distiller:
         # verified / inferred / imported → 写记忆
         return await self._write_memory(item, attribution, source_type)
 
-    async def _write_memory(self, item: dict, attribution: str, source_type: str) -> str | None:
+    async def _write_memory(self, item: dict, attribution: str, source_type: str,
+                            *, explicit: bool = False, force_write: bool = False) -> str | None:
         title = item.get("title", "").strip()[:30]
         if not title:
             title = (item.get("summary", "") or item.get("detail", ""))[:30].strip()
@@ -141,6 +155,20 @@ class Distiller:
         confidence = item.get("confidence") or ATTRIBUTION_CONFIDENCE.get(
             attribution, "medium")
         stype = "knowledge" if attribution == "imported" else source_type
+        decision = self.memory_gate.evaluate(
+            item, source_type, explicit=explicit,
+            evidence_count=int(item.get("evidence_count") or 1))
+        # 强制落盘只用于用户已确认的候选/导入操作，不能绕过敏感和会话级硬阻断。
+        if decision.sensitivity == "high" or decision.channel == "session_only":
+            return None
+        if not decision.allowed and not force_write:
+            if decision.status == "pending":
+                self.memory_gate.enqueue(item, source_type,
+                                         evidence_count=int(item.get("evidence_count") or 1))
+            return None
+        item["write_channel"] = item.get("write_channel") or decision.channel
+        item["write_score"] = item.get("write_score", decision.score)
+        item["sensitivity_level"] = decision.sensitivity
 
         # 取向量（同步，不入队列）
         embedding = None
@@ -271,6 +299,12 @@ class Distiller:
             "usefulness_score": 0,
             "valid_from": now.strftime("%Y-%m-%d"),
             "review_after": review_after,
+            "write_channel": item.get("write_channel", "system"),
+            "write_score": item.get("write_score", 0),
+            "evidence_count": item.get("evidence_count", 0),
+            "last_verified_at": now.isoformat(timespec="seconds") if verification_state == "direct" else None,
+            "expires_at": item.get("expires_at"),
+            "sensitivity_level": item.get("sensitivity_level", "none"),
             "evidence_refs": item.get("evidence_refs", []),
         }
         await self.fw.submit("memory", {

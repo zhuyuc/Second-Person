@@ -45,8 +45,8 @@ createdb -U postgres langfuse
 重启 Second Person（`python start.py`）后发起对话，几秒后在 `http://localhost:3001` 的 Tracing 页即可看到 `chat.turn` 完整流转树。
 
 > 说明：Second Person 用的是与 Langfuse v2 完全匹配的 Ingestion API（`/api/public/ingestion`）上报，
-> 埋点已覆盖对话八步（context_load / memory_retrieval / intent_parse / tool_execution /
-> response_synthesis / post_process）与每次 LLM 调用（generation，含 token 用量）。
+> 埋点覆盖事件化对话运行时（context.assemble / agent.step / agent.decision /
+> tool_execute / handoff.summary_generation）与每次 LLM 调用（generation，含 token 用量）。
 
 ## 常见问题
 

@@ -38,13 +38,14 @@ from memory.palace import Palace
 from memory.retriever import Retriever
 from memory.vector_compensator import VectorCompensator
 from memory.vector_store import VectorStore
+from memory.write_gate import MemoryWriteGate
 from user_profile.profile_manager import ProfileManager
 from scheduler.backup import BackupManager
 from scheduler.folder_scan import FolderScanner
 from scheduler.ingest import IngestManager
 from scheduler.scheduler import TaskScheduler
 from agent.session_context import SessionStore
-from agent.response_synthesizer import SignalCollector
+from agent.response_signals import SignalCollector
 from soul.skill_manager import SkillManager
 from soul.soul_manager import SoulManager
 from soul.mood_manager import MoodManager
@@ -61,6 +62,7 @@ from infrastructure.timeutil import now_cst
 logger = logging.getLogger("second_person.container")
 
 DISTILL_PROMPT = PROMPTS.load_raw("app/prompts/distill")
+MEMORY_CANDIDATE_PROMPT = PROMPTS.load_raw("agent/prompts/memory_candidate_extract")
 DISTILL_DOC_PROMPT = PROMPTS.load_raw("app/prompts/distill_document")
 EXTRACT_IMAGE_PROMPT = PROMPTS.load_raw("app/prompts/extract_image")
 EXTRACT_IMAGE_USER_PROMPT = PROMPTS.load_raw("app/prompts/extract_image_user")
@@ -246,14 +248,17 @@ class AppContainer:
         self.lifecycle = LifecycleManager(
             self.db, self.palace, self.fw, d, self.config)
         self.lint = LintEngine(self.db, self.palace, self.vs, self.config)
+        self.memory_gate = MemoryWriteGate(self.db, self.config)
 
         # ---- Distiller 提取回调 ----
         async def extract_fn(text: str, source_type: str = "memory") -> dict:
             snap = self.providers.snapshot_for("agent")
             if snap is None:
                 return {"items": []}
-            # 文档/知识导入用专用 prompt，对话场景仍用个人事实提炼 prompt
-            prompt = DISTILL_DOC_PROMPT if source_type == "knowledge" else DISTILL_PROMPT
+            # 文档/知识导入用专用 prompt；对话提炼只产出候选，不直接写 L3。
+            prompt = (DISTILL_DOC_PROMPT if source_type == "knowledge"
+                      else MEMORY_CANDIDATE_PROMPT if source_type == "memory"
+                      else DISTILL_PROMPT)
             resp = await self.llm.chat(
                 snap, [{"role": "system", "content": prompt},
                        {"role": "user", "content": text}], source="system_agent",
@@ -392,7 +397,7 @@ class AppContainer:
             self.db, self.palace, self.vs, self.fw, self.linker, self.conflict,
             self.config, extract_fn=extract_fn, embed_fn=embed_fn,
             skill_draft_fn=skill_draft_fn, soul_feedback_fn=soul_feedback_fn,
-            merge_judge_fn=merge_judge_fn)
+            merge_judge_fn=merge_judge_fn, memory_gate=self.memory_gate)
         # 向量补偿协程回填向量后回调 Distiller 做回溯去重（修复提炼当刻
         # Embedding 不可用造成的重复记忆）。compensator 先于 distiller 构造，故在此接线。
         self.vector_compensator.rededup_fn = self.distiller.rededup_memory
@@ -419,7 +424,8 @@ class AppContainer:
                                self.config.get_raw("workspace_whitelist", []))
         register_builtins(self.registry, palace=self.palace, retriever=self.retriever,
                           file_writer=self.fw, sandbox=self.sandbox, data_dir=d,
-                          config=self.config, llm=self.llm, providers=self.providers)
+                          config=self.config, llm=self.llm, providers=self.providers,
+                          memory_gate=self.memory_gate)
         self.connectors = ConnectorManager(self.db, self.creds, self.registry)
 
         # ---- Agent Core ----
@@ -435,10 +441,12 @@ class AppContainer:
             file_writer=self.fw, skill_manager=self.skills, event_bus=self.bus,
             notifier=notifier, mood_manager=self.mood,
             mood_trigger=self.mood_trigger,
-            mood_action_dispatcher=self.mood_action_dispatcher)
+            mood_action_dispatcher=self.mood_action_dispatcher,
+            memory_gate=self.memory_gate)
 
         # ---- 系统 Agent ----
-        self.reviewer = ReviewAgent(self.db, self.distiller, self.config, d)
+        self.reviewer = ReviewAgent(self.db, self.distiller, self.config, d,
+                                    memory_gate=self.memory_gate)
         self.lint_agent = LintAgent(self.lint, self.lifecycle, self.skills,
                                     self.palace, self.conflict, self.bus,
                                     judge_fn=self.merge_judge_fn, data_dir=d,
@@ -582,10 +590,6 @@ class AppContainer:
         s.register_task("profile_review_scan", "画像审核队列维护",
                         lambda: self.profile_review_scanner.daily_scan(),
                         "每天 04:30")
-        # 追问过期扫描：每 5 分钟清理过期 elicitation
-        s.register_task("elicit_expire", "追问过期扫描",
-                        lambda: self._elicit_expire_scan(),
-                        "每 5 分钟")
 
     async def _profile_rebuild_with_scan(self) -> bool:
         """画像重建 + 冲突检测（整合版）。
@@ -610,15 +614,6 @@ class AppContainer:
             except Exception:
                 logger.warning("画像冲突检测失败", exc_info=True)
         return True
-
-    def _elicit_expire_scan(self) -> None:
-        """扫描过期的 pending elicitation，更新状态为 expired。"""
-        import time
-        now = int(time.time())
-        self.db.execute(
-            "UPDATE elicitations SET status='expired', resolved_at=? "
-            "WHERE status='pending' AND expires_at < ?",
-            (now, now))
 
     # ---- 生命周期 ----
     def _ensure_local_embedding_provider(self) -> None:

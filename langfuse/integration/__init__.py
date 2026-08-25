@@ -1,5 +1,5 @@
 """
-Langfuse 集成（可观测性）—— 将 Second Person 的对话流水线全链路上报到 Langfuse。
+Langfuse 集成（可观测性）—— 将事件化 Agent 运行时全链路上报到 Langfuse。
 
 注意：本包**不依赖** pip 的 langfuse SDK，而是直接对接
 Langfuse 官方 Ingestion REST API（POST /api/public/ingestion，Basic Auth）。

@@ -10,7 +10,6 @@ import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
 import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import HandoffAttachment from '@/components/HandoffAttachment.vue'
-import ElicitationCard from '@/components/ElicitationCard.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
 import { formatRelative, formatTimeFull, fmtSize, nowLocalIso, friendlyError } from '@/utils/format'
@@ -68,6 +67,9 @@ const input = ref('')
 const generating = ref(false)
 const streamText = ref('')
 const thinkText = ref('')     // 安全分析摘要与进度，不展示模型原生推理
+const reasoningText = ref('') // Provider 明确返回的 reasoning block
+const decisionNotices = ref([])
+const toolEvents = ref([])
 const thinkOpen = ref(true)   // 处理进度面板：生成中展开，正文首字出现后自动折叠
 const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认收起
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
@@ -76,8 +78,6 @@ const degraded = ref(false)
 const scroller = ref(null)
 const ta = ref(null)          // 输入框，用于自适应高度
 
-// 追问状态（elicitation）
-const activeElicitation = ref(null)  // { toolUseId, questions, reason } | null
 const pendingToolApproval = ref(null)
 const thresholdBreached = ref(null)  // null / 'soft' / 'hard'
 const softToastShown = ref(false)
@@ -124,11 +124,30 @@ async function loadProviders() {
   // 若当前 chat 分配指向被隐藏的模型，回退到首个可用模型
   const cur = a.chat_model?.provider_id
   chatModelId.value = providers.value.some(p => p.id === cur) ? cur : (providers.value[0]?.id ?? null)
+  await loadModelCapabilities()
+}
+async function loadModelCapabilities() {
+  try {
+    // Keep the selector compatible with an already-running older backend:
+    // this endpoint predates the richer model-capabilities projection and is
+    // now backed by the same provider capability catalog.
+    const result = await api.get('/chat/reasoning-efforts')
+    const values = Array.isArray(result)
+      ? result.map(item => item.value).filter(Boolean)
+      : (result?.reasoning_efforts || [])
+    reasoningOptions.value = values.length
+      ? REASONING_EFFORT_OPTIONS.filter(item => values.includes(item.value))
+      : [...REASONING_EFFORT_OPTIONS]
+    if (!reasoningOptions.value.some(item => item.value === reasoningEffort.value)) {
+      reasoningEffort.value = reasoningOptions.value[0]?.value || 'off'
+    }
+  } catch { reasoningOptions.value = [...REASONING_EFFORT_OPTIONS] }
 }
 async function switchModel(pid) {
   chatModelId.value = pid
   // 仅切换对话模型，不动 agent 模型分配（设置页的精细分配不被覆盖）
   await api.put('/settings/model-assignment', { chat_model: pid })
+  await loadModelCapabilities()
   toast.push('success', '已切换，下一轮对话生效')
 }
 
@@ -140,9 +159,10 @@ const REASONING_EFFORT_OPTIONS = [
   { value: 'high', label: '高推理' },
   { value: 'max', label: '最大推理' },
 ]
+const reasoningOptions = ref([...REASONING_EFFORT_OPTIONS])
 const reasoningEffortLabel = computed(() =>
-  (REASONING_EFFORT_OPTIONS.find(m => m.value === reasoningEffort.value)
-    || REASONING_EFFORT_OPTIONS[2]).label)
+  (reasoningOptions.value.find(m => m.value === reasoningEffort.value)
+    || reasoningOptions.value[0] || REASONING_EFFORT_OPTIONS[2]).label)
 const reasoningEffortCompactLabel = computed(() => ({
   off: 'Off', low: 'Low', high: 'High', max: 'Max',
 }[reasoningEffort.value] || 'High'))
@@ -220,6 +240,9 @@ async function tryReattach(sid) {
     streamSid.value = sid
     streamText.value = ''
     thinkText.value = ''
+    reasoningText.value = ''
+    decisionNotices.value = []
+    toolEvents.value = []
     thinkOpen.value = true
     // 重挂后删掉尾部尚未完成的那轮用户消息渲染冗余风险低：回放事件仅重建流式区
     await sse.send({
@@ -463,6 +486,8 @@ async function send() {
   if (!sessStore.currentSid) {
     const d = await api.post('/chat/session/create', {})
     sessStore.setCurrent(d.session_id)
+    sessStore.ensurePlaceholder(d.session_id)
+    sessStore.scheduleTitleRefresh(d.session_id)
     messages.value = []
   }
   // handoff 附件路径：新会话首条消息携带
@@ -477,13 +502,6 @@ async function send() {
     backendMsg = blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
   }
   if (!backendMsg && imgs.length) backendMsg = '请看图并回应。'
-  // 追问上下文：有活跃 elicitation 时先关闭再发送
-  if (activeElicitation.value) {
-    const toolUseId = activeElicitation.value.toolUseId
-    activeElicitation.value = null
-    try { await api.post(`/chat/elicitations/${toolUseId}/close`, { answers: [] }) } catch { }
-    await new Promise(r => setTimeout(r, 100))
-  }
   // 气泡附件：保留粘贴全文与原始 File，供发送后点击弹窗回看/下载
   const bubbleAtts = attachments.value.filter(a => !a.isImage).map(a => ({
     name: a.name, pasted: !!a.pasted,
@@ -550,45 +568,34 @@ function pushStreamText(text) {
 }
 
 function handleEvent(ev, data) {
-  // memory_retrieved 保留事件兼容，检索结果已由后端并入 thinking_delta 展示
-  if (ev === 'thinking_delta') { thinkText.value += data.text; maybeScroll(); scrollThink() }
+  if (ev === 'reasoning_delta') {
+    reasoningText.value += data.text || ''
+    maybeScroll(); scrollThink()
+  }
   else if (ev === 'content_delta') {
     pushStreamText(data.text)
   }
   // turn_started / step_started 仍作为事件对下游可见（回放、可观测性），
   // 但不再作为文案追加到思考面板：对读者零信息量，与后端持久化对齐。
   else if (ev === 'tool_executing') {
-    thinkText.value += `【工具】正在执行 ${data.tool_name}\n`
+    toolEvents.value.push({ type: ev, ...data })
     maybeScroll(); scrollThink()
   }
   else if (ev === 'tool_result') {
-    thinkText.value += `【工具】${data.tool_name}${data.ok ? '已完成' : '未完成'}\n`
+    toolEvents.value.push({ type: ev, ...data })
     maybeScroll(); scrollThink()
   }
   else if (ev === 'tool_pending_approval') {
     pendingToolApproval.value = data
-    thinkText.value += `【工具】等待确认：${data.tool_name}\n`
+    toolEvents.value.push({ type: ev, ...data })
     maybeScroll(); scrollThink()
   }
-  else if (ev === 'analysis_progress') {
-    if (data.stage === 'problem_model' && data.status === 'completed') {
-      const count = data.summary?.requirement_count || 0
-      thinkText.value += `【问题建模】已识别 ${count} 项明确需求\n`
-    } else if (data.stage === 'delivery') {
-      thinkText.value += `【深度交付】${data.status === 'completed' ? '章节整合完成' : '正在分节生成'}\n`
-    }
+  else if (ev === 'tool_blocked') {
+    toolEvents.value.push({ type: ev, ...data })
     maybeScroll(); scrollThink()
   }
-  else if (ev === 'delivery_progress') {
-    if (data.total) {
-      thinkText.value += `【深度交付】${data.current || 0}/${data.total}${data.title ? '：' + data.title : ''}\n`
-      maybeScroll(); scrollThink()
-    }
-  }
-  else if (ev === 'quality_status') {
-    const done = data.covered || 0
-    const total = data.total || 0
-    thinkText.value += `【质量校验】${data.passed ? '通过' : '正在补齐'}${total ? `（${done}/${total} 项需求已覆盖）` : ''}\n`
+  else if (ev === 'decision_notice') {
+    decisionNotices.value.push(data)
     maybeScroll(); scrollThink()
   }
   else if (ev === 'citations') lastCitations = data.refs
@@ -598,16 +605,8 @@ function handleEvent(ev, data) {
   else if (ev === 'turn_completed') {
     streamAnalysisMetadata = data.analysis_metadata || streamAnalysisMetadata
     finishStream(data.message_id)
-    // 清理追问状态
-    activeElicitation.value = null
     pendingToolApproval.value = null
     if (data.threshold) handleThreshold(data.threshold)
-  }
-  else if (ev === 'elicitation') {
-    activeElicitation.value = { toolUseId: data.tool_use_id, questions: data.questions, reason: data.reason }
-  }
-  else if (ev === 'elicitation_status') {
-    if (data.status === 'done' || data.status === 'closed' || data.status === 'expired') activeElicitation.value = null
   }
   else if (ev === 'error') { pendingToolApproval.value = null; toast.push('error', friendlyError(data.message)); finishStream() }
   // handoff 摘要就绪（会话上下文管理方案 v2）
@@ -645,10 +644,11 @@ function finishStream(msgId) {
   flushStreamText()
   // 跨会话保护：用户已切到其他会话时不把回复插进当前列表
   //（回复已按 session 落库，切回原会话时 openSession 会重新加载）
-  const sameSession = streamSid.value === sessStore.currentSid
+  const finishedSid = streamSid.value
+  const sameSession = finishedSid === sessStore.currentSid
   // 中断终止（停止/出错/断连，无 msgId）时已输出的内容必须保留：
   // 哪怕只输出了处理进度也要留下，否则流式区一清空内容就全部丢失
-  if ((streamText.value || thinkText.value) && sameSession) {
+  if ((streamText.value || thinkText.value || reasoningText.value || decisionNotices.value.length || toolEvents.value.length) && sameSession) {
     const body = stripTail(streamText.value, streamVisuals.value)
     const m = {
       id: msgId, role: 'assistant',
@@ -656,13 +656,20 @@ function finishStream(msgId) {
       citations: lastCitations, feedback: 0,
       create_time: nowLocalIso(),
       thinking: thinkText.value || '', thinkOpen: false,
-      analysis_metadata: streamAnalysisMetadata,
+      analysis_metadata: streamAnalysisMetadata || {
+        schema_version: 'agent-analysis-v1', reasoning_text: reasoningText.value,
+        system_progress: thinkText.value, decision_notices: decisionNotices.value,
+        tool_events: toolEvents.value, reasoning_available: !!reasoningText.value,
+      },
       visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
     }
     messages.value.push(m)
   }
   streamText.value = ''
   thinkText.value = ''
+  reasoningText.value = ''
+  decisionNotices.value = []
+  toolEvents.value = []
   streamVisuals.value = []
   thinkOpen.value = true
   lastCitations = []
@@ -670,12 +677,10 @@ function finishStream(msgId) {
   degraded.value = false
   generating.value = false
   streamSid.value = null
-  sessStore.load()
+  sessStore.scheduleTitleRefresh(finishedSid)
   // 长文的 SSE 缓冲可能只保留末段。turn_completed 后以持久化消息回载，
   // 保证页面显示的是完整交付而不是传输缓存的残片。
   if (msgId && sameSession) reloadMessages(sessStore.currentSid)
-    // 标题由后端并行异步生成（总结首条提问），在 5s 内多次轻量轮询拉取新标题
-    ;[1200, 2500, 4000].forEach(ms => setTimeout(() => sessStore.load(), ms))
   maybeScroll()
 }
 
@@ -779,6 +784,9 @@ async function submitEdit(msg) {
   streamSid.value = sessStore.currentSid
   streamText.value = ''
   thinkText.value = ''
+  reasoningText.value = ''
+  decisionNotices.value = []
+  toolEvents.value = []
   thinkOpen.value = true
   maybeScroll()
   await sse.send({
@@ -844,6 +852,9 @@ async function regenerate(msg) {
   streamSid.value = sessStore.currentSid
   streamText.value = ''
   thinkText.value = ''
+  reasoningText.value = ''
+  decisionNotices.value = []
+  toolEvents.value = []
   thinkOpen.value = true
   maybeScroll()
   await sse.send({
@@ -1031,6 +1042,9 @@ function resetToHome() {
   messages.value = []
   streamText.value = ''
   thinkText.value = ''
+  reasoningText.value = ''
+  decisionNotices.value = []
+  toolEvents.value = []
   streamVisuals.value = []
   input.value = ''
   clearAttachments()
@@ -1236,13 +1250,26 @@ onUnmounted(() => {
             <div v-else class="msg-ai">
               <div class="avatar"><i class="ti ti-brain"></i></div>
               <div class="body">
-                <!-- 安全处理进度（默认折叠，点击展开） -->
-                <div v-if="m.thinking" class="think-panel">
+                <!-- Legacy messages keep the old mixed text; new messages use
+                     structured provider/host lanes below. -->
+                <div v-if="m.thinking && m.analysis_metadata?.schema_version !== 'agent-analysis-v1'" class="think-panel">
                   <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
                     <i class="ti ti-bulb"></i><span>处理进度</span>
                     <i class="ti" :class="m.thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                   </div>
                   <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
+                </div>
+                <div v-if="m.analysis_metadata?.schema_version === 'agent-analysis-v1' && (m.analysis_metadata.reasoning_text || m.analysis_metadata.system_progress || m.analysis_metadata.decision_notices?.length || m.analysis_metadata.tool_events?.length)" class="think-panel">
+                  <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
+                    <i class="ti ti-bulb"></i><span>处理进度</span>
+                    <i class="ti" :class="m.thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+                  </div>
+                  <div v-show="m.thinkOpen" class="think-body structured-think">
+                    <div v-if="m.analysis_metadata.reasoning_text" class="think-lane"><strong>模型 reasoning</strong><span>{{ m.analysis_metadata.reasoning_text }}</span></div>
+                    <div v-if="m.analysis_metadata.system_progress" class="think-lane"><strong>系统进度</strong><span>{{ m.analysis_metadata.system_progress }}</span></div>
+                    <div v-if="m.analysis_metadata.decision_notices?.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in m.analysis_metadata.decision_notices" :key="ni">{{ n.summary }}</span></div>
+                    <div v-if="m.analysis_metadata.tool_events?.length" class="think-lane"><strong>工具执行</strong><span v-for="(t, ti) in m.analysis_metadata.tool_events" :key="ti">{{ t.tool_name }}：{{ t.type === 'tool_result' ? (t.ok ? '已完成' : '未完成') : '执行中' }}</span></div>
+                  </div>
                 </div>
                 <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv' + vi" :type="v.type" :data="v.data" />
                 <div class="content" v-html="render(cachedWebSrc(m.content).body, m.visuals)"></div>
@@ -1295,26 +1322,27 @@ onUnmounted(() => {
           <div v-if="(generating || streamText) && streamSid === sessStore.currentSid" class="msg-ai">
             <div class="avatar"><i class="ti ti-brain"></i></div>
             <div class="body">
-              <div v-if="thinkText" class="think-panel">
+              <div v-if="thinkText || reasoningText || decisionNotices.length || toolEvents.length" class="think-panel">
                 <div class="think-head" @click="thinkOpen = !thinkOpen">
                   <i class="ti ti-bulb"></i><span>处理进度</span>
                   <span v-if="!streamText" class="think-live"><span
                       class="think-dots"><span></span><span></span><span></span></span></span>
                   <i class="ti" :class="thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </div>
-                <div v-show="thinkOpen" ref="liveThink" class="think-body">{{ thinkText }}</div>
+                <div v-show="thinkOpen" ref="liveThink" class="think-body structured-think">
+                  <div v-if="reasoningText" class="think-lane"><strong>模型 reasoning</strong><span>{{ reasoningText }}</span></div>
+                  <div v-if="thinkText" class="think-lane"><strong>系统进度</strong><span>{{ thinkText }}</span></div>
+                  <div v-if="decisionNotices.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in decisionNotices" :key="ni">{{ n.summary }}</span></div>
+                  <div v-if="toolEvents.length" class="think-lane"><strong>工具执行</strong><span v-for="(t, ti) in toolEvents" :key="ti">{{ t.tool_name }}：{{ t.type === 'tool_result' ? (t.ok ? '已完成' : '未完成') : '执行中' }}</span></div>
+                </div>
               </div>
               <!-- 尚无任何输出：处理中占位 -->
-              <div v-if="!streamText && !thinkText" class="content" style="display:flex;align-items:center;gap:8px">
+              <div v-if="!streamText && !thinkText && !reasoningText && !decisionNotices.length && !toolEvents.length" class="content" style="display:flex;align-items:center;gap:8px">
                 <span class="muted">处理中</span>
                 <span class="think-dots"><span></span><span></span><span></span></span>
               </div>
               <!-- 图形组件 -->
               <DiagramRenderer v-for="(v, vi) in streamVisuals" :key="'sv' + vi" :type="v.type" :data="v.data" />
-              <!-- 追问卡片（elicitation） -->
-              <ElicitationCard v-if="activeElicitation" :tool-use-id="activeElicitation.toolUseId"
-                :reason="activeElicitation.reason" :questions="activeElicitation.questions"
-                @resolved="activeElicitation = null" @close="activeElicitation = null" />
               <div v-if="streamText" class="content streaming" v-html="render(streamWebSrc.body, streamVisuals)">
               </div>
               <div v-if="streamText && streamWebSrc.count" class="think-panel" style="margin-top:8px">
@@ -1430,7 +1458,7 @@ onUnmounted(() => {
                     <button type="button" class="model-control-back" @click="openModelControlPanel('overview')">
                       <i class="ti ti-chevron-left"></i> 推理等级
                     </button>
-                    <button v-for="opt in REASONING_EFFORT_OPTIONS" :key="opt.value" type="button" class="model-control-option"
+                    <button v-for="opt in reasoningOptions" :key="opt.value" type="button" class="model-control-option"
                       :class="{ active: reasoningEffort === opt.value }" role="menuitemradio" :aria-checked="reasoningEffort === opt.value"
                       @click="pickReasoningEffort(opt.value)">
                       <span>{{ opt.label }}</span>

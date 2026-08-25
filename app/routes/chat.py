@@ -268,8 +268,6 @@ async def chat_send(request: Request):
                     buf["events"].append({"event": "error", "data": {
                         "code": 500, "message": "服务端事件协议错误"}})
                     break
-                if evt.get("event") == "delivery_progress":
-                    buf["long_delivery"] = True
                 buf["events"].append(evt)
                 buf["size"] += len(json.dumps(evt.get("data", {})))
                 if buf["size"] > BUFFER_MAX:
@@ -293,13 +291,20 @@ async def chat_send(request: Request):
 
 @router.get("/chat/reasoning-efforts")
 async def reasoning_efforts():
-    """The frontend consumes the same public contract as the runtime."""
+    """Return the selected model's supported levels, with legacy fallback."""
+    capabilities = _c().providers.capability_snapshot("chat")
+    supported = capabilities.get("reasoning_efforts") or ["off", "low", "high", "max"]
+    labels = {"off": "关闭推理", "low": "低", "high": "高", "max": "最大"}
     return {"code": 200, "data": [
-        {"value": "off", "label": "关闭推理"},
-        {"value": "low", "label": "低"},
-        {"value": "high", "label": "高"},
-        {"value": "max", "label": "最大"},
-    ]}
+        {"value": value, "label": labels.get(value, value)}
+        for value in supported
+    ], "capabilities": capabilities}
+
+
+@router.get("/chat/model-capabilities")
+async def model_capabilities():
+    """Provider-neutral capability catalog for the model selector."""
+    return {"code": 200, "data": _c().providers.capability_snapshot("chat")}
 
 
 @router.get("/chat/turns/{turn_id}")
@@ -399,16 +404,17 @@ async def _generate_handoff(c, from_sid: str, to_sid: str) -> None:
 
 
 async def _gen_title(c, sid: str, message: str):
-    """首条消息异步生成 10 字标题；3 秒超时退化为取前 15 字符。
-    超时后 LLM 调用仍继续完成（shielding），晚到时覆盖已退化标题。
-    不做 Langfuse 埋点：标题生成不纳入可观测性上报。"""
+    """首条消息异步生成标题。
+
+    会话创建时已持久化为“新对话”。只有模型返回有效标题时才回填，
+    因此用户的原始输入不会短暂地成为侧边栏标题。标题生成不纳入
+    Langfuse 可观测性上报。
+    """
     try:
         snap = c.providers.snapshot_for("agent")
         q = message.split(
             "\n---\n")[-1].strip() if "\n---\n" in message else message
         q = q[:500]
-        title = q[:15]  # 立即设兜底（满足 3 秒退化为取前 15 字符）
-        c.sessions.set_auto_title(sid, title)
         if snap:
             async def _call_llm():
                 try:
@@ -427,24 +433,9 @@ async def _gen_title(c, sid: str, message: str):
                 except Exception:  # noqa: BLE001
                     return None
 
-            task = asyncio.create_task(_call_llm())
-
-            def _apply_late_title(done: asyncio.Task) -> None:
-                try:
-                    late_title = done.result()
-                except Exception:  # noqa: BLE001
-                    return
-                if late_title:
-                    c.sessions.set_auto_title(sid, late_title)
-
-            task.add_done_callback(_apply_late_title)
-            try:
-                result = await asyncio.wait_for(asyncio.shield(task), timeout=3)
-            except asyncio.TimeoutError:
-                return
+            result = await _call_llm()
             if result:
                 c.sessions.set_auto_title(sid, result)
-                return
     except Exception:  # noqa: BLE001
         logger = logging.getLogger("second_person.chat")
         logger.warning("会话标题生成失败 session=%s", sid, exc_info=True)

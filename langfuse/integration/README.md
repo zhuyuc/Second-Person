@@ -1,6 +1,6 @@
 # Langfuse 集成（对话全链路可观测性）
 
-把 Second Person 的对话流水线从「黑盒」变为「可观测」：每一次对话轮次、每一步流水线、每一次大模型调用都会作为 trace / span / generation 上报到 [Langfuse](https://github.com/langfuse/langfuse)，可在 Langfuse UI 里查看调用树、输入输出、token 用量与耗时。
+把 Second Person 的事件化 Agent 运行时从「黑盒」变为「可观测」：每一次对话轮次、每个模型步骤、每次工具执行和每一次大模型调用都会作为 trace / span / generation 上报到 [Langfuse](https://github.com/langfuse/langfuse)，可在 Langfuse UI 里查看调用树、输入输出、token 用量与耗时。
 
 ## 为什么是这种实现
 
@@ -14,19 +14,16 @@
 ## 追踪层级
 
 ```
-trace: chat.turn                （一次对话轮次，带 session_id / 用户输入 / 最终回复）
-├─ span: context_load           （上下文加载、压缩判定）
-├─ span: memory_retrieval       （三级记忆检索，输出命中数与标题）
-│  └─ generation: llm.*         （检索精筛等模型调用，若有）
-├─ span: intent_parse           （意图识别）
-│  └─ generation: llm.main_chat
-├─ span: tool_execution         （DAG 工具执行）
-├─ span: response_synthesis     （响应合成，流式）
-│  └─ generation: llm.main_chat （主回复，含 token 用量）
-└─ span: post_process           （信号采集、生命周期、索引刷新）
+trace: agent.turn               （一次对话轮次，带 session_id / 用户输入 / 最终回复）
+├─ span: context.assemble       （宿主上下文、静态 prompt 与动态 prompt）
+├─ span: agent.step              （一次模型/工具循环步骤）
+│  └─ generation: llm.agent_step （模型调用，含 token 用量）
+├─ span: agent.decision          （宿主能力选择和决策摘要）
+├─ span: tool_execute            （工具权限、执行、脱敏与结果回填）
+└─ span: handoff.summary_generation（跨会话摘要生成，按需出现）
 ```
 
-此外，所有非对话链路的模型调用（标题生成、压缩、回顾、画像、Replan 等）也会被记录为 generation。
+此外，所有非对话链路的模型调用（标题生成、压缩、回顾、画像、记忆提炼和 handoff 摘要）也会被记录为 generation。
 
 ## 启用方式
 
@@ -97,5 +94,5 @@ langfuse_secret_key: "sk-lf-xxxxxxxx"
 集成点（本目录之外的最小改动）：
 
 - `app/container.py`：`init_tracer()` 初始化，startup 启动、shutdown 停机
-- `agent/core.py`：`_pipeline` 包一层 `chat.turn` trace，各步骤 span
+- `agent/turn_runtime.py`：`agent.turn` trace，各模型/工具步骤 span
 - `infrastructure/llm_provider.py`：`chat()` / `stream()` 记录 generation（模型、输入输出、token）

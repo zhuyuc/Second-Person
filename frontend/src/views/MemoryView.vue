@@ -19,7 +19,7 @@ const confirm = useConfirm()
 const { busy, run } = useBusy()
 const sessStore = useSessions()
 const tab = ref(0)
-const tabs = ['知识图谱', '记忆列表', '时间线', '用户画像', '健康度', '知识库', '治理队列']
+const tabs = ['知识图谱', '记忆列表', '时间线', '用户画像', '健康度', '知识库', '治理队列', '待确认候选']
 
 // 记忆列表
 const memList = ref([])
@@ -42,6 +42,7 @@ const outputStyle = ref({})
 // 健康度
 const health = ref(null)
 const governance = ref([])
+const candidates = ref([])
 
 async function loadList() {
   const d = await api.post('/memory/list', {
@@ -188,6 +189,17 @@ async function confirmPending(pid, approved) {
 }
 async function loadHealth() { health.value = await api.get('/memory/health') }
 async function loadGovernance() { governance.value = await api.get('/memory/governance') }
+async function loadCandidates() { candidates.value = await api.get('/memory/candidates?status=pending&limit=100') }
+async function confirmCandidate(id) {
+  await api.post(`/memory/candidates/${id}/confirm`, {})
+  toast.push('success', '候选已确认，达到门槛后写入长期记忆')
+  await loadCandidates()
+}
+async function rejectCandidate(id) {
+  await api.post(`/memory/candidates/${id}/reject`, { reason: '用户在记忆中心拒绝' })
+  toast.push('success', '已拒绝，后续不再重复推荐')
+  await loadCandidates()
+}
 async function resolveGovernance(item, action = 'reviewed') {
   await api.post(`/memory/governance/${item.item_id}/resolve`, { action })
   governance.value = governance.value.filter(x => x.item_id !== item.item_id)
@@ -523,6 +535,7 @@ function selectTab(i) {
   else if (i === 4) { loadHealth(); loadConflicts() }
   else if (i === 5) { loadDocs(); loadLocalDirs() }
   else if (i === 6) loadGovernance()
+  else if (i === 7) loadCandidates()
 }
 
 onMounted(() => selectTab(0))
@@ -952,6 +965,32 @@ onActivated(() => selectTab(tab.value))
         </div>
       </div>
       <div v-if="g.detail?.query" class="muted mt-1">触发问题：{{ g.detail.query }}</div>
+    </div>
+  </div>
+
+  <!-- 长期记忆候选：尚未确认的内容不作为已保存记忆展示 -->
+  <div v-else-if="tab === 7">
+    <div class="section-row">
+      <div>
+        <div class="section-sub">待确认候选</div>
+        <div class="muted">系统只会把稳定、可复用且有证据的内容写入长期记忆。</div>
+      </div>
+      <button class="btn-sm" @click="loadCandidates"><i class="ti ti-refresh"></i> 刷新</button>
+    </div>
+    <div v-if="!candidates.length" class="empty"><i class="ti ti-circle-check"></i>暂无待确认候选</div>
+    <div v-for="c in candidates" :key="c.candidate_id" class="cw list-row">
+      <div class="row">
+        <div style="min-width:0">
+          <div class="list-title">{{ c.title || '未命名候选' }}</div>
+          <div class="list-sub">{{ c.summary || c.detail }}</div>
+          <div class="muted mt-1">评分 {{ Math.round(c.score || 0) }} · 证据 {{ c.evidence_count || 0 }} 条 · 到期 {{ c.expires_at || '-' }}</div>
+          <div v-if="c.decision_reason" class="muted mt-1">{{ c.decision_reason }}</div>
+        </div>
+        <div class="fg" style="gap:6px;flex-shrink:0">
+          <button class="btn-xs btn-primary" @click="confirmCandidate(c.candidate_id)"><i class="ti ti-check"></i> 确认保存</button>
+          <button class="btn-xs" @click="rejectCandidate(c.candidate_id)"><i class="ti ti-x"></i> 拒绝</button>
+        </div>
+      </div>
     </div>
   </div>
 

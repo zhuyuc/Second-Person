@@ -97,6 +97,44 @@ def _has_embed(c) -> bool:
     return c.providers.snapshot_for("embedding") is not None
 
 
+@router.get("/memory/candidates")
+async def memory_candidates(status: str = "pending", limit: int = 100):
+    """长期记忆候选池：候选不等于已写入记忆。"""
+    c = _c()
+    rows = c.memory_gate.list_candidates(status, limit)
+    for row in rows:
+        try:
+            row["evidence"] = json.loads(row.pop("evidence_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            row["evidence"] = []
+    return {"code": 200, "data": rows}
+
+
+@router.post("/memory/candidates/{candidate_id}/confirm")
+async def confirm_memory_candidate(candidate_id: str):
+    c = _c()
+    if not c.memory_gate.confirm(candidate_id):
+        return {"code": 404, "message": "候选不存在或已处理", "trace_id": None,
+                "details": None}
+    written = await c.memory_gate.promote_ready(c.distiller)
+    return {"code": 200, "data": {"candidate_id": candidate_id, "written": written}}
+
+
+@router.post("/memory/candidates/{candidate_id}/reject")
+async def reject_memory_candidate(candidate_id: str, request: Request):
+    body = await read_json_object(request)
+    if not _c().memory_gate.reject(candidate_id, str(body.get("reason") or "用户拒绝")):
+        return {"code": 404, "message": "候选不存在或已处理", "trace_id": None,
+                "details": None}
+    return {"code": 200, "data": {"candidate_id": candidate_id, "status": "rejected"}}
+
+
+@router.post("/memory/candidates/expire")
+async def expire_memory_candidates():
+    count = _c().memory_gate.expire()
+    return {"code": 200, "data": {"expired": count}}
+
+
 @router.get("/memory/domains")
 async def domains():
     c = _c()

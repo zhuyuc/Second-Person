@@ -37,6 +37,16 @@ def _sid(store: SessionStore) -> str:
     return store.create_session()
 
 
+def test_new_session_starts_with_new_chat_placeholder(store: SessionStore):
+    sid = store.create_session()
+
+    session = store.list_sessions(page_size=1)["list"][0]
+
+    assert session["session_id"] == sid
+    assert session["title"] == "新对话"
+    assert session["title_source"] == "auto"
+
+
 class TestMigrationSchema:
     def test_tree_columns_exist(self, store: SessionStore):
         cols = {r["name"] for r in store.db.query_all(

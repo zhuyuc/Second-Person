@@ -13,9 +13,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from agent.contracts import (
-    legacy_think_mode_effort,
     normalize_reasoning_effort,
-    normalize_think_mode,
 )
 
 
@@ -64,9 +62,7 @@ def _optional_id(value: Any, field: str) -> int | None:
 class ChatSendRequest(BaseModel):
     """Public contract for ``POST /api/chat/send``.
 
-    ``reasoning_effort`` is the canonical four-level request control.  The
-    retired ``think_mode`` input remains read-only compatibility for clients
-    that have not upgraded yet.
+    ``reasoning_effort`` is the only request-level model control.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -80,7 +76,6 @@ class ChatSendRequest(BaseModel):
     location: str | None = None
     handoff_path: str | None = None
     reasoning_effort: str | None = None
-    think_mode: str | None = None
 
     @field_validator("session_id", mode="before")
     @classmethod
@@ -128,11 +123,6 @@ class ChatSendRequest(BaseModel):
     def _validate_handoff_path(cls, value: Any) -> str | None:
         return _optional_text(value, "handoff_path", 240)
 
-    @field_validator("think_mode", mode="before")
-    @classmethod
-    def _normalize_think_mode(cls, value: Any) -> str:
-        return normalize_think_mode(value)
-
     @field_validator("reasoning_effort", mode="before")
     @classmethod
     def _normalize_reasoning_effort(cls, value: Any) -> str | None:
@@ -146,8 +136,7 @@ class ChatSendRequest(BaseModel):
     @model_validator(mode="after")
     def _fill_reasoning_effort(self) -> "ChatSendRequest":
         if self.reasoning_effort is None:
-            self.reasoning_effort = (legacy_think_mode_effort(self.think_mode)
-                                     if self.think_mode else "high")
+            self.reasoning_effort = "high"
         return self
 
 

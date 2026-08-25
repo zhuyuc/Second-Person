@@ -127,6 +127,10 @@ class TurnEventStore:
             elif event["type"] == "tool.result":
                 messages.append({"role": "tool", "tool_call_id": event["call_id"],
                                  "content": payload.get("model_content", "")})
+            elif event["type"] == "context.notice":
+                # Host advisory is model-visible context, never a fake tool
+                # result. It lets the next model step adjust its own plan.
+                messages.append({"role": "user", "content": payload.get("content", "")})
         return messages
 
     def unresolved_calls(self, turn_id: str) -> list[dict[str, Any]]:

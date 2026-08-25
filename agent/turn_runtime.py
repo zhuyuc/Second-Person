@@ -10,7 +10,10 @@ from typing import Any, Awaitable, Callable
 
 from infrastructure.developer_trace import build_agent_trace
 from langfuse.integration import get_tracer
+from .decision_summary import build_tool_decision_notice
+from .repeat_tool_guard import RepeatToolGuard
 from .turn_events import TurnEventStore
+from .prompt_assembler import PROMPT_VERSION, ToolPromptBuilder
 
 logger = logging.getLogger("second_person.turn_runtime")
 
@@ -19,7 +22,8 @@ class TurnRuntime:
     def __init__(self, *, db, config, sessions, registry, executor, llm,
                  providers, tool_policy, system_prompt: Callable[..., str],
                  context_loader: Callable[..., Awaitable[dict[str, Any]]],
-                 persist_images: Callable[[list[str] | None], list[str] | None] | None = None) -> None:
+                 persist_images: Callable[[list[str] | None], list[str] | None] | None = None,
+                 tool_prompt_builder: ToolPromptBuilder | None = None) -> None:
         self.db = db
         self.config = config
         self.sessions = sessions
@@ -32,6 +36,7 @@ class TurnRuntime:
         self.system_prompt = system_prompt
         self.context_loader = context_loader
         self.persist_images = persist_images
+        self.tool_prompts = tool_prompt_builder or ToolPromptBuilder(registry, config)
 
     async def run(self, *, session_id: str, message: str, reasoning_effort: str,
                   emit: Callable[[str, dict], Awaitable[None]],
@@ -56,12 +61,18 @@ class TurnRuntime:
         started = time.monotonic()
         calls = 0
         thinking_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        system_parts: list[str] = []
+        decision_notices: list[dict[str, Any]] = []
+        tool_events: list[dict[str, Any]] = []
+        repeat_guard = RepeatToolGuard(self.config.get("repeat_tool_thresholds", (3, 5, 8)))
+        reasoning_source = "none"
 
         async def runtime_emit(event: str, data: dict) -> None:
             """Broadcast events and retain a coherent thinking summary with the reply.
 
             Two lanes end up in the persisted thinking panel:
-            - Model reasoning (thinking_delta text from stream_chat reasoning
+            - Model reasoning (reasoning_delta text from stream_chat reasoning
               chunks) — user-facing "what the model is chewing on".
             - Tool lifecycle labels — user-facing "what actions are firing".
             Turn/step scaffolding is not surfaced: it is engineering telemetry
@@ -77,9 +88,14 @@ class TurnRuntime:
             text = labels.get(event)
             if text:
                 thinking_parts.append(text)
-            elif event == "thinking_delta":
-                # 模型的思考增量：入面板同时随消息落库，刷新历史后思考仍在
-                thinking_parts.append(data.get("text", ""))
+                tool_events.append({"event": event, **data})
+            elif event == "decision_notice":
+                decision_notices.append(dict(data))
+                decision_span = tracer.span_start("agent.decision", input={
+                    "stage": data.get("stage"), "reason_code": data.get("reason_code"),
+                    "tool_name": data.get("tool_name")},
+                    metadata={"actor": data.get("actor"), "source": data.get("source")})
+                decision_span.end(output={"summary_chars": len(data.get("summary", ""))})
             await emit(event, data)
 
         try:
@@ -107,14 +123,28 @@ class TurnRuntime:
                                                     step=step, handoff_path=handoff_path)
                 context_span.end(output={"history_messages": len(context["history"]),
                                          "memories": context.get("memory_count", 0)})
-                prompt = [{"role": "system", "content": self.system_prompt(onboarding, location, session_id)
-                           + context.get("extra_system", "")}] + context["history"] + self.events.model_messages(turn_id)
-                tools = self.registry.openai_schemas()
+                snap = context["snap"]
+                effective_effort = reasoning_effort
+                supported_efforts = tuple(getattr(snap, "reasoning_efforts", ()) or ())
+                if supported_efforts and effective_effort not in supported_efforts:
+                    effective_effort = "off" if "off" in supported_efforts else supported_efforts[0]
+                    notice = {
+                        "stage": "model_selection", "actor": "host", "source": "capability_catalog",
+                        "reason_code": "unsupported_reasoning_effort",
+                        "summary": f"当前模型不支持 {reasoning_effort}，已降级为 {effective_effort}",
+                        "requested_effort": reasoning_effort, "effective_effort": effective_effort,
+                    }
+                    await runtime_emit("decision_notice", notice)
+                prompt = [{"role": "system", "content": self.system_prompt(
+                    onboarding, location, session_id, context.get("dynamic_blocks"))}]
+                prompt += context["history"] + self.events.model_messages(turn_id)
+                tools = self._project_tools(message, step)
                 self.events.append(turn_id, "request.header", actor="host", step=step,
-                                   payload={"model_id": context["snap"].model_id,
-                                            "reasoning_effort": reasoning_effort,
+                                   payload={"model_id": snap.model_id,
+                                            "reasoning_effort": effective_effort,
                                             "tool_names": [t["function"]["name"] for t in tools],
-                                            "history_count": len(prompt)}, model_visible=False)
+                                            "history_count": len(prompt),
+                                            "prompt_version": PROMPT_VERSION}, model_visible=False)
                 step_span = tracer.span_start("agent.step", input={"turn_id": turn_id, "step": step},
                                               metadata={"reasoning_effort": reasoning_effort})
                 content_parts: list[str] = []
@@ -124,19 +154,17 @@ class TurnRuntime:
                     # 时间降到首 chunk 到达时间；tool_calls 在流内累积，末尾 done
                     # 事件同时返回内容与工具调用，与非流式契约等价。
                     async for kind, data in self.llm.stream_chat(
-                            context["snap"], prompt, source="agent_step",
+                            snap, prompt, source="agent_step",
                             session_id=session_id, tools=tools,
                             images=images if step == 1 else None,
-                            extra_body={"reasoning_effort": reasoning_effort}):
+                            extra_body={"reasoning_effort": effective_effort}):
                         if kind == "content":
                             content_parts.append(data)
                             await emit("content_delta", {"text": data})
                         elif kind == "reasoning":
-                            # 推理模型思考增量（DeepSeek reasoning_content 等）
-                            # → 通过 runtime_emit 走 thinking_delta，同时进面板与
-                            # 落库缓冲。走 runtime_emit 而非 emit 是为了把这段
-                            # 追加进 thinking_parts，随消息一并持久化。
-                            await runtime_emit("thinking_delta", {"text": data})
+                            reasoning_source = "provider"
+                            reasoning_parts.append(data)
+                            await emit("reasoning_delta", {"text": data, "source": "provider"})
                         elif kind == "done":
                             tool_calls = data.get("tool_calls") or []
                             break
@@ -145,11 +173,15 @@ class TurnRuntime:
                     step_span.end()
                 if not tool_calls:
                     content = "".join(content_parts)
+                    analysis_metadata = self._analysis_metadata(
+                        turn_id=turn_id, reasoning_effort=reasoning_effort,
+                        reasoning_parts=reasoning_parts, system_parts=system_parts,
+                        tool_events=tool_events, decision_notices=decision_notices,
+                        reasoning_source=reasoning_source, end_reason="final_answer")
                     msg_id = self.sessions.append_message(
                         session_id, "assistant", content,
                         thinking="".join(thinking_parts) or None,
-                        analysis_metadata={"turn_id": turn_id,
-                                           "reasoning_effort": reasoning_effort},
+                        analysis_metadata=analysis_metadata,
                         parent_id=assistant_parent_id,
                         version_group_id=assistant_version_group_id)
                     self.events.append(turn_id, "assistant.message", actor="model", step=step,
@@ -158,32 +190,50 @@ class TurnRuntime:
                     self.events.append(turn_id, "step.finished", actor="host", step=step,
                                        payload={"outcome": "final"})
                     self.events.finish(turn_id, status="completed", end_reason="final_answer", step=step)
-                    trace.update(output={"message_id": msg_id}, metadata={"developer_trace": build_agent_trace(
+                    trace.update(output={"message_id": msg_id}, metadata={
+                        "provider_capabilities": {
+                            "model_id": snap.model_id,
+                            "reasoning_efforts": list(getattr(snap, "reasoning_efforts", ()) or ()),
+                            "native_reasoning": bool(getattr(snap, "native_reasoning", False)),
+                            "reasoning_received": bool(reasoning_parts),
+                        }, "developer_trace": build_agent_trace(
                         turn_id=turn_id, reasoning_effort=reasoning_effort, steps=step,
                         llm_call_count=calls, latency_ms=int((time.monotonic() - started) * 1000),
                         end_reason="final_answer")})
                     await runtime_emit("turn_completed", {"message_id": msg_id, "turn_id": turn_id,
-                                                           "reasoning_effort": reasoning_effort})
+                                                           "reasoning_effort": reasoning_effort,
+                                                           "analysis_metadata": analysis_metadata})
                     return {"turn_id": turn_id, "message_id": msg_id, "content": content}
                 self.events.append(turn_id, "assistant.tool_calls", actor="model", step=step,
                                    model_visible=True, payload={"content": "".join(content_parts),
                                                                 "tool_calls": tool_calls})
-                results = await self._run_tool_calls(turn_id, step, tool_calls, runtime_emit)
+                results = await self._run_tool_calls(turn_id, step, tool_calls, runtime_emit,
+                                                     repeat_guard)
                 self.events.append(turn_id, "step.finished", actor="host", step=step,
                                    payload={"outcome": "tool_calls", "count": len(results)})
             content = "任务已达到最大执行步骤，以下是已完成的结果。"
             msg_id = self.sessions.append_message(
                 session_id, "assistant", content,
                 thinking="".join(thinking_parts) or None,
-                analysis_metadata={"turn_id": turn_id, "end_reason": "max_steps"},
+                analysis_metadata=self._analysis_metadata(
+                    turn_id=turn_id, reasoning_effort=reasoning_effort,
+                    reasoning_parts=reasoning_parts, system_parts=system_parts,
+                    tool_events=tool_events, decision_notices=decision_notices,
+                    reasoning_source=reasoning_source, end_reason="max_steps"),
                 parent_id=assistant_parent_id,
                 version_group_id=assistant_version_group_id)
             self.events.append(turn_id, "assistant.message", actor="host", step=max_steps,
                                model_visible=True, payload={"content": content, "message_id": msg_id})
             self.events.finish(turn_id, status="completed", end_reason="max_steps", step=max_steps)
             await runtime_emit("content_delta", {"text": content})
+            analysis_metadata = self._analysis_metadata(
+                turn_id=turn_id, reasoning_effort=reasoning_effort,
+                reasoning_parts=reasoning_parts, system_parts=system_parts,
+                tool_events=tool_events, decision_notices=decision_notices,
+                reasoning_source=reasoning_source, end_reason="max_steps")
             await runtime_emit("turn_completed", {"message_id": msg_id, "turn_id": turn_id,
-                                                   "reasoning_effort": reasoning_effort})
+                                                   "reasoning_effort": reasoning_effort,
+                                                   "analysis_metadata": analysis_metadata})
             return {"turn_id": turn_id, "message_id": msg_id, "content": content}
         except asyncio.CancelledError:
             self.events.finish(turn_id, status="cancelled", end_reason="cancelled", step=0)
@@ -197,7 +247,32 @@ class TurnRuntime:
         finally:
             trace.end()
 
-    async def _run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict], emit) -> list[dict]:
+    @staticmethod
+    def _analysis_metadata(*, turn_id: str, reasoning_effort: str,
+                           reasoning_parts: list[str], system_parts: list[str],
+                           tool_events: list[dict[str, Any]],
+                           decision_notices: list[dict[str, Any]],
+                           reasoning_source: str, end_reason: str) -> dict[str, Any]:
+        """Persist structured, safe display lanes instead of one mixed string."""
+        return {
+            "schema_version": "agent-analysis-v1",
+            "turn_id": turn_id,
+            "reasoning_effort": reasoning_effort,
+            "reasoning_source": reasoning_source,
+            "reasoning_available": bool(reasoning_parts),
+            "reasoning_text": "".join(reasoning_parts)[:12000],
+            "system_progress": "".join(system_parts)[:12000],
+            "tool_events": tool_events[-80:],
+            "decision_notices": decision_notices[-40:],
+            "end_reason": end_reason,
+        }
+
+    def _project_tools(self, message: str, step: int) -> list[dict]:
+        """Project only tools relevant to the current request."""
+        return self.tool_prompts.schemas(message, step)
+
+    async def _run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict],
+                              emit, repeat_guard: RepeatToolGuard) -> list[dict]:
         async def run_one(raw: dict, index: int) -> dict:
             function = raw.get("function") or {}
             name = function.get("name") or raw.get("name") or ""
@@ -210,6 +285,29 @@ class TurnRuntime:
             self.events.append(turn_id, "tool.call", actor="model", step=step, call_id=call_id,
                                payload={"tool_name": name, "params": params})
             tool = self.registry.get(name)
+            spec = tool.spec if tool is not None else None
+            notice = build_tool_decision_notice(
+                tool_name=name, description=spec.description if spec else "",
+                arguments=params, step=step, call_id=call_id)
+            if notice is not None:
+                self.events.append(turn_id, "decision.notice", actor="host", step=step,
+                                   call_id=call_id, payload=notice)
+                await emit("decision_notice", notice)
+            reminder = repeat_guard.observe(name, params)
+            if reminder is not None:
+                repeat_notice = build_tool_decision_notice(
+                    tool_name=name, description=spec.description if spec else "",
+                    arguments=params, step=step, call_id=call_id,
+                    repeated_count=reminder.count)
+                if repeat_notice is not None:
+                    self.events.append(turn_id, "decision.notice", actor="host", step=step,
+                                       call_id=call_id, payload=repeat_notice)
+                    await emit("decision_notice", repeat_notice)
+                self.events.append(turn_id, "context.notice", actor="host", step=step,
+                                   call_id=call_id, model_visible=True,
+                                   payload={"content": reminder.message,
+                                            "reason": "repeat_tool_call",
+                                            "tool_name": name, "count": reminder.count})
             if tool is None:
                 return await self._record_result(turn_id, step, call_id, name, False,
                                                  "工具不存在", emit)

@@ -61,13 +61,20 @@ def datetime_now(tz: str = "Asia/Shanghai") -> str:
 
 def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                       sandbox: Sandbox, data_dir, config,
-                      llm=None, providers=None) -> None:
+                      llm=None, providers=None, memory_gate=None) -> None:
     data_dir = Path(data_dir)
 
     # ---- memory_save（主动记忆，created_by=user_explicit，跳过归属判定） ----
     async def memory_save(title: str, summary: str, detail: str, domain: str,
                           confidence: str = "strong", links: list | None = None,
                           entities: list | None = None) -> str:
+        if memory_gate is not None:
+            decision = memory_gate.evaluate(
+                {"title": title, "summary": summary, "detail": detail,
+                 "domain": domain, "attribution": "verified"},
+                "memory", explicit=True)
+            if not decision.allowed:
+                raise ValueError(decision.reason)
         seq = palace.next_memory_seq()
         from memory.naming import memory_id as mk
         mid = mk(seq)
@@ -79,6 +86,10 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
               "links": links or [], "entities": entities or [],
               "created_by": "user_explicit", "verification_state": "direct",
               "freshness_state": "current", "usefulness_score": 0,
+              "write_channel": "explicit", "write_score": 100,
+              "evidence_count": 1,
+              "last_verified_at": now.isoformat(timespec="seconds"),
+              "sensitivity_level": "none",
               "valid_from": now.strftime("%Y-%m-%d"),
               "evidence_refs": [{"source_type": "user_explicit",
                                   "excerpt": detail[:500],

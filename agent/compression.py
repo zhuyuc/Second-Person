@@ -3,7 +3,7 @@ L1 压缩（产品文档 §L1 短期工作记忆 / 开发文档 §6.17 压缩 Ag
 
 五段式结构化压缩：spawn 压缩 Agent（独立 context）执行 LLM 语义压缩。
 （原"阶段一工具输出裁剪"随 v7.3 文档回写移除：工具结果不入 L2 历史，
-  单轮内的超大工具输出由 response_synthesizer 做截断兜底。）
+  单轮内的超大工具输出由工具执行层做截断兜底。）
 Head-Middle-Tail 拼装：Protected Head + Compacted Middle(Summary) + Protected Tail
 二次压缩：把已有摘要与新增 middle 一起送 LLM 合并（不嵌套）
 窗口校验：压缩模型 context window 须 ≥ 压缩阈值 × 1.3，不满足回退对话模型；

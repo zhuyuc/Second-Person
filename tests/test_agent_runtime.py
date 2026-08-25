@@ -109,7 +109,7 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
             assistant_message = runtime.sessions.messages[-1]
             assert assistant_message["role"] == "assistant"
             # 生命周期标签中的 turn/step 已剔除（对读者零信息量），只保留
-            # 工具事件；模型的 reasoning 增量走 thinking_delta 汇入面板与落库
+            # 工具事件；模型的 reasoning 增量走 reasoning_delta 汇入面板与落库
             assert assistant_message["thinking"] == (
                 "【工具】正在执行 lookup\n"
                 "【工具】lookup已完成\n"
@@ -157,6 +157,54 @@ def test_write_tool_requires_explicit_approval_and_records_decision(tmp_path: Pa
             row = policy.decide(decision.approval_id, approved=True)
             assert row and row["status"] == "approved"
             assert await waiter is True
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_provider_reasoning_is_separate_from_tool_progress_and_persisted(tmp_path: Path):
+    async def scenario():
+        db = _db(tmp_path)
+        try:
+            config = _Config(agent_max_steps=2, tool_approval_ttl_minutes=5,
+                             tool_writes_require_approval=True)
+            registry = ToolRegistry()
+            events: list[tuple[str, dict]] = []
+
+            class ReasoningProvider(_Provider):
+                reasoning_efforts = ("off", "low", "high", "max")
+                native_reasoning = True
+
+            class ReasoningLLM:
+                async def stream_chat(self, _snap, _messages, **_kwargs):
+                    yield "reasoning", "先核对用户问题。"
+                    yield "content", "已核对。"
+                    yield "done", {"content": "已核对。", "tool_calls": []}
+
+            async def context_loader(**_kwargs):
+                return {"snap": ReasoningProvider(), "history": [], "extra_system": "",
+                        "memory_count": 0}
+
+            async def emit(name, data):
+                events.append((name, data))
+
+            runtime = TurnRuntime(
+                db=db, config=config, sessions=_Sessions(), registry=registry,
+                executor=_Executor(), llm=ReasoningLLM(), providers=_Providers(),
+                tool_policy=ToolPolicy(db, config),
+                system_prompt=lambda *_args: "system", context_loader=context_loader)
+            outcome = await runtime.run(
+                session_id="sess_reasoning", message="核对", reasoning_effort="high", emit=emit)
+            saved = runtime.sessions.messages[-1]
+            assert outcome["content"] == "已核对。"
+            assert saved["thinking"] is None
+            assert saved["analysis_metadata"]["reasoning_text"] == "先核对用户问题。"
+            assert saved["analysis_metadata"]["reasoning_available"] is True
+            assert [name for name, _data in events] == [
+                "turn_started", "step_started", "reasoning_delta",
+                "content_delta", "turn_completed",
+            ]
         finally:
             db.close()
 

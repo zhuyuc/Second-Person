@@ -47,6 +47,30 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "default": 1.3, "effect": "next_turn", "group": "memory", "order": 5,
      "label": "重要记忆加权系数",
      "desc": "被标记为重要的记忆在检索排序时的得分上浮倍率（1.3 相当于加 30% 权重）。"},
+    {"key": "memory_candidate_min_score", "type": "float", "min": 0.0, "max": 100.0,
+     "default": 70.0, "effect": "next_turn", "group": "memory", "order": 10,
+     "label": "记忆候选最低分",
+     "desc": "非显式内容进入候选池所需的最低长期复用价值分。"},
+    {"key": "memory_auto_write_score", "type": "float", "min": 0.0, "max": 100.0,
+     "default": 85.0, "effect": "next_turn", "group": "memory", "order": 11,
+     "label": "记忆自动写入分",
+     "desc": "证据充分且达到该分数的候选才允许自动写入长期记忆。"},
+    {"key": "memory_min_evidence_cross_session", "type": "int", "min": 1, "max": 10,
+     "default": 2, "effect": "next_turn", "group": "memory", "order": 12,
+     "label": "跨会话证据数",
+     "desc": "个人事实或偏好进入长期记忆前所需的独立证据数量。"},
+    {"key": "memory_candidate_ttl_days", "type": "int", "min": 1, "max": 90,
+     "default": 7, "effect": "immediate", "group": "memory", "order": 13,
+     "label": "记忆候选保留天数",
+     "desc": "未达到写入门槛的候选超过该天数后自动过期。"},
+    {"key": "memory_negative_suppress_count", "type": "int", "min": 1, "max": 10,
+     "default": 2, "effect": "next_turn", "group": "memory", "order": 14,
+     "label": "记忆负反馈抑制阈值",
+     "desc": "同一记忆被标记无关达到该次数后，抑制相似候选的自动写入。"},
+    {"key": "memory_sensitive_scan_enabled", "type": "bool", "default": True,
+     "effect": "immediate", "group": "memory", "order": 15,
+     "label": "记忆敏感信息扫描",
+     "desc": "开启后，长期记忆写入前拦截密钥、密码、验证码和支付信息。"},
     # -- 对话参数 --
     {"key": "compression_trigger_rounds", "type": "int", "min": 4, "max": 100,
      "default": 20, "effect": "next_session", "group": "conversation", "order": 1,
@@ -80,24 +104,18 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "effect": "immediate", "group": "conversation", "order": 13,
      "label": "写入工具需确认",
      "desc": "开启后，宿主程序会在执行写入或外部副作用操作前请求确认。"},
-    # -- 响应策略引擎（意图理解与响应质量优化方案 v3） --
-    {"key": "strategy_engine_enabled", "type": "bool", "default": True,
-     "effect": "next_turn", "group": "conversation", "order": 12,
-     "label": "响应策略引擎",
-     "desc": "回答前由策略引擎统一决策回答角度/深度/形态/语气；关闭后按画像默认风格直接生成。"},
-    {"key": "meta_cognitive_enabled", "type": "bool", "default": True,
-     "effect": "next_turn", "group": "conversation", "order": 13,
-     "label": "元认知协议",
-     "desc": "高复杂度问题先产出思考骨架再生成，提升深度与洞察；关闭后复杂问题也直接生成。"},
+    {"key": "repeat_tool_thresholds", "type": "json", "default": [3, 5, 8],
+     "effect": "next_turn", "group": "conversation", "order": 14,
+     "label": "重复工具提醒阈值",
+     "desc": "相同工具和参数连续调用达到这些次数时，向模型注入检查进展的宿主提醒。"},
+    {"key": "tool_projection_enabled", "type": "bool", "default": True,
+     "effect": "next_turn", "group": "conversation", "order": 15,
+     "label": "工具按需投影",
+     "desc": "根据用户问题把相关工具投影给模型；无法判断时不投影工具，模型直接回答。"},
     {"key": "strategy_followup_window_seconds", "type": "int", "min": 10, "max": 600,
      "default": 60, "effect": "immediate", "group": "conversation", "order": 14,
      "label": "追问弱信号窗口（秒）",
      "desc": "AI 回复后该时间窗内的用户追问计入弱负向反馈证据；初始值 60，上线后用间隔分布 P75 校准。"},
-    # -- 答案材料充实层（画像材料注入 + 定向二次检索） --
-    {"key": "material_enrichment_enabled", "type": "bool", "default": True,
-     "effect": "immediate", "group": "conversation", "order": 15,
-     "label": "答案材料充实",
-     "desc": "意图识别后按任务类型注入用户画像维度并做定向二次检索，把系统已知事实作为回答材料；关闭后仅保留原有记忆检索。"},
     # -- 情绪 --
     {"key": "mood_enabled", "type": "bool", "default": True,
      "effect": "next_turn", "group": "conversation", "order": 4,
@@ -338,55 +356,6 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "default": 2, "effect": "next_session", "group": "conversation", "order": 25,
      "label": "回溯深度",
      "desc": "view_previous_session 工具允许递归回溯的层数。"},
-    # -- 追问式补充信息模块（elicitation）参数 --
-    {"key": "elicitation_confidence_threshold", "type": "float", "min": 0.0, "max": 1.0,
-     "default": 0.6, "effect": "next_turn", "group": "conversation", "order": 26,
-     "label": "追问触发置信度阈值",
-     "desc": "意图置信度低于此值时进入 clarification_router 判定。"},
-    {"key": "elicitation_max_questions", "type": "int", "min": 1, "max": 5,
-     "default": 3, "effect": "next_turn", "group": "conversation", "order": 27,
-     "label": "最多追问题目数",
-     "desc": "单次 ask_user 调用最多问几题，超过由 schema 校验拒绝。"},
-    {"key": "elicitation_min_options", "type": "int", "min": 1, "max": 4,
-     "default": 2, "effect": "next_turn", "group": "conversation", "order": 28,
-     "label": "最少选项数",
-     "desc": "每道追问最少几个选项。"},
-    {"key": "elicitation_max_options", "type": "int", "min": 2, "max": 6,
-     "default": 4, "effect": "next_turn", "group": "conversation", "order": 29,
-     "label": "最多选项数",
-     "desc": "每道追问最多几个选项，超过由 schema 校验拒绝。"},
-    {"key": "elicitation_max_per_session", "type": "int", "min": 1, "max": 10,
-     "default": 3, "effect": "next_turn", "group": "conversation", "order": 30,
-     "label": "会话追问上限",
-     "desc": "单个 conversation 内 ask_user 最多触发次数。"},
-    {"key": "elicitation_web_ttl_minutes", "type": "int", "min": 5, "max": 120,
-     "default": 30, "effect": "immediate", "group": "conversation", "order": 31,
-     "label": "Web 追问超时（分钟）",
-     "desc": "Web 端 elicitation 多久后自动过期。"},
-    {"key": "elicitation_im_ttl_hours", "type": "int", "min": 1, "max": 72,
-     "default": 24, "effect": "immediate", "group": "conversation", "order": 32,
-     "label": "IM 追问超时（小时）",
-     "desc": "IM 端 elicitation 多久后自动过期。"},
-    {"key": "elicitation_close_degrade_minutes", "type": "int", "min": 1, "max": 30,
-     "default": 5, "effect": "next_turn", "group": "conversation", "order": 33,
-     "label": "关闭后降级时间（分钟）",
-     "desc": "关闭追问后超过此时间再发消息，临时决策指令降级。"},
-    {"key": "elicitation_custom_max_chars", "type": "int", "min": 50, "max": 500,
-     "default": 200, "effect": "immediate", "group": "conversation", "order": 34,
-     "label": "自定义输入字数上限",
-     "desc": "前端拦截超长自定义输入。"},
-    {"key": "elicitation_reason_max_chars", "type": "int", "min": 20, "max": 120,
-     "default": 60, "effect": "next_turn", "group": "conversation", "order": 35,
-     "label": "reason 字数上限",
-     "desc": "ask_user reason 字段最大字符数。"},
-    {"key": "elicitation_option_max_chars", "type": "int", "min": 10, "max": 40,
-     "default": 20, "effect": "next_turn", "group": "conversation", "order": 36,
-     "label": "选项字数上限",
-     "desc": "单个 option 文本最大字符数。"},
-    {"key": "elicitation_question_max_chars", "type": "int", "min": 20, "max": 80,
-     "default": 40, "effect": "next_turn", "group": "conversation", "order": 37,
-     "label": "问题字数上限",
-     "desc": "单题 question 文本最大字符数。"},
 ]
 
 _SCHEMA_BY_KEY = {p["key"]: p for p in PARAM_SCHEMA}
@@ -511,6 +480,14 @@ class ConfigManager:
         elif t == "enum":
             if value not in spec["options"]:
                 raise ConfigError(key, value, f"必须为 {spec['options']} 之一")
+        elif t == "json":
+            if not isinstance(value, (list, dict)):
+                raise ConfigError(key, value, "必须为 JSON 数组或对象")
+            if key == "repeat_tool_thresholds":
+                if not isinstance(value, list) or not value or any(
+                        isinstance(item, bool) or not isinstance(item, int) or item <= 0
+                        for item in value):
+                    raise ConfigError(key, value, "必须为正整数数组")
         return value
 
     def _check_cross_constraints(self, params: dict[str, Any]) -> None:
@@ -535,7 +512,7 @@ def default_config() -> dict[str, Any]:
         "port": 8000,
         "workspace_whitelist": [],
         "allow_private_network_fetch": False,
-        # 慢模型清单：轻量槽位（intent/convergence/mood/elicitation）解析时
+        # 慢模型清单：轻量后台任务解析时
         # 跳过这些 model_id 的候选，防止轻量任务耗时放大数倍
         "slow_model_ids": ["mimo-v2.5"],
         "params": {p["key"]: p["default"] for p in PARAM_SCHEMA},

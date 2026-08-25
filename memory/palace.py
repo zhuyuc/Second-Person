@@ -48,13 +48,15 @@ class Palace:
                  md_missing,user_marked_stale,dedup_pending,created_by,md_path,
                  created_at,updated_at,verification_state,freshness_state,
                  usefulness_score,valid_from,review_after,superseded_by,
-                 retrieval_negative_count)
+                 retrieval_negative_count,write_channel,write_score,evidence_count,
+                 last_verified_at,expires_at,sensitivity_level)
                VALUES(:id,:title,:summary,:domain,:confidence,:lifecycle,:source_type,
                  :access_count,:last_accessed,:is_important,:implicit_use_count,
                  :md_missing,:user_marked_stale,:dedup_pending,:created_by,:md_path,
                  :created_at,:updated_at,:verification_state,:freshness_state,
                  :usefulness_score,:valid_from,:review_after,:superseded_by,
-                 :retrieval_negative_count)
+                 :retrieval_negative_count,:write_channel,:write_score,:evidence_count,
+                 :last_verified_at,:expires_at,:sensitivity_level)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, summary=excluded.summary, domain=excluded.domain,
                  confidence=excluded.confidence, lifecycle=excluded.lifecycle,
@@ -68,7 +70,13 @@ class Palace:
                  valid_from=excluded.valid_from,
                  review_after=excluded.review_after,
                  superseded_by=excluded.superseded_by,
-                 retrieval_negative_count=excluded.retrieval_negative_count""",
+                 retrieval_negative_count=excluded.retrieval_negative_count,
+                 write_channel=excluded.write_channel,
+                 write_score=excluded.write_score,
+                 evidence_count=excluded.evidence_count,
+                 last_verified_at=excluded.last_verified_at,
+                 expires_at=excluded.expires_at,
+                 sensitivity_level=excluded.sensitivity_level""",
             {
                 "id": fm["id"], "title": fm.get("title", "") or "untitled", "summary": summary,
                 "domain": fm.get("domain", "general"),
@@ -93,6 +101,12 @@ class Palace:
                 "review_after": fm.get("review_after"),
                 "superseded_by": fm.get("superseded_by"),
                 "retrieval_negative_count": fm.get("retrieval_negative_count", 0),
+                "write_channel": fm.get("write_channel", "system"),
+                "write_score": fm.get("write_score", 0),
+                "evidence_count": fm.get("evidence_count", 0),
+                "last_verified_at": fm.get("last_verified_at"),
+                "expires_at": fm.get("expires_at"),
+                "sensitivity_level": fm.get("sensitivity_level", "none"),
             },
         )
 

@@ -1,16 +1,16 @@
 """
-PipelineTracer —— 面向对话流水线的高层追踪器。
+PipelineTracer —— 面向事件化 Agent 运行时的高层追踪器。
 
 层级模型（对齐 Langfuse 的 trace → observation 结构）：
 - trace：一次对话轮次（chat.turn），带 session_id / 用户输入 / 最终输出
-- span：流水线中的一个步骤（上下文加载、记忆检索、意图识别、工具执行、响应合成、后置处理）
+- span：Agent 轮次中的一个步骤（上下文组装、模型步骤、工具执行、决策记录）
 - generation：一次 LLM 模型调用（模型名、输入消息、输出、token 用量、延迟）
 
 用法（手动 start/end，避免大范围改动缩进）：
     tr = get_tracer()
     trace = tr.trace_start(name="chat.turn", session_id=sid, input=message)
     try:
-        sp = tr.span_start("memory_retrieval", input=message)
+        sp = tr.span_start("context.assemble", input=message)
         ... ; sp.end(output={"count": n})
         ... # 期间的 LLM 调用由 llm_provider 自动记录为 generation，挂在当前活跃 span/trace 下
         trace.update(output=answer)
@@ -219,7 +219,8 @@ class _Generation:
         self.id = gid
         self._ended = False
 
-    def end(self, output=None, usage=None, level=None, status_message=None) -> None:
+    def end(self, output=None, usage=None, level=None, status_message=None,
+             metadata=None) -> None:
         if self._ended:
             logger.warning("Generation %s 重复 end() 调用，已忽略", self.id)
             return
@@ -230,6 +231,8 @@ class _Generation:
             body["output"] = self._t._content(output)
         if usage:
             body["usage"] = usage
+        if metadata is not None:
+            body["metadata"] = _trim(metadata)
         if level:
             body["level"] = level
         if status_message:

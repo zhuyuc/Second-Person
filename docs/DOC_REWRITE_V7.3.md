@@ -1,5 +1,8 @@
 # 产品文档 v7.3 回写清单（冲突项 C3/C14/C15/C16）
 
+> 历史回写记录，仅用于追溯旧版本决策；当前实现以 `docs/API_CONTRACT.md`、
+> `docs/ARCHITECTURE_RULES.md`、`docs/PROMPT_REGISTRY.md` 和生产代码为准。
+
 ## C3: 删除压缩阶段一"工具输出裁剪"
 
 > 原文档 §L1 短期工作记忆：第一阶段 工具输出裁剪 → 第二阶段 五段式结构化压缩

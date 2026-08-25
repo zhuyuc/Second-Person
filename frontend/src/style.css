@@ -1773,6 +1773,11 @@ code {
     min-width: 0
 }
 
+.structured-think { display: grid; gap: 8px; }
+.think-lane { display: grid; gap: 3px; }
+.think-lane strong { color: var(--muted); font-size: 12px; font-weight: 600; }
+.think-lane span { white-space: pre-wrap; }
+
 .model-control-wrap {
     position: relative;
     min-width: 0

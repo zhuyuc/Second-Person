@@ -35,7 +35,7 @@ class ProfileConflictScanner:
         if not old_content or not new_content:
             return 0
 
-        snap = self.providers.snapshot_for("intent")
+        snap = self.providers.snapshot_for("agent") or self.providers.snapshot_for("chat")
         if snap is None:
             return 0
 

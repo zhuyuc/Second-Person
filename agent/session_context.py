@@ -50,7 +50,7 @@ class SessionStore:
         self.db.execute(
             "INSERT INTO sessions(session_id,title,title_source,last_active,"
             "message_count,channel,from_session,created_at) VALUES(?,?,'auto',?,0,?,?,?)",
-            (sid, "新会话", now, channel, from_session, now))
+            (sid, "新对话", now, channel, from_session, now))
         return sid
 
     def rename(self, sid: str, title: str) -> None:
@@ -126,6 +126,9 @@ class SessionStore:
                 "DELETE FROM citation_events WHERE session_id=?", (sid,))
             conn.execute(
                 "DELETE FROM review_candidates WHERE session_id=?", (sid,))
+            conn.execute(
+                "DELETE FROM memory_write_candidates WHERE session_id=? "
+                "AND status IN ('pending','rejected','expired')", (sid,))
             conn.execute(
                 "DELETE FROM token_usage WHERE session_id=?", (sid,))
         summary = self.data_dir / "sessions" / f"{sid}.md"

@@ -32,18 +32,16 @@ def test_engineering_rule_documents_are_the_declared_entry_points():
     assert "docs/API_CONTRACT.md" in readme
 
 
-def test_chat_request_contract_normalizes_only_documented_compatibility_fields():
+def test_chat_request_contract_uses_only_reasoning_effort():
     request = parse_chat_send({
         "message": "测试", "client_request_id": "  request-1  ",
-        "think_mode": "legacy-client-value", "edit_message_id": "42",
+        "edit_message_id": "42",
     })
     assert request.client_request_id == "request-1"
-    assert request.think_mode == "auto"
     assert request.reasoning_effort == "high"
     assert request.edit_message_id == 42
 
     assert parse_chat_send({"message": "测试", "reasoning_effort": "max"}).reasoning_effort == "max"
-    assert parse_chat_send({"message": "测试", "think_mode": "quick"}).reasoning_effort == "low"
     with pytest.raises(ContractValidationError, match="reasoning_effort"):
         parse_chat_send({"message": "测试", "reasoning_effort": "automatic"})
 
@@ -57,10 +55,9 @@ def test_chat_request_contract_normalizes_only_documented_compatibility_fields()
 
 def test_chat_sse_events_are_registered_and_have_terminal_semantics():
     expected = {
-        "queued", "error", "memory_retrieved", "thinking_delta", "mode_decision",
-        "analysis_progress", "delivery_progress", "quality_status", "tool_executing",
-        "tool_visual", "content_delta", "citations", "elicitation",
-        "elicitation_status", "handoff_ready", "mood_updated", "turn_completed",
+        "queued", "error", "reasoning_delta", "decision_notice", "tool_executing",
+        "tool_visual", "content_delta", "citations",
+        "handoff_ready", "mood_updated", "turn_completed",
         "turn_started", "step_started", "tool_pending_approval", "tool_blocked",
         "tool_result",
     }
@@ -68,9 +65,6 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
     assert SSE_TERMINAL_EVENTS == {"turn_completed", "error"}
     assert "tool_confirm" not in SSE_EVENT_SPECS
 
-    validate_sse_event("mode_decision", {
-        "requested_mode": "auto", "effective_mode": "quick", "reason": "simple",
-    })
     validate_sse_event("tool_pending_approval", {
         "turn_id": "turn_1", "approval_id": "apr_1", "tool_name": "file_write",
         "risk_level": "destructive",

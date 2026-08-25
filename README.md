@@ -1,6 +1,6 @@
 # Second Person
 
-本地运行的个人智能体助手。核心差异化能力是**记忆宫殿**：三层记忆系统 + 八步对话流水线 +
+本地运行的个人智能体助手。核心差异化能力是**记忆宫殿**：三层记忆系统 + 事件化 Agent 运行时 +
 自我进化的 Agent 人格。所有数据以 md 文件为主副本存本地，SQLite 仅作派生索引，复制 `data/` 即完整备份。
 
 - Python 3.10+ / FastAPI / SQLite（标准库，含 FTS5）/ numpy / Vue 3
@@ -59,18 +59,31 @@ python start.py --recompile     # 从 raw_docs + 对话原文重建记忆 md（�
 五层分层 + 四横切基础设施：
 
 - **用户交互层**：Web UI（Vue 3）+ IM 接入（飞书 / 钉钉 / Telegram）
-- **Agent Core**：Soul 人格 → 意图解析 → DAG 调度 → 工具执行 → 响应合成（八步流水线）
+- **Agent Core**：TurnRuntime 事件循环 → 宿主上下文 → 工具策略/执行 → 流式回复
 - **工具执行层**：内置工具（Path A 进程内）+ MCP 协议工具（Path B 外部）
 - **三层记忆系统**：L1 工作记忆 → L2 会话记忆 → L3 记忆宫殿
 - **存储层**：SQLite palace.db + numpy 向量 + FTS5 + md 文件系统
 - **横切**：EventBus / LLM Provider 抽象 / ConfigManager / 可观测性
+
+### 当前对话执行顺序
+
+每轮对话由 `AgentCore` 串行交给 `TurnRuntime`，每个模型步骤遵循固定顺序：
+
+1. 宿主读取模型能力、会话历史和记忆检索结果；
+2. `PromptAssembler` 先输出静态系统规则，再把本轮动态上下文统一追加到末尾；
+3. 追加可恢复的会话历史和本轮事件消息；
+4. `ToolPromptBuilder` 投影当前可用工具 schema，模型决定是否发起工具调用；
+5. 宿主执行权限校验、确认、超时、脱敏和注入防护，并将结果作为事件回填下一步骤；
+6. 生成最终回复并持久化 turn/event 事实链。
+
+工具规则属于系统提示词固定 block，工具 schema 通过模型请求的 `tools` 参数传递；前端不能指定工具、改变提示词顺序或绕过宿主策略。
 
 ## 目录结构
 
 ```
 start.py / requirements.txt / pyproject.toml
 app/            Web 应用（FastAPI + 路由 + 容器）
-agent/          Agent Core（core / intent_parser / dag_scheduler / tool_executor / ...）
+agent/          Agent Core（core / turn_runtime / prompt_assembler / tool_executor / ...）
 memory/         记忆宫殿（palace / retriever / distiller / linker / lint / vector_store / ...）
 tools/          工具系统（base / builtin / sandbox / hooks / web_fetch）
 connectors/     MCP 连接器（mcp_client / credential_store / manager）

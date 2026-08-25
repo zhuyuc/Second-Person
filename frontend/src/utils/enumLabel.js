@@ -30,23 +30,13 @@ export const DEDUCT_MAP = {
 export const PLATFORM_MAP = { web: 'Web', feishu: '飞书', telegram: 'Telegram', dingtalk: '钉钉', wecom: '企业微信', weixin: '微信' }
 // 用量来源
 export const SOURCE_NAMES = {
-    main_chat: 'AI对话', agent: '工具prompt', system_agent: '系统prompt', title_gen: '标题生成',
-    embedding: '向量分析', vision: '图片解析', intent_parse: '意图解析', tool_infer: '工具推断',
-    attention_focus: '注意力聚焦', converge_intent: '意图收敛', gap_detect: '缺口检测',
-    honest_clarify: '诚实澄清', mood: '情绪分析', quick_intent: '快速意图', replan: '重规划',
+    main_chat: 'AI对话', agent: 'Agent对话', agent_step: 'Agent步骤',
+    system_agent: '系统Agent', title_gen: '标题生成', embedding: '向量分析',
+    vision: '图片解析', tool_infer: '工具推断', handoff_summary: '交接摘要生成',
     profile_conflict: '画像冲突扫描',
 }
 // 仅提示类系统通知：Web 端用 toast 实时反馈，无需留存在对话流横幅
 export const TOAST_ONLY_NOTIF = ['doc_imported']
-
-// 追问状态（elicitation）
-export const ELICITATION_STATUS_MAP = {
-    pending: '等待回答',
-    done: '已完成',
-    closed: '已关闭',
-    expired: '已过期',
-    submitting: '提交中',
-}
 
 // 未收录值原样兜底显示
 export const confidenceLabel = (v) => CONF_MAP[v] || v
@@ -59,4 +49,3 @@ export const dimStatusLabel = (v) => DIM_STATUS_MAP[v] || v
 export const soulSourceLabel = (v) => SOUL_SRC_MAP[v] || v
 export const platformLabel = (v) => PLATFORM_MAP[v] || v
 export const usageSourceLabel = (v) => SOURCE_NAMES[v] || v
-export const elicitationStatusLabel = (v) => ELICITATION_STATUS_MAP[v] || v

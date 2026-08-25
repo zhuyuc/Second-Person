@@ -2,10 +2,8 @@
 Provider 注册表 —— 从 providers / model_assignment / credentials 解析 ProviderSnapshot。
 
 任务-模型分配（开发文档 §3.2 各环节使用哪个模型）：
-  chat_model      → 第 4/6/7 步主链路
-  agent_model     → 第 3 步第 2 层精筛、5 类系统 Agent、标题生成（未配回退 chat）
-  intent_model    → 第 4 步意图识别 + 收敛分析 + 情绪判定 + 追问决策（未配回退 agent→chat）
-  deep_analysis   → 深度问题模型、需求覆盖质量修复与长文分节交付（未配回退 agent→chat）
+  chat_model      → 普通对话主链路
+  agent_model     → 系统 Agent、记忆处理、上下文维护与标题生成（未配回退 chat）
   embedding_model → 所有向量化
   vision          → 图片文字解析（未配回退 agent→chat）
 
@@ -24,6 +22,25 @@ from .llm_provider import ProviderSnapshot
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.provider_registry")
+
+_REASONING_EFFORTS = ("off", "low", "high", "max")
+
+
+def infer_capabilities(provider_type: str, base_url: str, model_id: str) -> dict:
+    """Infer conservative provider capabilities without a DB migration."""
+    haystack = f"{provider_type} {base_url} {model_id}".lower()
+    capabilities = {"chat", "stream"}
+    if any(marker in haystack for marker in ("deepseek", "reasoner", "mimo")):
+        capabilities.add("tool_call")
+    native_reasoning = "deepseek" in haystack or "reasoner" in haystack
+    efforts = _REASONING_EFFORTS if native_reasoning else ()
+    # Mimo accepts the common request control but commonly emits no native
+    # reasoning block; keep this distinction visible to UI and telemetry.
+    if "mimo" in haystack:
+        capabilities.add("tool_call")
+    return {"capabilities": frozenset(capabilities),
+            "reasoning_efforts": efforts,
+            "native_reasoning": native_reasoning}
 
 
 @dataclass(frozen=True)
@@ -48,19 +65,6 @@ TASK_SLOTS: dict[str, TaskSlot] = {
         label="系统 Agent 模型",
         desc="用于记忆蒸馏、上下文压缩、被动回顾、画像重建、标题生成等系统后台任务。",
         fallback=("chat",),
-    ),
-    "intent": TaskSlot(
-        key="intent",
-        label="意图识别模型",
-        desc="解析用户消息的意图，决定后续检索与工具编排；同时承担收敛分析（注意力聚焦、缺口检测）、情绪判定与追问决策等轻量任务；建议配非推理小模型，可大幅降低每轮对话的首响应延迟。",
-        fallback=("agent", "chat"),
-        lightweight=True,
-    ),
-    "deep_analysis": TaskSlot(
-        key="deep_analysis",
-        label="深度分析模型",
-        desc="用于深度模式的问题建模、需求覆盖修复和长文分节交付。建议配置高质量模型；未配置时回退系统 Agent 或对话模型。",
-        fallback=("agent", "chat"),
     ),
     "embedding": TaskSlot(
         key="embedding",
@@ -88,7 +92,18 @@ class ProviderRegistry:
     # ---- Provider CRUD ----------------------------------------------------
     def list_providers(self) -> list[dict]:
         rows = self.db.query_all("SELECT * FROM providers ORDER BY created_at")
-        return [dict(r) for r in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            facts = infer_capabilities(item.get("provider_type", ""),
+                                       item.get("base_url", ""),
+                                       item.get("model_id", ""))
+            item.update({
+                "capabilities": sorted(facts["capabilities"]),
+                "reasoning_efforts": list(facts["reasoning_efforts"]),
+            })
+            result.append(item)
+        return result
 
     def add_provider(self, pid: str, display_name: str, provider_type: str,
                      base_url: str, model_id: str, api_key: str,
@@ -139,12 +154,30 @@ class ProviderRegistry:
         if not row:
             return None
         api_key = self.creds.get(row["credential_id"]) or ""
+        facts = infer_capabilities(row["provider_type"], row["base_url"], row["model_id"])
         return ProviderSnapshot(
             provider_id=row["id"], provider_type=row["provider_type"],
             base_url=row["base_url"], api_key=api_key, model_id=row["model_id"],
             input_price=row["input_price"],   # 未配置保留 None，费用不计入
             output_price=row["output_price"],
-            context_window=row["context_window"] or 128000)
+            context_window=row["context_window"] or 128000,
+            **facts)
+
+    def capability_snapshot(self, task_type: str = "chat") -> dict:
+        """Public-safe capability projection for settings/chat controls."""
+        snap = self.snapshot_for(task_type)
+        if snap is None:
+            return {"configured": False, "task_type": task_type,
+                    "capabilities": [], "reasoning_efforts": []}
+        return {
+            "configured": True,
+            "provider_id": snap.provider_id,
+            "model_id": snap.model_id,
+            "provider_type": snap.provider_type,
+            "capabilities": sorted(snap.capabilities),
+            "reasoning_efforts": list(snap.reasoning_efforts),
+            "native_reasoning": snap.native_reasoning,
+        }
 
     def assignment(self, task_type: str) -> str | None:
         row = self.db.query_one(

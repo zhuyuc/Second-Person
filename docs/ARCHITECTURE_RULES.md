@@ -51,14 +51,16 @@
 - JSON 成功响应使用 `{code: 200, data}`；错误响应使用 `{code, message, trace_id, details}`。
 - 对话请求由 `app/contracts.py` 的 `ChatSendRequest` 规范化。
 - 对话 SSE 事件由 `infrastructure/sse_contract.py` 注册并在路由出口验证；EventBus 事件只用于后端模块间通信。
-- `off`、`low`、`high`、`max` 是唯一的公开推理等级，前后端分别从 `agent/contracts.py` 和 `frontend/src/utils/chatContract.js` 使用同一语义。`think_mode` 仅保留输入兼容映射，不得参与常规对话路由。
+- `off`、`low`、`high`、`max` 是唯一的公开推理等级，前后端分别从 `agent/contracts.py` 和 `frontend/src/utils/chatContract.js` 使用同一语义。
 - 普通 Agent 轮次使用 `agent_turns` 和 `agent_events` 作为可恢复事实链：宿主构造上下文和 schema，模型提出工具调用，宿主执行或等待确认，再把结果事件回填给下一步模型。
+- `agent_events` 中的 `decision.notice` 是宿主解释层，`context.notice` 是注入下一步模型的提醒；两者都不冒充模型原生 reasoning。
 - 工具参数校验、超时、脱敏、注入防护和重试属于执行质量保障。`write`、`destructive`、`external_side_effect` 工具必须由 `ToolPolicy` 在执行前确认；前端无权直接声明工具或授权执行。
 
 ## 5. 数据与写入
 
 - `data/` 是运行时用户数据目录，包含 Markdown 主副本、SQLite 派生索引和配置，不纳入源码提交。
 - 记忆、画像、人格、技能等主副本写入通过 `memory/FileWriter` 编排；SQLite 索引由同一写入流程维护。
+- 非用户明确保存的记忆必须先经过 `memory/MemoryWriteGate` 候选池、证据和敏感信息门禁；候选状态先于 FileWriter 写入状态推进。
 - `app/static/` 是 `frontend` 的 Vite 构建目标；修改前端后必须重新构建并通过静态资源一致性检查。
 - 所有持久化时间使用 `infrastructure/timeutil.py`。
 
@@ -68,7 +70,8 @@
 - 开发者通过 Langfuse 查看结构化调试记录：推理等级、上下文选择、检索、工具、确认、性能和结束原因。
 - `infrastructure/developer_trace.py` 定义调试摘要字段；它只记录可验证的决策和执行证据，不保存原始隐藏推理 token 流。
 - Langfuse 默认使用 `redacted` 内容模式；除非显式启用 `full`，调用输入输出只上传长度和结构元数据。
-- 面向用户的 `thinking_delta` 仅展示处理进度与可验证结论。
+- 面向用户的处理面板只展示工具生命周期、宿主决策通知和可验证结论。
+- `reasoning_delta` 只有在 Provider 明确返回 reasoning block 时才展示；工具选择原因使用 `decision_notice` 单独展示，避免把工具状态混入“模型思考”。
 
 ## 7. 自动化门禁
 

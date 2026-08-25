@@ -152,6 +152,11 @@ class ProviderSnapshot:
     input_price: float | None = None   # None = 未配置单价（费用不计入）
     output_price: float | None = None
     context_window: int = 128000
+    # Provider-neutral capability facts. Empty reasoning_efforts means the
+    # adapter has no reliable catalog entry and preserves legacy pass-through.
+    capabilities: frozenset[str] = frozenset({"chat", "stream"})
+    reasoning_efforts: tuple[str, ...] = ()
+    native_reasoning: bool = False
 
 
 class TokenRecorder:
@@ -401,6 +406,7 @@ class LLMClient:
             content_parts: list[str] = []
             tool_calls_acc: dict = {}
             usage = {"input_tokens": 0, "output_tokens": 0}
+            reasoning_chars = 0
             for i, delay in enumerate([0.0] + RETRY_DELAYS):
                 if delay:
                     await asyncio.sleep(delay)
@@ -416,6 +422,7 @@ class LLMClient:
                             content_parts.append(chunk)
                             yield "content", chunk
                         elif kind == "reasoning":
+                            reasoning_chars += len(chunk or "")
                             yield "reasoning", chunk
                         elif kind == "annotations":
                             yield "annotations", chunk
@@ -465,7 +472,11 @@ class LLMClient:
             gen.end(output=gen_output, usage={
                 "input": usage["input_tokens"], "output": usage["output_tokens"],
                 "total": usage["input_tokens"] + usage["output_tokens"],
-                "unit": "TOKENS"})
+                "unit": "TOKENS"}, metadata={
+                    "reasoning_received": reasoning_chars > 0,
+                    "reasoning_chars": reasoning_chars,
+                    "tool_calls": len(final_tool_calls),
+                })
             yield "done", {"content": final_content,
                            "tool_calls": final_tool_calls,
                            "usage": {"input_tokens": usage["input_tokens"],
@@ -687,9 +698,21 @@ class LLMClient:
                         if ann:
                             yield "annotations", ann
                         # DeepSeek 等推理模型：思考过程走 reasoning_content 增量
-                        rc = delta.get("reasoning_content")
+                        # Providers use several names for the same semantic
+                        # reasoning block. Normalize them at the adapter edge.
+                        rc = (delta.get("reasoning_content")
+                              or delta.get("reasoning")
+                              or delta.get("thinking")
+                              or delta.get("thought"))
+                        if not rc:
+                            message = ch0.get("message") or {}
+                            rc = (message.get("reasoning_content")
+                                  or message.get("reasoning")
+                                  or message.get("thinking"))
+                        if isinstance(rc, dict):
+                            rc = rc.get("text") or rc.get("content") or ""
                         if rc:
-                            yield "reasoning", rc
+                            yield "reasoning", str(rc)
                         content = delta.get("content")
                         if content:
                             yield "content", content
