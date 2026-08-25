@@ -40,9 +40,6 @@ _active_trace: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
 _active_obs: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "lf_active_obs", default=None)
 
-_MAX_STR = 32000
-_MAX_GEN_INPUT = 64000
-
 _CST = ZoneInfo("Asia/Shanghai")
 
 
@@ -53,26 +50,6 @@ def _now() -> str:
 
 def _uid() -> str:
     return uuid.uuid4().hex
-
-
-def _trim(v: Any, depth: int = 0, max_str: int = _MAX_STR) -> Any:
-    """裁剪过大的输入/输出，避免上报体积失控。截断时附加原始长度信息。"""
-    if v is None or isinstance(v, (int, float, bool)):
-        return v
-    if isinstance(v, str):
-        if len(v) <= max_str:
-            return v
-        return v[:max_str] + f"…(truncated, original_length={len(v)})"
-    if depth >= 4:
-        s = str(v)
-        if len(s) <= max_str:
-            return s
-        return s[:max_str] + f"…(truncated, original_length={len(s)})"
-    if isinstance(v, list):
-        return [_trim(x, depth + 1, max_str) for x in v[:50]]
-    if isinstance(v, dict):
-        return {str(k): _trim(val, depth + 1, max_str) for k, val in list(v.items())[:50]}
-    return _trim(str(v), depth + 1, max_str)
 
 
 def mark_preview(value: Any, *, content_type: str, limit: int | None = None) -> dict:
@@ -136,17 +113,17 @@ class _Trace:
                level=None, status_message=None) -> None:
         body: dict = {"id": self.id, "timestamp": _now()}
         if output is not None:
-            body["output"] = self._t._content(output)
+            body["output"] = output
         if metadata is not None:
             # 深度合并：保留已有 metadata 字段，新值覆盖同名 key
             existing = getattr(self, "_metadata", None)
             merged = _deep_merge(existing, metadata) if existing else metadata
             self._metadata = merged
-            body["metadata"] = _trim(merged)
+            body["metadata"] = merged
         if level:
             body["level"] = level
         if status_message:
-            body["statusMessage"] = status_message[:_MAX_STR]
+            body["statusMessage"] = status_message
         self._t._emit("trace-create", body)
 
     def end(self, output=None, level=None, status_message=None) -> None:
@@ -183,9 +160,9 @@ class _Span:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "timestamp": _now()}
         if self._output is not None:
-            body["output"] = self._t._content(self._output)
+            body["output"] = self._output
         if self._meta is not None:
-            body["metadata"] = _trim(self._meta)
+            body["metadata"] = self._meta
         self._t._emit("span-update", body)
 
     def end(self, output=None, level=None, status_message=None) -> None:
@@ -198,13 +175,13 @@ class _Span:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if self._output is not None:
-            body["output"] = self._t._content(self._output)
+            body["output"] = self._output
         if self._meta is not None:
-            body["metadata"] = _trim(self._meta)
+            body["metadata"] = self._meta
         if level:
             body["level"] = level
         if status_message:
-            body["statusMessage"] = status_message[:_MAX_STR]
+            body["statusMessage"] = status_message
         self._t._emit("span-update", body)
         try:
             _active_obs.reset(self._tok)
@@ -228,15 +205,15 @@ class _Generation:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if output is not None:
-            body["output"] = self._t._content(output)
+            body["output"] = output
         if usage:
             body["usage"] = usage
         if metadata is not None:
-            body["metadata"] = _trim(metadata)
+            body["metadata"] = metadata
         if level:
             body["level"] = level
         if status_message:
-            body["statusMessage"] = status_message[:_MAX_STR]
+            body["statusMessage"] = status_message
         self._t._emit("generation-update", body)
 
 
@@ -284,7 +261,7 @@ class PipelineTracer:
         else:
             meta = {"degradation": {"decision_reason": str(decision)}}
         self._emit("span-update", {"id": sid, "traceId": _active_trace.get(),
-                                   "timestamp": _now(), "metadata": _trim(meta)})
+                                   "timestamp": _now(), "metadata": meta})
 
     async def flush(self) -> None:
         if self._client:
@@ -294,18 +271,6 @@ class PipelineTracer:
         if self._client:
             self._client.enqueue(
                 {"id": _uid(), "type": etype, "timestamp": _now(), "body": body})
-
-    def _content(self, value: Any) -> Any:
-        """Keep Langfuse operational metadata useful without exporting chat text by default."""
-        if self.config.content_mode == "full":
-            return _trim(value)
-        if isinstance(value, str):
-            return {"redacted": True, "chars": len(value)}
-        if isinstance(value, list):
-            return {"redacted": True, "items": len(value)}
-        if isinstance(value, dict):
-            return {"redacted": True, "keys": sorted(str(k) for k in value)[:20]}
-        return _trim(value)
 
     # ---- trace ----
     def trace_start(self, name: str, *, session_id: str | None = None,
@@ -320,9 +285,9 @@ class PipelineTracer:
         if user_id is not None:
             body["userId"] = user_id
         if input is not None:
-            body["input"] = self._content(input)
+            body["input"] = input
         if metadata is not None:
-            body["metadata"] = _trim(metadata)
+            body["metadata"] = metadata
         if tags:
             body["tags"] = tags
         if self.config.release:
@@ -349,9 +314,9 @@ class PipelineTracer:
         body: dict = {"id": sid, "traceId": tid, "name": name, "startTime": _now(),
                       "parentObservationId": parent_observation_id or _active_obs.get()}
         if input is not None:
-            body["input"] = self._content(input)
+            body["input"] = input
         if metadata is not None:
-            body["metadata"] = _trim(metadata)
+            body["metadata"] = metadata
         self._emit("span-create", body)
         tok = _active_obs.set(sid)
         return _Span(self, tid, sid, tok)
@@ -367,11 +332,11 @@ class PipelineTracer:
         body: dict = {"id": gid, "traceId": tid, "name": name, "startTime": _now(),
                       "parentObservationId": _active_obs.get(), "model": model}
         if model_parameters is not None:
-            body["modelParameters"] = _trim(model_parameters)
+            body["modelParameters"] = model_parameters
         if input is not None:
-            body["input"] = self._content(input)
+            body["input"] = input
         if metadata is not None:
-            body["metadata"] = _trim(metadata)
+            body["metadata"] = metadata
         self._emit("generation-create", body)
         return _Generation(self, tid, gid)
 

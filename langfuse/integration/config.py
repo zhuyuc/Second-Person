@@ -34,7 +34,6 @@ class LangfuseConfig:
     flush_interval: float = 3.0
     flush_batch: int = 20
     release: str = ""
-    content_mode: str = "redacted"
 
     @classmethod
     def from_sources(cls, get: Optional[Callable[[str, object], object]] = None) -> "LangfuseConfig":
@@ -75,10 +74,6 @@ class LangfuseConfig:
         except (TypeError, ValueError):
             batch = 20
 
-        content_mode = (_env("LANGFUSE_CONTENT_MODE") or
-                        str(cfg("langfuse_content_mode", "redacted"))).lower()
-        if content_mode not in {"redacted", "full"}:
-            content_mode = "redacted"
         return cls(enabled=enabled, host=host.rstrip("/"), public_key=public,
                    secret_key=secret, flush_interval=interval, flush_batch=batch,
-                   release=_env("LANGFUSE_RELEASE") or "", content_mode=content_mode)
+                   release=_env("LANGFUSE_RELEASE") or "")
