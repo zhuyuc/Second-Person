@@ -87,6 +87,34 @@ def _close_unbalanced(text: str) -> str | None:
     return fixed
 
 
+# P1-E：修复次数统计（进程内轻量计数器，供健康检查/告警读取）
+class RepairStats:
+    """线程安全的修复计数器；attempts=所有调用次数，failures=最终失败次数。"""
+    __slots__ = ("attempts", "failures", "consecutive_failures")
+
+    def __init__(self):
+        self.attempts = 0
+        self.failures = 0
+        self.consecutive_failures = 0
+
+    def record_ok(self) -> None:
+        self.attempts += 1
+        self.consecutive_failures = 0
+
+    def record_fail(self) -> None:
+        self.attempts += 1
+        self.failures += 1
+        self.consecutive_failures += 1
+
+    def snapshot(self) -> dict[str, int]:
+        return {"attempts": self.attempts,
+                "failures": self.failures,
+                "consecutive_failures": self.consecutive_failures}
+
+
+REPAIR_STATS = RepairStats()
+
+
 def repair_json(text: str) -> Any:
     """尝试解析 JSON，逐级修复。全部失败抛 ValueError。"""
     candidates: list[str] = []
@@ -109,7 +137,10 @@ def repair_json(text: str) -> Any:
     last_err: Exception | None = None
     for cand in candidates:
         try:
-            return json.loads(cand)
+            result = json.loads(cand)
+            REPAIR_STATS.record_ok()
+            return result
         except json.JSONDecodeError as e:
             last_err = e
+    REPAIR_STATS.record_fail()
     raise ValueError(f"JSON 修复失败：{last_err}")

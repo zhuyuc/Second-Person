@@ -67,6 +67,34 @@ def estimate_tokens(messages: list[dict] | str) -> int:
         return min(int(len(text) / 2.5), _CAP)  # 中文经验值
 
 
+def normalize_usage(usage: dict | None, *, input_key: str = "prompt_tokens",
+                    output_key: str = "completion_tokens") -> dict[str, int]:
+    """Normalize provider usage and cache counters at the adapter boundary."""
+    usage = usage or {}
+    details = (usage.get("prompt_tokens_details")
+               or usage.get("input_tokens_details") or {})
+    cache_read = (details.get("cached_tokens")
+                  or details.get("cache_read_tokens")
+                  or usage.get("prompt_cache_hit_tokens")
+                  or usage.get("cache_read_input_tokens") or 0)
+    cache_write = (details.get("cache_write_tokens")
+                   or details.get("cache_creation_input_tokens")
+                   or usage.get("cache_write_input_tokens")
+                   or usage.get("cache_creation_input_tokens") or 0)
+    raw_input = max(0, int(usage.get(input_key, usage.get("input_tokens", 0)) or 0))
+    # Anthropic reports cache reads/writes beside uncached input_tokens,
+    # whereas OpenAI-compatible APIs report prompt_tokens as the billed total.
+    billed_input = (raw_input + max(0, int(cache_read or 0))
+                    + max(0, int(cache_write or 0))
+                    if input_key == "input_tokens" else raw_input)
+    return {
+        "input_tokens": billed_input,
+        "output_tokens": max(0, int(usage.get(output_key, usage.get("output_tokens", 0)) or 0)),
+        "cache_read_tokens": max(0, int(cache_read or 0)),
+        "cache_write_tokens": max(0, int(cache_write or 0)),
+    }
+
+
 # ---------------------------------------------------------------------------
 # extra_body 厂商适配：通用开关 → 厂商原生参数
 # ---------------------------------------------------------------------------
@@ -166,7 +194,9 @@ class TokenRecorder:
     def record(self, model_name: str, source: str, input_tokens: int,
                output_tokens: int, session_id: str | None = None,
                input_price: float | None = None,
-               output_price: float | None = None) -> None:
+               output_price: float | None = None,
+               cache_read_tokens: int = 0,
+               cache_write_tokens: int = 0) -> None:
         # 单价快照随用量落库：费用按用量发生时的单价冻结，后续调价不追溯；
         # 未配单价（双 None）时快照与金额留空，费用查询按当时单价兜底
         cost = None
@@ -178,10 +208,11 @@ class TokenRecorder:
             # 由单写线程串行落库，失败由写线程记日志
             self.db.execute_nowait(
                 "INSERT INTO token_usage(model_name,source,session_id,input_tokens,"
-                "output_tokens,trace_id,create_time,input_price,output_price,cost) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "output_tokens,cache_read_tokens,cache_write_tokens,trace_id,create_time,"
+                "input_price,output_price,cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (model_name, source, session_id, input_tokens, output_tokens,
-                 get_trace_id(), now_cst().isoformat(timespec="seconds"),
+                 cache_read_tokens, cache_write_tokens, get_trace_id(),
+                 now_cst().isoformat(timespec="seconds"),
                  input_price, output_price, cost))
         except Exception:  # noqa: BLE001
             logger.exception("token_usage 记录失败")
@@ -256,10 +287,18 @@ class LLMClient:
             tc = res.get("tool_calls") or []
             if tc:
                 out = {"content": out, "tool_calls": tc}
+            _cache_read = u.get("cache_read_tokens", 0)
+            _cache_write = u.get("cache_write_tokens", 0)
+            _billed_input = u.get("input_tokens", 0) + max(0, _cache_read) + max(0, _cache_write)
             gen.end(output=out, usage={
                 "input": u.get("input_tokens", 0), "output": u.get("output_tokens", 0),
                 "total": u.get("input_tokens", 0) + u.get("output_tokens", 0),
-                "unit": "TOKENS"})
+                "input_cache_read": _cache_read, "input_cache_creation": _cache_write,
+                "unit": "TOKENS"}, metadata={
+                    "cache_read_tokens": _cache_read,
+                    "cache_write_tokens": _cache_write,
+                    "cache_hit_rate": (_cache_read / _billed_input) if _billed_input else 0.0,
+                })
             return res
         except Exception as e:  # noqa: BLE001
             gen.end(level="ERROR", status_message=str(e))
@@ -305,7 +344,7 @@ class LLMClient:
         started = False   # 是否已向下游产出过任意内容（含 reasoning/annotations）
         try:
             full: list[str] = []
-            usage = {"input_tokens": 0, "output_tokens": 0}
+            usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
             for i, delay in enumerate([0.0] + RETRY_DELAYS):
                 if delay:
                     await asyncio.sleep(delay)
@@ -339,6 +378,8 @@ class LLMClient:
             breaker.record_success()
             if self.recorder:
                 inp, outp = usage["input_tokens"], usage["output_tokens"]
+                cache_read = usage.get("cache_read_tokens", 0)
+                cache_write = usage.get("cache_write_tokens", 0)
                 if inp == 0 and outp == 0 and full:
                     # Provider 未返回流式 usage：仅估算用户最后一条消息 + 全部输出
                     last_user_msg = ""
@@ -353,11 +394,21 @@ class LLMClient:
                 self.recorder.record(snap.model_id, source,
                                      inp, outp, session_id,
                                      input_price=snap.input_price,
-                                     output_price=snap.output_price)
+                                     output_price=snap.output_price,
+                                     cache_read_tokens=cache_read,
+                                     cache_write_tokens=cache_write)
+            _cache_read = usage.get("cache_read_tokens", 0)
+            _cache_write = usage.get("cache_write_tokens", 0)
+            _billed_input = usage["input_tokens"] + max(0, _cache_read) + max(0, _cache_write)
             gen.end(output="".join(full), usage={
                 "input": usage["input_tokens"], "output": usage["output_tokens"],
                 "total": usage["input_tokens"] + usage["output_tokens"],
-                "unit": "TOKENS"})
+                "input_cache_read": _cache_read, "input_cache_creation": _cache_write,
+                "unit": "TOKENS"}, metadata={
+                    "cache_read_tokens": _cache_read,
+                    "cache_write_tokens": _cache_write,
+                    "cache_hit_rate": (_cache_read / _billed_input) if _billed_input else 0.0,
+                })
         except Exception as e:  # noqa: BLE001
             # 熔断计数已在重试循环内按口径处理，此处只负责上报与透传
             gen.end(level="ERROR", status_message=str(e))
@@ -405,7 +456,7 @@ class LLMClient:
         try:
             content_parts: list[str] = []
             tool_calls_acc: dict = {}
-            usage = {"input_tokens": 0, "output_tokens": 0}
+            usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
             reasoning_chars = 0
             for i, delay in enumerate([0.0] + RETRY_DELAYS):
                 if delay:
@@ -451,6 +502,8 @@ class LLMClient:
             final_tool_calls = _finalize_tool_calls(tool_calls_acc)
             if self.recorder:
                 inp, outp = usage["input_tokens"], usage["output_tokens"]
+                cache_read = usage.get("cache_read_tokens", 0)
+                cache_write = usage.get("cache_write_tokens", 0)
                 if inp == 0 and outp == 0 and (final_content or final_tool_calls):
                     last_user_msg = ""
                     for m in reversed(messages):
@@ -464,23 +517,34 @@ class LLMClient:
                 self.recorder.record(snap.model_id, source,
                                      inp, outp, session_id,
                                      input_price=snap.input_price,
-                                     output_price=snap.output_price)
+                                     output_price=snap.output_price,
+                                     cache_read_tokens=cache_read,
+                                     cache_write_tokens=cache_write)
             gen_output: Any = final_content
             if final_tool_calls:
                 gen_output = {"content": final_content,
                               "tool_calls": final_tool_calls}
+            _cache_read = usage.get("cache_read_tokens", 0)
+            _cache_write = usage.get("cache_write_tokens", 0)
+            _billed_input = usage["input_tokens"] + max(0, _cache_read) + max(0, _cache_write)
             gen.end(output=gen_output, usage={
                 "input": usage["input_tokens"], "output": usage["output_tokens"],
                 "total": usage["input_tokens"] + usage["output_tokens"],
+                "input_cache_read": _cache_read, "input_cache_creation": _cache_write,
                 "unit": "TOKENS"}, metadata={
                     "reasoning_received": reasoning_chars > 0,
                     "reasoning_chars": reasoning_chars,
                     "tool_calls": len(final_tool_calls),
+                    "cache_read_tokens": _cache_read,
+                    "cache_write_tokens": _cache_write,
+                    "cache_hit_rate": (_cache_read / _billed_input) if _billed_input else 0.0,
                 })
             yield "done", {"content": final_content,
                            "tool_calls": final_tool_calls,
                            "usage": {"input_tokens": usage["input_tokens"],
-                                     "output_tokens": usage["output_tokens"]}}
+                                     "output_tokens": usage["output_tokens"],
+                                     "cache_read_tokens": usage.get("cache_read_tokens", 0),
+                                     "cache_write_tokens": usage.get("cache_write_tokens", 0)}}
         except Exception as e:  # noqa: BLE001
             gen.end(level="ERROR", status_message=str(e))
             raise
@@ -503,7 +567,9 @@ class LLMClient:
                                          u.get("input_tokens", 0),
                                          u.get("output_tokens", 0), session_id,
                                          input_price=snap.input_price,
-                                         output_price=snap.output_price)
+                                         output_price=snap.output_price,
+                                         cache_read_tokens=u.get("cache_read_tokens", 0),
+                                         cache_write_tokens=u.get("cache_write_tokens", 0))
                 return result
             except Exception as e:  # noqa: BLE001
                 last = e
@@ -565,12 +631,12 @@ class LLMClient:
                 f"模型 {snap.model_id} 返回空内容"
                 f"（completion_tokens={usage.get('completion_tokens', 0)}，"
                 f"疑似输出全被思考内容占用）")
+        usage_norm = normalize_usage(usage)
         return {
             "content": content,
             "tool_calls": tool_calls,
             "annotations": choice.get("annotations") or [],
-            "usage": {"input_tokens": usage.get("prompt_tokens", 0),
-                      "output_tokens": usage.get("completion_tokens", 0)},
+            "usage": usage_norm,
         }
 
     async def _anthropic_chat(self, snap, messages, tools, **kw) -> dict[str, Any]:
@@ -593,8 +659,8 @@ class LLMClient:
                        if b.get("type") == "text")
         usage = data.get("usage", {})
         return {"content": text, "tool_calls": [],
-                "usage": {"input_tokens": usage.get("input_tokens", 0),
-                          "output_tokens": usage.get("output_tokens", 0)}}
+                "usage": normalize_usage(usage, input_key="input_tokens",
+                                          output_key="output_tokens")}
 
     async def _google_chat(self, snap, messages, **kw) -> dict[str, Any]:
         contents = [{"role": "user" if m["role"] != "assistant" else "model",
@@ -614,7 +680,8 @@ class LLMClient:
         um = data.get("usageMetadata", {})
         return {"content": text, "tool_calls": [],
                 "usage": {"input_tokens": um.get("promptTokenCount", 0),
-                          "output_tokens": um.get("candidatesTokenCount", 0)}}
+                          "output_tokens": um.get("candidatesTokenCount", 0),
+                          "cache_read_tokens": 0, "cache_write_tokens": 0}}
 
     async def _do_embed(self, snap, texts) -> list[list[float]]:
         # 本地 Embedding 微服务毫秒级返回，用短读超时快速失败（不再傻等 120s）
@@ -721,10 +788,8 @@ class LLMClient:
                             for tcd in tc_deltas:
                                 yield "tool_call", tcd
                     if obj.get("usage"):
-                        usage["input_tokens"] = obj["usage"].get(
-                            "prompt_tokens", 0)
-                        usage["output_tokens"] = obj["usage"].get(
-                            "completion_tokens", 0)
+                        normalized = normalize_usage(obj["usage"])
+                        usage.update(normalized)
 
 
 def _merge_tool_call_delta(acc: dict, delta: dict) -> None:

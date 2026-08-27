@@ -116,17 +116,27 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
             )
             assert [name for name, _data in events] == [
                 "turn_started", "step_started", "tool_executing", "tool_result",
-                "step_started", "content_delta", "turn_completed",
+                "step_metrics", "step_started", "content_delta", "turn_completed",
             ]
             # The second model request receives the actual tool result, not a
             # host-side inferred intent label or a transient queue payload.
             assert any(message["role"] == "tool" and "42" in message["content"]
                        for message in llm.prompts[1])
+            # 本轮时间以 context.time 事件形式追加到 messages 末尾（紧跟 user）——
+            # 系统提示不再含时间戳，保护 provider prefix cache 不被分钟级抖动击穿。
+            # 文本极简化后标签固定为 [北京时间]（T1 优化，见 turn_runtime._format_turn_time）
+            assert not any("[北京时间]" in (m.get("content") or "")
+                           for m in llm.prompts[0]
+                           if m.get("role") == "system")
+            assert any(m.get("role") == "user"
+                       and "[北京时间]" in (m.get("content") or "")
+                       for m in llm.prompts[0])
             turn = TurnEventStore(db).get_turn(outcome["turn_id"])
             assert turn["status"] == "completed"
             assert turn["reasoning_effort"] == "high"
             assert [event["type"] for event in TurnEventStore(db).events(outcome["turn_id"])] == [
-                "turn.started", "user.message", "step.started", "request.header",
+                "turn.started", "user.message", "context.time",
+                "step.started", "request.header",
                 "assistant.tool_calls", "tool.call", "tool.result", "step.finished",
                 "step.started", "request.header", "assistant.message", "step.finished",
                 "turn.finished",
@@ -209,3 +219,93 @@ def test_provider_reasoning_is_separate_from_tool_progress_and_persisted(tmp_pat
             db.close()
 
     asyncio.run(scenario())
+
+
+def test_reasoning_effort_switch_keeps_messages_and_tools_stable(tmp_path: Path):
+    """N7 回归：同一 session 同一 message 切换 reasoning_effort 时，
+    送到 LLM 的 messages 和 tools 应该字节完全相同——effort 只走 extra_body，
+    不能污染 prompt payload；这样 provider prefix cache 才不会因用户切档而击穿。
+    """
+    class _CapturingLLM:
+        def __init__(self):
+            self.messages_seen: list[list[dict]] = []
+            self.tools_seen: list[list[dict]] = []
+            self.extra_body_seen: list[dict] = []
+
+        async def stream_chat(self, _snap, messages, **kwargs):
+            self.messages_seen.append(messages)
+            self.tools_seen.append(kwargs.get("tools") or [])
+            self.extra_body_seen.append(dict(kwargs.get("extra_body") or {}))
+            yield "content", "ok"
+            yield "done", {"content": "ok", "tool_calls": [],
+                           "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+    async def scenario():
+        db = _db(tmp_path)
+        try:
+            config = _Config(agent_max_steps=1, tool_approval_ttl_minutes=5,
+                             tool_writes_require_approval=False)
+            registry = ToolRegistry()
+            llm = _CapturingLLM()
+
+            async def context_loader(**_kwargs):
+                return {"snap": _Provider(), "history": [], "memory_count": 0}
+
+            async def emit(_name, _data):
+                pass
+
+            runtime = TurnRuntime(
+                db=db, config=config, sessions=_Sessions(), registry=registry,
+                executor=_Executor(), llm=llm, providers=_Providers(),
+                tool_policy=ToolPolicy(db, config),
+                system_prompt=lambda *_args: "system", context_loader=context_loader)
+
+            # 冻结时间源：turn_runtime._format_turn_time() 用 now_cst，若两次 run
+            # 分别在两个分钟里跑，追加的 context.time 文本会不同——那是"时间真的
+            # 变了"而不是"切换 effort 造成的击穿"，我们要隔离前者只测后者。
+            import agent.turn_runtime as tr
+            original = tr._format_turn_time
+            tr._format_turn_time = lambda: "[本轮元信息] 固定时间戳"
+            try:
+                await runtime.run(session_id="sess_effort", message="同一条消息",
+                                  reasoning_effort="high", emit=emit)
+                await runtime.run(session_id="sess_effort", message="同一条消息",
+                                  reasoning_effort="low", emit=emit)
+            finally:
+                tr._format_turn_time = original
+
+            # 两轮的 messages 严格相同（不受 effort 影响）
+            assert llm.messages_seen[0] == llm.messages_seen[1]
+            assert llm.tools_seen[0] == llm.tools_seen[1]
+            # effort 只走 extra_body
+            assert llm.extra_body_seen[0].get("reasoning_effort") == "high"
+            assert llm.extra_body_seen[1].get("reasoning_effort") == "low"
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
+def test_tool_schemas_are_canonical_json_stable():
+    """N6 回归：同一 tool 无论 parameters 键顺序如何构造，openai_schemas 输出的
+    字节应完全一致——避免 MCP 或外部动态注册的键序抖动击穿 prefix cache。
+    """
+    import json as _json
+    registry_a = ToolRegistry()
+    registry_a.register_function(ToolSpec(
+        "lookup", "read",
+        {"type": "object", "properties": {"key": {"type": "string"}},
+         "required": ["key"]}),
+        lambda **_kwargs: None)
+    registry_b = ToolRegistry()
+    registry_b.register_function(ToolSpec(
+        "lookup", "read",
+        # 完全相同的语义，但键顺序不同（properties 在 type 前）
+        {"required": ["key"], "properties": {"key": {"type": "string"}},
+         "type": "object"}),
+        lambda **_kwargs: None)
+    schemas_a = _json.dumps(registry_a.openai_schemas(), sort_keys=False,
+                             ensure_ascii=False)
+    schemas_b = _json.dumps(registry_b.openai_schemas(), sort_keys=False,
+                             ensure_ascii=False)
+    assert schemas_a == schemas_b

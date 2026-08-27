@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import operator
 import uuid
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger("second_person.tools.builtin")
 
 from .base import ToolRegistry, ToolSpec
 from .sandbox import Sandbox
@@ -68,13 +71,55 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
     async def memory_save(title: str, summary: str, detail: str, domain: str,
                           confidence: str = "strong", links: list | None = None,
                           entities: list | None = None) -> str:
+        # P1-B：显式路径最小闸口 —— 即便用户主动调用也要挡以下四类
+        title = (title or "").strip()
+        summary = (summary or "").strip()
+        detail = (detail or "").strip()
+        if not title or not (summary or detail):
+            raise ValueError("memory_save 拒绝：标题与摘要/详情不能为空")
+        if len(detail) < 5 and len(summary) < 5:
+            raise ValueError("memory_save 拒绝：内容过短，无法作为长期记忆")
+        item = {"title": title, "summary": summary, "detail": detail,
+                "domain": domain, "attribution": "verified",
+                "entities": entities or []}
         if memory_gate is not None:
-            decision = memory_gate.evaluate(
-                {"title": title, "summary": summary, "detail": detail,
-                 "domain": domain, "attribution": "verified"},
-                "memory", explicit=True)
+            decision = memory_gate.evaluate(item, "memory", explicit=True)
             if not decision.allowed:
                 raise ValueError(decision.reason)
+            # 与近 7 天被拒绝候选的语义近邻 → 拒绝（避免用户在气头上强推
+            # 之前主动否决过的内容）
+            try:
+                from memory.write_gate import content_bucket as _cb
+                from infrastructure.timeutil import now_cst as _now
+                from datetime import timedelta as _td
+                bucket = _cb(item)
+                if bucket:
+                    cutoff = (_now() - _td(days=7)).isoformat(timespec="seconds")
+                    recent_rej = memory_gate.db.query_one(
+                        "SELECT decision_reason FROM memory_write_candidates "
+                        "WHERE content_bucket=? AND status='rejected' "
+                        "AND updated_at>=? LIMIT 1", (bucket, cutoff)) if memory_gate.db else None
+                    if recent_rej:
+                        raise ValueError(
+                            f"memory_save 拒绝：近 7 天有语义相同的候选已被拒绝"
+                            f"（原因：{recent_rej['decision_reason']}）。"
+                            f"如需强制保存，请显式撤销拒绝记录。")
+            except ValueError:
+                raise
+            except Exception:  # noqa: BLE001 - 查询失败降级为跳过检查
+                pass
+            # 与现有 disputed 记忆冲突提示（不阻断，走 conflict 建索引即可）
+            try:
+                if palace and memory_gate.db:
+                    disputed = memory_gate.db.query_one(
+                        "SELECT id FROM memories WHERE confidence='disputed' "
+                        "AND (title LIKE ? OR summary LIKE ?) LIMIT 1",
+                        (f"%{title[:15]}%", f"%{summary[:20]}%"))
+                    if disputed:
+                        logger.info("memory_save：新记忆与 disputed 记忆 %s "
+                                    "可能相关，保存但不自动裁决", disputed["id"])
+            except Exception:  # noqa: BLE001
+                pass
         seq = palace.next_memory_seq()
         from memory.naming import memory_id as mk
         mid = mk(seq)

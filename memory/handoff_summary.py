@@ -24,6 +24,21 @@ from infrastructure.timeutil import now_cst
 logger = logging.getLogger("second_person.handoff")
 
 
+def _mark_internal_if_possible(path: Path) -> None:
+    """P4-F：写盘前通知 FileWriter watcher 该路径是内部写入，避免误判为
+    外部修改触发重扫（handoff 摘要被当成新记忆源蒸馏）。
+
+    获取 container 失败时静默跳过（测试/独立调用兼容）。
+    """
+    try:
+        from app.main import get_container
+        c = get_container()
+        if c and getattr(c, "fw", None):
+            c.fw.mark_internal(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class HandoffSummaryGenerator:
     """跨会话 handoff 摘要生成器。"""
 
@@ -172,6 +187,7 @@ def _write_placeholer(p: Path, from_sid: str, to_sid: str) -> None:
         "created_at": now_cst().isoformat(timespec="seconds"),
         "status": "generating",
     }
+    _mark_internal_if_possible(p)
     p.write_text(dump_frontmatter_doc(fm, ""), encoding="utf-8")
 
 
@@ -189,6 +205,7 @@ def _write_ready(p: Path, from_sid: str, to_sid: str,
         "summary_tokens": summary_tokens,
         "status": "ready",
     }
+    _mark_internal_if_possible(p)
     p.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
 
 
@@ -203,6 +220,7 @@ def _write_failed(p: Path, from_sid: str, to_sid: str,
         "status": "failed",
     }
     body = (f"摘要生成失败，可直接查看完整对话：{from_sid}")
+    _mark_internal_if_possible(p)
     p.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
 
     # 发布 failed 事件（前端据此切换附件状态）

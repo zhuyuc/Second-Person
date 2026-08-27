@@ -218,20 +218,66 @@ class LifecycleManager:
         await self._submit_update(doc, "过期降级")
 
     # ---- 频次更新（第 8 步）：last_accessed / access_count / implicit -----
-    def update_access_stats(self, loaded_ids: list[str], cited_ids: list[str]) -> None:
+    def update_access_stats(self, loaded_ids: list[str], cited_ids: list[str],
+                            *, session_id: str | None = None) -> None:
         """批量更新频次；走索引表直接更新（frontmatter 由后续 update 同步）。
-        全部改 executemany 批处理，避免逐条 execute 的 N+1。"""
+        全部改 executemany 批处理，避免逐条 execute 的 N+1。
+
+        T2-A 跨会话去重：同一 (memory_id, session_id) 组合每天只计 1 次
+        access_count，避免一条记忆在同一会话内被反复引用后 access_count 迅速
+        爆表 → 升级 stable + is_important=1 → 检索加权，形成正反馈环。
+        session_id 缺失（历史调用/后台链路）时退化为旧行为，仅去重 last_accessed。
+        """
+        if not cited_ids:
+            return
         now = now_cst().isoformat(timespec="seconds")
-        # 只有正文实际引用的记忆才算使用。候选被加载但未引用，不应阻止
-        # 过期流转，否则错误召回会形成“越误命中越不会过期”的反馈回路。
-        if cited_ids:
-            self.db.executemany(
-                "UPDATE memories SET last_accessed=? WHERE id=?",
-                [(now, mid) for mid in cited_ids])
-        if cited_ids:
+        # last_accessed 无论如何都刷新（用于过期检测）
+        self.db.executemany(
+            "UPDATE memories SET last_accessed=? WHERE id=?",
+            [(now, mid) for mid in cited_ids])
+
+        counted_ids = list(cited_ids)
+        if session_id:
+            today = now[:10]
+            # 幂等表：同 (memory_id, session_id, day) 计一次；不新建表，
+            # 复用 citation_events 判定（该 memory 今日在该 session 已计过 → 跳过）
+            filtered: list[str] = []
+            for mid in cited_ids:
+                already = self.db.query_one(
+                    "SELECT 1 FROM citation_events "
+                    "WHERE memory_id=? AND session_id=? AND SUBSTR(cited_at,1,10)=? "
+                    "LIMIT 1", (mid, session_id, today))
+                if not already:
+                    filtered.append(mid)
+            counted_ids = filtered
+        if counted_ids:
             self.db.executemany(
                 "UPDATE memories SET access_count=access_count+1 WHERE id=?",
-                [(mid,) for mid in cited_ids])
+                [(mid,) for mid in counted_ids])
+
+    # ---- is_important 衰减：连续 N 天未被引用 → 清除重要标记 ------------
+    def decay_is_important(self, days: int | None = None) -> int:
+        """自动清除长期未被引用的 is_important 标记，避免早期误命中被永久放大。
+
+        触发场景：夜间维护链调用一次。返回被清除数量。
+        user_cleared_important 已置位的记忆维持原样。
+
+        实现：只批量更新 SQLite 索引位（is_important=0），md frontmatter 在下次
+        任何 memory update 时由 fix_index_drift/normal write 同步。避免此处
+        触发 FileWriter 队列在同步/异步双路径下的 event loop 复杂度。
+        """
+        days = int(days if days is not None
+                   else self.config.get("important_memory_decay_days", 30))
+        cutoff = (now_cst() - timedelta(days=days)
+                  ).isoformat(timespec="seconds")
+        # user_cleared_important 已置位的不再改；同时用 last_accessed 做过滤
+        cur = self.db.execute(
+            "UPDATE memories SET is_important=0 "
+            "WHERE is_important=1 "
+            "AND (last_accessed IS NULL OR last_accessed < ?) "
+            "AND COALESCE(user_cleared_important, 0) = 0",
+            (cutoff,))
+        return int(getattr(cur, "rowcount", 0) or 0)
 
     # ---- 引用明细（第 8 步）：记忆/知识库统一引用溯源 -------------------
     def record_citations(self, cited_ids: list[str], message_id: int,

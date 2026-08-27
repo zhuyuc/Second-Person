@@ -74,10 +74,11 @@ def test_trace_span_generation_parent_chain_is_emitted():
     assert gen_create["traceId"] == trace_create["id"]
     assert gen_create["parentObservationId"] == span_create["id"]
     assert gen_update["traceId"] == trace_create["id"]
-    assert gen_create["input"] == {"redacted": True, "items": 1}
-    assert gen_update["output"] == {"redacted": True, "chars": 2}
+    # 当前 Langfuse 契约面向本地自托管实例，保留完整输入输出便于调试调用链。
+    assert gen_create["input"] == [{"role": "user", "content": "hello"}]
+    assert gen_update["output"] == "标题"
     assert gen_update["usage"]["unit"] == "TOKENS"
-    assert trace_update["output"] == {"redacted": True, "keys": ["title"]}
+    assert trace_update["output"] == {"title": "标题"}
 
 
 def test_error_level_and_status_message_are_emitted():

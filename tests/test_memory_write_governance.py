@@ -16,8 +16,10 @@ class _Config(dict):
 
 
 def _item(text="用户偏好直接的项目沟通"):
+    # 含实体保证过 is_well_formed（P1-C），不影响原有评分/证据/敏感断言
     return {"title": "沟通偏好", "summary": text, "detail": text,
-            "domain": "work", "attribution": "verified", "stability": 0.9,
+            "domain": "work", "attribution": "verified",
+            "entities": ["用户"], "stability": 0.9,
             "reuse": 0.9, "user_specificity": 0.9, "explicitness": 0.2}
 
 
@@ -91,7 +93,11 @@ def test_negative_feedback_requires_confirmation(tmp_path: Path):
     gate = MemoryWriteGate(db, _Config(memory_candidate_min_score=45,
                                        memory_auto_write_score=85,
                                        memory_negative_suppress_count=2))
-    decision = gate.evaluate(_item(), negative_count=2, evidence_count=2)
+    # 用第一人称文本确保规则派生的 user_specificity 上限较高，score 能过 min_score，
+    # 才能走到 negative_count 判定分支。规则化再评分（T1-A）后，
+    # 无第一人称信号的文本会被 user_specificity_cap=0.25 直接压分。
+    decision = gate.evaluate(_item("我一直偏好直接的项目沟通"),
+                             negative_count=2, evidence_count=2)
     assert decision.status == "pending"
     assert "负反馈" in decision.reason
     db.close()

@@ -59,7 +59,7 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
         "tool_visual", "content_delta", "citations",
         "handoff_ready", "mood_updated", "turn_completed",
         "turn_started", "step_started", "tool_pending_approval", "tool_blocked",
-        "tool_result",
+        "tool_result", "step_metrics",
     }
     assert expected == set(SSE_EVENT_SPECS)
     assert SSE_TERMINAL_EVENTS == {"turn_completed", "error"}

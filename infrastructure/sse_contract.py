@@ -39,6 +39,7 @@ SSE_EVENT_SPECS: dict[str, SSEEventSpec] = {
     "handoff_ready": SSEEventSpec("会话交接摘要状态", frozenset({"status"})),
     "mood_updated": SSEEventSpec("人格情绪快照", frozenset({"ai_mood"})),
     "turn_completed": SSEEventSpec("本轮持久化完成", frozenset({"message_id"})),
+    "step_metrics": SSEEventSpec("多步 turn 的步边界指标刷新", frozenset({"turn_id", "step"})),
 }
 
 SSE_TERMINAL_EVENTS = frozenset({"turn_completed", "error"})

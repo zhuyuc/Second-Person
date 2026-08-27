@@ -223,11 +223,19 @@ class LintEngine:
                 continue
             if doc.title == (r["title"] or "") and doc.summary == (r["summary"] or ""):
                 continue
+            # P4-C：drift 修复只同步展示字段，不覆盖运行时治理字段
+            # （retrieval_negative_count / access_count / write_score / is_important /
+            #  evidence_count / last_verified_at / user_marked_stale 等）；
+            # 否则 md 里旧的静态值会覆盖 SQLite 里累计的用户行为反馈计数。
+            new_domain = doc.domain or r["domain"]
             with self.db.transaction() as conn:
-                palace.upsert_index(conn, doc.frontmatter,
-                                    doc.summary, r["md_path"])
+                conn.execute(
+                    "UPDATE memories SET title=?, summary=?, domain=?, updated_at=? "
+                    "WHERE id=?",
+                    (doc.title or "untitled", doc.summary, new_domain,
+                     now_cst().isoformat(timespec="seconds"), r["id"]))
                 palace.sync_fts(conn, r["id"], doc.title, doc.summary,
-                                doc.detail, doc.domain or r["domain"])
+                                doc.detail, new_domain)
             fixed += 1
         if fixed:
             logger.info("目录漂移修复：同步 %d 条索引", fixed)

@@ -1557,6 +1557,33 @@ code {
 }
 
 /* ---- 输入区 ---- */
+.session-metrics-line {
+    max-width: 820px;
+    margin: 8px auto 0;
+    min-height: 24px;
+    padding: 4px 12px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    text-align: center;
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    line-height: 16px;
+    font-variant-numeric: tabular-nums;
+}
+
+.session-metrics-item {
+    display: inline-block;
+}
+
+.session-metrics-sep {
+    display: inline-block;
+    margin: 0 12px;
+    color: var(--sec);
+    opacity: 0.35;
+    user-select: none;
+}
+
 .composer {
     border: 1px solid var(--bd);
     border-radius: 16px;

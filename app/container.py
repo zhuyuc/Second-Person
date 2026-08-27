@@ -263,7 +263,32 @@ class AppContainer:
                 snap, [{"role": "system", "content": prompt},
                        {"role": "user", "content": text}], source="system_agent",
                 json_mode=True)
-            return repair_json(resp["content"])
+            # P1-E：JSON 修复可观测 —— 失败时记结构化日志 + 连续失败推系统通知
+            try:
+                data = repair_json(resp["content"])
+            except ValueError as exc:
+                from infrastructure.json_repair import REPAIR_STATS
+                logger.warning(
+                    "extract_fn JSON 修复失败：source_type=%s consecutive=%d err=%s",
+                    source_type, REPAIR_STATS.consecutive_failures, exc)
+                threshold = int(self.config.get(
+                    "json_repair_alert_threshold", 5))
+                if (REPAIR_STATS.consecutive_failures >= threshold
+                        and hasattr(self, "notifications")):
+                    try:
+                        self.notifications.push(
+                            "json_repair_failed",
+                            f"提取器 JSON 连续 {REPAIR_STATS.consecutive_failures} "
+                            "次修复失败，请检查模型输出质量")
+                    except Exception:  # noqa: BLE001
+                        pass
+                return {"items": []}
+            # P1-E：修复成功但 items 为空/结构不合规 → 结构化告警但不阻断
+            items = data.get("items") if isinstance(data, dict) else None
+            if not items:
+                logger.debug("extract_fn 无候选：source_type=%s len=%d",
+                             source_type, len(text))
+            return data
 
         self.skills = SkillManager(d, self.db, self.fw)
 

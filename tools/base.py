@@ -10,8 +10,20 @@ BaseTool + 工具注册表（产品文档 §工具系统 / 开发文档 §6.2）
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
+
+
+def _canonical_schema(schema: dict) -> dict:
+    """Deterministic JSON key order via sort_keys roundtrip.
+
+    LLM 提供商的 prefix cache 按 tools 字段的 JSON 字节序列比对；不同注册路径
+    （MCP 动态注册、手写 spec、旧序列化）可能给出相同语义但键顺序不同的 dict，
+    导致同一 tool 每次序列化字节不同，从而击穿 cache。这里强制字典按键名字母序
+    排列，保证同一 tool schema 每次输出字节完全一致（键顺序对模型无语义影响）。
+    """
+    return json.loads(json.dumps(schema, sort_keys=True, ensure_ascii=False))
 
 
 @dataclass
@@ -81,28 +93,32 @@ class ToolRegistry:
         return [t.spec for t in self._tools.values()]
 
     def openai_schemas(self) -> list[dict]:
-        """输出 OpenAI function-calling tools schema 供注入 prompt。"""
-        return [{
+        """输出 OpenAI function-calling tools schema 供注入 prompt。
+
+        _canonical_schema 强制 canonical 键顺序，保证跨请求字节稳定 → provider
+        prefix cache 命中。
+        """
+        return [_canonical_schema({
             "type": "function",
             "function": {
                 "name": t.spec.name,
                 "description": t.spec.description,
                 "parameters": t.spec.parameters,
             },
-        } for t in self._tools.values()]
+        }) for t in self._tools.values()]
 
     def openai_schemas_for(self, names: set[str] | None = None) -> list[dict]:
         """Return schemas constrained by a host-selected allowlist."""
         if names is None:
             return self.openai_schemas()
-        return [{
+        return [_canonical_schema({
             "type": "function",
             "function": {
                 "name": tool.spec.name,
                 "description": tool.spec.description,
                 "parameters": tool.spec.parameters,
             },
-        } for tool in self._tools.values() if tool.spec.name in names]
+        }) for tool in self._tools.values() if tool.spec.name in names]
 
     def is_destructive(self, name: str) -> bool:
         t = self._tools.get(name)

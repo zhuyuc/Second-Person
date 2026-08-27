@@ -131,6 +131,17 @@ class TurnEventStore:
                 # Host advisory is model-visible context, never a fake tool
                 # result. It lets the next model step adjust its own plan.
                 messages.append({"role": "user", "content": payload.get("content", "")})
+            elif event["type"] == "context.time":
+                # 本轮时间元信息：追加到 messages 末尾（紧跟 user.message）而非
+                # system prompt，避免分钟级时间戳每分钟击穿整个前缀 cache。
+                messages.append({"role": "user", "content": payload.get("content", "")})
+            elif event["type"] == "context.memories":
+                # 相关历史记忆：每轮检索结果不同，如果进 system dynamic 会击穿
+                # system prompt 前缀；改为 messages 尾部 user 消息，只影响尾部。
+                messages.append({"role": "user", "content": payload.get("content", "")})
+            elif event["type"] == "context.handoff":
+                # 会话交接摘要：不常出现，仍走 messages 尾部保持前缀稳定。
+                messages.append({"role": "user", "content": payload.get("content", "")})
         return messages
 
     def unresolved_calls(self, turn_id: str) -> list[dict[str, Any]]:

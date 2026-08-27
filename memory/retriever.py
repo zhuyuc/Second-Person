@@ -167,6 +167,12 @@ class Retriever:
         pk_factor = cfg.get("personal_query_knowledge_factor", 0.7)
         km_factor = cfg.get("knowledge_query_memory_factor", 0.85)
         important_factor = cfg.get("important_memory_factor", 1.3)
+        # P3-D：freshness_boost —— 近 N 天创建的记忆得分上浮，避免旧观点压制
+        freshness_boost = float(cfg.get("freshness_boost_factor", 1.15))
+        freshness_days = int(cfg.get("freshness_boost_days", 30))
+        from datetime import timedelta as _td
+        from infrastructure.timeutil import now_cst as _now
+        fresh_cutoff = (_now() - _td(days=freshness_days)).strftime("%Y-%m-%d")
         rows_map = self.palace.get_many(list(scores.keys()))
         out: list[Candidate] = []
         for mid, c in scores.items():
@@ -203,6 +209,13 @@ class Retriever:
                 if negative:
                     factor *= max(0.35, 1.0 - min(0.65, negative * 0.15))
             except (IndexError, KeyError):
+                pass
+            # P3-D：新鲜度加权 —— created_at 在 N 天内的记忆得分上浮
+            try:
+                if freshness_boost > 1.0 and row.get("created_at"):
+                    if str(row["created_at"])[:10] >= fresh_cutoff:
+                        factor *= freshness_boost
+            except (IndexError, KeyError, TypeError):
                 pass
             c.final_score = c.rrf_score * factor
             out.append(c)

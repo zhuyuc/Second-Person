@@ -50,13 +50,21 @@ class ReviewAgent:
             by_day: "OrderedDict[str, list]" = OrderedDict()
             for r in rows:
                 day = (r["create_time"] or "")[:10]
+                # T1-D 说话人硬分离：只把用户发言喂给提炼器。
+                # AI 的推断如果被回喂给提炼器，会被 LLM 当作"用户说过"再蒸馏一次
+                # （回声环）。点踩反馈只保留 assistant 提示作为下轮线索，不进入
+                # 事实提取语料；点赞反馈仍只标注 user 侧，不复用 assistant 回复。
+                if r["role"] != "user":
+                    continue
                 fb = ""
                 if r["feedback"] == 2:
-                    fb = "[用户点踩此回复，内容可能有误，提炼时勿采信] "
+                    fb = "[本轮 AI 回复曾被用户点踩，请谨慎提炼] "
                 elif r["feedback"] == 1:
-                    fb = "[用户点赞此回复] "
-                by_day.setdefault(day, []).append(
-                    f"{r['role']}: {fb}{r['content']}")
+                    fb = "[本轮 AI 回复曾被用户点赞] "
+                content = str(r["content"] or "").strip()
+                if not content:
+                    continue
+                by_day.setdefault(day, []).append(f"用户: {fb}{content}")
             for day, lines in by_day.items():
                 text = "\n".join(lines)
                 for sub in self._split_if_oversized(text):
@@ -66,8 +74,9 @@ class ReviewAgent:
                     except Exception:  # noqa: BLE001 - 单块失败不拖垮整任务/整链
                         logger.warning("回顾提炼失败（%s 分块），跳过继续",
                                        day, exc_info=True)
-        # 2) 会话压缩摘要（session_fact 跨会话复现升级：摘要中反复出现的事实经去重合并）
-        total += await self._distill_session_summaries(cutoff)
+        # 2) 会话压缩摘要：P2-A 下线 —— 摘要是 L1 派生视图，不作为长期记忆提炼源
+        #    产品方案 §13 明确"不把上下文压缩摘要直接写入 L3"；旧路径会造成
+        #    AI 推断被回喂给提炼器的回声环。摘要仍供 handoff/上下文注入使用。
         # 3) 新导入文档（回顾链补提炼，依赖去重避免与 Ingest 重复）
         total += await self._distill_recent_docs(cutoff)
         # 4) 主动记忆检测候选：窗口外的单独补提炼（窗口内已被第 1 步覆盖）
@@ -121,44 +130,23 @@ class ReviewAgent:
         return total
 
     async def _distill_session_summaries(self, cutoff: str) -> int:
-        if not self.data_dir:
-            return 0
-        rows = self.db.query_all(
-            "SELECT compressed_summary_path FROM sessions "
-            "WHERE last_active>=? AND compressed_summary_path IS NOT NULL", (cutoff,))
-        total = 0
-        from memory.md_file import split_frontmatter
-        for r in rows:
-            p = self.data_dir / r["compressed_summary_path"]
-            if not p.exists():
-                continue
-            try:
-                _, body = split_frontmatter(p.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                continue
-            if body.strip():
-                try:
-                    written = await self.distiller.distill(body, source_type="memory")
-                    total += len(written)
-                except Exception:  # noqa: BLE001 - 单个摘要失败不拖垮整任务
-                    logger.warning("会话摘要提炼失败：%s，跳过继续",
-                                   r["compressed_summary_path"], exc_info=True)
-        return total
+        """P2-A：已下线。方法保留仅为兼容旧调用者，直接返回 0。"""
+        return 0
 
     async def _distill_recent_docs(self, cutoff: str) -> int:
+        """P2-E：raw_docs 补提炼加幂等标记。完成后 review_status='distilled'
+        并记录 last_distilled_at，避免下次回顾链再跑一遍 LLM。"""
         if not self.data_dir:
             return 0
         rows = self.db.query_all(
-            "SELECT file_path, extracted_text FROM raw_docs WHERE imported_at>=? "
-            "AND review_status IS NULL", (cutoff,))
+            "SELECT id, file_path, extracted_text FROM raw_docs "
+            "WHERE imported_at>=? AND review_status IS NULL", (cutoff,))
         if not rows:
             return 0
         from pathlib import Path as _P
         from scheduler.ingest import extract_text
         total = 0
         for r in rows:
-            # 优先复用导入时缓存的解析文本（图片 VLM/OCR 结果即在此），避免重复视觉调用；
-            # 无缓存再回退同步 extract_text（图片无缓存则得空，跳过）
             text = r["extracted_text"] or ""
             if not text:
                 fp = _P(r["file_path"])
@@ -168,14 +156,24 @@ class ReviewAgent:
                     text = extract_text(fp)
                 except Exception:  # noqa: BLE001
                     continue
+            distilled_ok = False
             for sub in self._split_if_oversized(text):
                 if sub.strip():
                     try:
                         written = await self.distiller.distill(sub, source_type="knowledge")
                         total += len(written)
-                    except Exception:  # noqa: BLE001 - 单文档分块失败不拖垮整任务
+                        distilled_ok = True
+                    except Exception:  # noqa: BLE001
                         logger.warning("文档补提炼失败：%s，跳过继续",
                                        r["file_path"], exc_info=True)
+            # 幂等标记：无论是否有候选产出，只要蒸馏跑过就置 distilled
+            if distilled_ok:
+                try:
+                    self.db.execute(
+                        "UPDATE raw_docs SET review_status='distilled' WHERE id=?",
+                        (r["id"],))
+                except Exception:  # noqa: BLE001
+                    pass
         return total
 
     @staticmethod
@@ -212,6 +210,11 @@ class LintAgent:
         self.notify = notifier or (lambda t, m: None)
 
     async def run(self, task_id: str) -> dict:
+        # T2-A：先跑 is_important 衰减，避免"过期 + 重要"记忆被反复保护
+        try:
+            self.lifecycle.decay_is_important()
+        except Exception:  # noqa: BLE001
+            logger.warning("is_important 衰减失败，跳过", exc_info=True)
         # 过期检测 → 标 stale
         for mid in self.lifecycle.detect_stale_candidates():
             await self.lifecycle.mark_stale(mid)
@@ -243,14 +246,18 @@ class LintAgent:
                 "drift_fixed": drift_fixed, "review_due": review_due}
 
     async def _auto_archive_stale(self) -> int:
-        """stale_lint_runs 计数：每个 Lint 周期对处于 stale 的记忆 +1，
-        达 2（连续两周期未被恢复）即自动归档；恢复时由 lifecycle 清零。"""
+        """P3-C：只归档 confidence != strong 且 is_important != 1 的记忆。
+        strong / important 记忆（用户姓名/生日等低频事实典型）即便 stale 也
+        不自动归档；只有用户手动才归档。"""
         db = self.lifecycle.db
         db.execute(
             "UPDATE memories SET stale_lint_runs=COALESCE(stale_lint_runs,0)+1 "
             "WHERE lifecycle='stale'")
         rows = db.query_all(
-            "SELECT id FROM memories WHERE lifecycle='stale' AND stale_lint_runs>=2")
+            "SELECT id FROM memories WHERE lifecycle='stale' "
+            "AND stale_lint_runs>=2 "
+            "AND confidence != 'strong' "
+            "AND COALESCE(is_important, 0) = 0")
         for r in rows:
             await self.lifecycle.fw.submit(
                 "memory", {"op": "archive", "memory_id": r["id"]})
@@ -322,12 +329,18 @@ class ProfileBuilder:
         self.data_dir = data_dir
 
     async def rebuild(self, session_id: str | None = None) -> bool:
+        """P4-E：只用 confidence != low 且 verification_state != inferred 的
+        记忆重建画像，避免"画像 → identity 注入 → 强化 inferred 记忆"的自我
+        强化环。frontmatter 里保留 source_memory_ids 数组供审计追溯。"""
         snap = self.snapshot_fn()
         if snap is None:
             return False
         rows = self.db.query_all(
-            "SELECT title,summary,domain FROM memories "
-            "WHERE lifecycle IN ('active','stable') ORDER BY access_count DESC LIMIT 100")
+            "SELECT id,title,summary,domain FROM memories "
+            "WHERE lifecycle IN ('active','stable') "
+            "AND confidence != 'low' "
+            "AND COALESCE(verification_state,'unverified') != 'inferred' "
+            "ORDER BY access_count DESC LIMIT 100")
         if not rows:
             return False
         mem_text = "\n".join(
@@ -340,8 +353,14 @@ class ProfileBuilder:
         except Exception as e:  # noqa: BLE001
             logger.warning("画像重建失败：%s", e)
             return False
+        # 记录来源记忆 ID（前 200 个字符），供 UI/审计快速回溯到底哪些 memory
+        # 参与了画像构建；避免"画像里说用户是产品经理但找不到出处"
+        source_ids = [r["id"] for r in rows]
+        source_ids_str = ",".join(source_ids)[:512]
         fm_head = (f"---\nlast_rebuilt: {now_cst().isoformat(timespec='seconds')}\n"
-                   f"source_memory_count: {len(rows)}\n---\n")
+                   f"source_memory_count: {len(rows)}\n"
+                   f"source_memory_ids: \"{source_ids_str}\"\n"
+                   f"source_filter: confidence!=low,verification_state!=inferred\n---\n")
         await self.fw.submit("profile", {"content": fm_head + resp["content"],
                                          "rebuilt_at": now_cst().isoformat()})
         return True

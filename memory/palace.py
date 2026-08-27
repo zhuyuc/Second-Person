@@ -153,9 +153,14 @@ class Palace:
     # ---- 实体 -------------------------------------------------------------
     def sync_entities(self, conn: sqlite3.Connection, memory_id: str,
                       entities: list[str],
-                      entity_types: dict[str, str] | None = None) -> None:
+                      entity_types: dict[str, str] | None = None,
+                      entity_disambiguators: dict[str, str] | None = None) -> None:
         """重建该记忆的实体关联，并重算受影响实体的 memory_count/primary_domain。
-        entity_types 提供时同步写入 AI 分类的 entity_type。"""
+
+        entity_types 提供时同步写入 AI 分类的 entity_type。
+        P4-B：entity_disambiguators 可选，供同名不同实体共存（如"张三-客户"
+        / "张三-同事"），值会写入 memory_entities.disambiguator。
+        """
         old = [r["entity_id"] for r in conn.execute(
             "SELECT entity_id FROM memory_entity_links WHERE memory_id=?", (memory_id,))]
         conn.execute(
@@ -163,10 +168,12 @@ class Palace:
 
         affected: set[str] = set(old)
         entity_types = entity_types or {}
+        entity_disambiguators = entity_disambiguators or {}
         for name in entities:
             if not name or not name.strip():
                 continue
-            eid = make_entity_id(name)
+            disamb = entity_disambiguators.get(name, "")
+            eid = make_entity_id(name, disamb)
             affected.add(eid)
             etype = entity_types.get(name)
             exists = conn.execute(
@@ -175,8 +182,9 @@ class Palace:
             if not exists:
                 conn.execute(
                     "INSERT INTO memory_entities(entity_id,entity_name,entity_type,"
-                    "first_seen,memory_count,primary_domain) VALUES(?,?,?,?,0,NULL)",
-                    (eid, normalize_entity_name(name), etype, _now()))
+                    "first_seen,memory_count,primary_domain,disambiguator) "
+                    "VALUES(?,?,?,?,0,NULL,?)",
+                    (eid, normalize_entity_name(name), etype, _now(), disamb))
             elif etype and not exists["entity_type"]:
                 # 已有实体无分类时补写，不覆盖已有分类
                 conn.execute(
@@ -297,6 +305,25 @@ class Palace:
         conn.execute(
             "DELETE FROM lint_suggestions WHERE primary_memory_id=? OR related_memory_id=?",
             (memory_id, memory_id))
+        # T0-D：evidence / 版本快照 / 治理事项 / 反馈 / 候选池 一并清理
+        # 用户"忘记"必须真的忘：evidence excerpt、before/after snapshot、治理
+        # 队列条目都可能残留原文；候选池的同指纹条目也一并撤回，避免删除
+        # 后被 promote_ready 又写回来
+        conn.execute(
+            "DELETE FROM memory_evidence WHERE memory_id=?", (memory_id,))
+        conn.execute(
+            "DELETE FROM memory_revisions WHERE memory_id=?", (memory_id,))
+        conn.execute(
+            "DELETE FROM memory_governance_items "
+            "WHERE primary_memory_id=? OR related_memory_id=?",
+            (memory_id, memory_id))
+        conn.execute(
+            "DELETE FROM memory_feedback WHERE memory_id=?", (memory_id,))
+        conn.execute(
+            "UPDATE memory_write_candidates SET status='rejected', "
+            "decision_reason='primary memory deleted', updated_at=? "
+            "WHERE written_memory_id=? AND status NOT IN ('rejected','expired')",
+            (_now(), memory_id))
         conn.execute("DELETE FROM memories WHERE id=?", (memory_id,))
         # raw_docs.extracted_memory_ids 数组移除
         for r in conn.execute(

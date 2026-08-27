@@ -373,26 +373,32 @@ class FileWriter:
                      json.dumps(before_snapshot, ensure_ascii=False) if before_snapshot else None,
                      json.dumps(after_snapshot, ensure_ascii=False),
                      p.get("reason", ""), now_cst().isoformat(timespec="seconds")))
+                from . import sensitivity as _sensitivity  # 局部导入避免循环
                 for ev in p.get("evidence_refs", []) or []:
                     if not isinstance(ev, dict):
                         continue
+                    # 二次脱敏：evidence_refs 可能来源于旧候选池或直接调用，
+                    # 统一在写盘时兜一遍，避免任何原文密钥进 memory_evidence 表
+                    safe_ev = _sensitivity.redact_evidence(ev)
                     conn.execute(
                         "INSERT OR IGNORE INTO memory_evidence(evidence_id,memory_id,source_type,"
                         "source_ref,locator,excerpt,excerpt_hash,captured_at,created_at) "
                         "VALUES(?,?,?,?,?,?,?,?,?)",
-                        (ev.get("evidence_id") or f"ev_{uuid.uuid4().hex[:12]}", mid,
-                         ev.get("source_type", "inference"), ev.get("source_ref"),
-                         ev.get("locator"), ev.get("excerpt"), ev.get("excerpt_hash"),
-                         ev.get("captured_at") or now_cst().isoformat(timespec="seconds"),
+                        (safe_ev.get("evidence_id") or f"ev_{uuid.uuid4().hex[:12]}", mid,
+                         safe_ev.get("source_type", "inference"), safe_ev.get("source_ref"),
+                         safe_ev.get("locator"), safe_ev.get("excerpt"),
+                         safe_ev.get("excerpt_hash"),
+                         safe_ev.get("captured_at") or now_cst().isoformat(timespec="seconds"),
                          now_cst().isoformat(timespec="seconds")))
                 # 没有上游证据定位时仍保留最小来源凭证，使自动沉淀的记忆
                 # 不会成为“无来源”的黑箱。主动记忆会传入更精确的原文证据。
                 if op == "create" and not p.get("evidence_refs"):
+                    fallback_excerpt = _sensitivity.redact(summary[:500])
                     conn.execute(
                         "INSERT INTO memory_evidence(evidence_id,memory_id,source_type,"
                         "excerpt,captured_at,created_at) VALUES(?,?,?,?,?,?)",
                         (f"ev_{uuid.uuid4().hex[:12]}", mid,
-                         fm.get("created_by", "distiller"), summary[:500],
+                         fm.get("created_by", "distiller"), fallback_excerpt,
                          now_cst().isoformat(timespec="seconds"),
                          now_cst().isoformat(timespec="seconds")))
                 # vectors 占位行或直接写入 Distiller 已取到的向量

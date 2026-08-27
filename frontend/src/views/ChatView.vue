@@ -4,12 +4,15 @@ import { marked } from 'marked'
 import mermaid from 'mermaid'
 import { api } from '@/api/client'
 import { useSSE } from '@/composables/useSSE'
+import { useLiveThroughput } from '@/composables/useLiveThroughput'
 import { useToast } from '@/stores/toast'
 import { useSessions } from '@/stores/sessions'
 import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
 import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import HandoffAttachment from '@/components/HandoffAttachment.vue'
+import MessageAnchorRail from '@/components/MessageAnchorRail.vue'
+import SessionMetricsLine from '@/components/SessionMetricsLine.vue'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
 import { formatRelative, formatTimeFull, fmtSize, nowLocalIso, friendlyError } from '@/utils/format'
@@ -75,8 +78,17 @@ const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认�
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
 const streamVisuals = ref([])  // 本轮 tool 产出图形 [{type, data}]
 const degraded = ref(false)
+const sessionMetrics = ref(null)
+const currentTurnMetrics = ref(null)
+// 实时 tok/s：deepseek-harness 的 sessionStats 只在步边界刷新，这里 chunk 级估算
+const liveThroughput = useLiveThroughput()
 const scroller = ref(null)
 const ta = ref(null)          // 输入框，用于自适应高度
+
+// 当前会话的消息定位轨道：只为用户消息建立锚点，避免 AI 回复重复占位。
+const messageElements = new Map()
+const messageElementKeys = new WeakMap()
+let localMessageKeySeq = 0
 
 const pendingToolApproval = ref(null)
 const thresholdBreached = ref(null)  // null / 'soft' / 'hard'
@@ -96,6 +108,8 @@ async function startHandoff() {
     })
     sessStore.setCurrent(d.new_session_id)
     messages.value = []
+    sessionMetrics.value = null
+    currentTurnMetrics.value = null
     handoffStatus.value = 'generating'
     handoffData.value = null
     thresholdBreached.value = null
@@ -215,7 +229,10 @@ function stripToastNotifs(msgs) {
 
 async function openSession(sid) {
   sessStore.setCurrent(sid)
-  const msgs = await api.get(withQuery('/chat/messages', { session_id: sid }))
+  const [msgs, metrics] = await Promise.all([
+    api.get(withQuery('/chat/messages', { session_id: sid })),
+    api.get(`/chat/session/${sid}/metrics`).catch(() => null),
+  ])
   // 历史消息：若用户消息含附件上下文前缀，只展示真实提问 + 附件胶囊
   for (const m of msgs) {
     if (m.role === 'user' && typeof m.content === 'string'
@@ -225,6 +242,8 @@ async function openSession(sid) {
     }
   }
   messages.value = stripToastNotifs(msgs)
+  sessionMetrics.value = metrics
+  currentTurnMetrics.value = metrics?.current_turn || null
   scrollBottom()
   tryReattach(sid)
 }
@@ -238,6 +257,8 @@ async function tryReattach(sid) {
     if (!crid || sessStore.currentSid !== sid) return
     generating.value = true
     streamSid.value = sid
+    currentTurnMetrics.value = null
+    liveThroughput.reset()
     streamText.value = ''
     thinkText.value = ''
     reasoningText.value = ''
@@ -523,6 +544,8 @@ async function send() {
   nextTick(autoGrow)
   generating.value = true
   streamSid.value = sessStore.currentSid
+  currentTurnMetrics.value = null
+  liveThroughput.reset()
   streamText.value = ''
   thinkText.value = ''
   thinkOpen.value = true
@@ -570,9 +593,11 @@ function pushStreamText(text) {
 function handleEvent(ev, data) {
   if (ev === 'reasoning_delta') {
     reasoningText.value += data.text || ''
+    liveThroughput.record(data.text)
     maybeScroll(); scrollThink()
   }
   else if (ev === 'content_delta') {
+    liveThroughput.record(data.text)
     pushStreamText(data.text)
   }
   // turn_started / step_started 仍作为事件对下游可见（回放、可观测性），
@@ -603,10 +628,19 @@ function handleEvent(ev, data) {
   else if (ev === 'degrade') { degraded.value = true }
   else if (ev === 'tool_visual') { streamVisuals.value.push(data); maybeScroll() }
   else if (ev === 'turn_completed') {
+    sessionMetrics.value = data.session_metrics || sessionMetrics.value
+    currentTurnMetrics.value = data.metrics || data.session_metrics?.current_turn || null
+    // 用后端结算的真实 output_tokens 校准 charsPerToken，下一轮估算更准
+    liveThroughput.calibrate(currentTurnMetrics.value?.output_tokens)
     streamAnalysisMetadata = data.analysis_metadata || streamAnalysisMetadata
     finishStream(data.message_id)
     pendingToolApproval.value = null
     if (data.threshold) handleThreshold(data.threshold)
+  }
+  else if (ev === 'step_metrics') {
+    // 多步 turn：后端在步边界推送刷新，对齐 deepseek-harness 的 sessionStats 更新时机
+    sessionMetrics.value = data.session_metrics || sessionMetrics.value
+    currentTurnMetrics.value = data.metrics || sessionMetrics.value?.current_turn || currentTurnMetrics.value
   }
   else if (ev === 'error') { pendingToolApproval.value = null; toast.push('error', friendlyError(data.message)); finishStream() }
   // handoff 摘要就绪（会话上下文管理方案 v2）
@@ -677,6 +711,7 @@ function finishStream(msgId) {
   degraded.value = false
   generating.value = false
   streamSid.value = null
+  liveThroughput.reset()
   sessStore.scheduleTitleRefresh(finishedSid)
   // 长文的 SSE 缓冲可能只保留末段。turn_completed 后以持久化消息回载，
   // 保证页面显示的是完整交付而不是传输缓存的残片。
@@ -782,6 +817,8 @@ async function submitEdit(msg) {
   })
   generating.value = true
   streamSid.value = sessStore.currentSid
+  currentTurnMetrics.value = null
+  liveThroughput.reset()
   streamText.value = ''
   thinkText.value = ''
   reasoningText.value = ''
@@ -850,6 +887,8 @@ async function regenerate(msg) {
   if (!userMsg || !userMsg.content) { toast.push('warning', '未找到对应的提问，无法重新生成'); return }
   generating.value = true
   streamSid.value = sessStore.currentSid
+  currentTurnMetrics.value = null
+  liveThroughput.reset()
   streamText.value = ''
   thinkText.value = ''
   reasoningText.value = ''
@@ -987,6 +1026,55 @@ function renderUser(text) {
     .replace(/\n/g, '<br>'))
 }
 
+function messageKey(msg, index) {
+  if (msg && msg.id != null && Number(msg.id) > 0) return `message-${msg.id}`
+  if (!msg || typeof msg !== 'object') return `local-${index}`
+  let key = messageElementKeys.get(msg)
+  if (!key) {
+    key = `local-${++localMessageKeySeq}`
+    messageElementKeys.set(msg, key)
+  }
+  return key
+}
+
+function anchorTitle(msg, index) {
+  const raw = typeof msg?.content === 'string' ? msg.content : ''
+  const normalized = raw.replace(/\s+/g, ' ').trim()
+  if (normalized) return normalized
+  if (msg?.images?.length) return '图片消息'
+  if (msg?.atts?.length) return '附件消息'
+  return `第 ${index + 1} 轮对话`
+}
+
+const anchorItems = computed(() => {
+  const userMessages = messages.value
+    .map((msg, index) => ({ msg, index }))
+    .filter(({ msg }) => msg?.role === 'user' && msg.message_type !== 'system_notification')
+  return userMessages.map(({ msg, index }, anchorIndex) => ({
+    key: messageKey(msg, index),
+    index: anchorIndex + 1,
+    title: anchorTitle(msg, anchorIndex),
+  }))
+})
+
+function registerMessageElement(key, el) {
+  if (!key) return
+  if (el) messageElements.set(key, el)
+  else messageElements.delete(key)
+}
+
+function messageTopInScroller(el, root) {
+  return el.getBoundingClientRect().top - root.getBoundingClientRect().top + root.scrollTop
+}
+
+function scrollToAnchor(anchor) {
+  const root = scroller.value
+  const target = messageElements.get(anchor?.key)
+  if (!root || !target) return
+  const top = Math.max(0, messageTopInScroller(target, root) - 24)
+  root.scrollTo({ top, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+}
+
 // 本地时间 ISO（秒级）由 utils/format.js 统一提供，避免各视图重复实现
 function scrollBottom() { nextTick(() => { if (scroller.value) { scroller.value.scrollTop = scroller.value.scrollHeight; atBottom.value = true } }) }
 // 智能跟随：仅当用户已在底部附近时自动吸底；上翻后不强制拉回
@@ -1040,6 +1128,8 @@ function resetToHome() {
   if (generating.value) sse.abort()
   sessStore.setCurrent(null)
   messages.value = []
+  sessionMetrics.value = null
+  currentTurnMetrics.value = null
   streamText.value = ''
   thinkText.value = ''
   reasoningText.value = ''
@@ -1066,7 +1156,7 @@ onMounted(() => {
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)
   document.addEventListener('click', onDocClickModelControl)
-  mermaidObserver = new MutationObserver(() => scheduleMermaidScoped())
+  mermaidObserver = new MutationObserver(() => { scheduleMermaidScoped() })
   mermaidObserver.observe(scroller.value, { childList: true, subtree: true })
   scheduleMermaidScoped()
 })
@@ -1173,6 +1263,8 @@ onUnmounted(() => {
 
 <template>
   <div style="display:flex;height:100vh;margin:-28px -40px;max-width:none;width:auto">
+    <!-- 定位锚点栏：独立左列，宽度不随右侧内容变化；与对话状态解耦，仅悬停触发 -->
+    <MessageAnchorRail :anchors="anchorItems" @select="scrollToAnchor" />
     <!-- 对话区（会话列表已合并到全局侧栏 SessionSidebar） -->
     <div style="flex:1;display:flex;flex-direction:column;min-width:0;position:relative">
       <!-- 空状态：顶部 spacer 将 hero+composer 推向中间 -->
@@ -1189,7 +1281,8 @@ onUnmounted(() => {
             <div class="logo-lg"><i class="ti ti-brain"></i></div>
             <h2>Second Person 比你更懂你！</h2>
           </div>
-          <div v-for="(m, i) in messages" :key="i">
+          <div v-for="(m, i) in messages" :key="messageKey(m, i)" :ref="el => registerMessageElement(messageKey(m, i), el)"
+            class="chat-message-item" :data-anchor-key="m.role === 'user' ? messageKey(m, i) : undefined">
             <!-- 用户气泡 -->
             <div v-if="m.role === 'user'" class="msg-user">
               <div :style="editingId === m.id ? { width: '78%' } : { maxWidth: '78%' }">
@@ -1364,7 +1457,7 @@ onUnmounted(() => {
       </div>
 
       <!-- 输入区 -->
-      <div style="padding:16px 32px 0">
+      <div style="padding:16px 32px 12px">
         <!-- 95% 硬阈值提示条（会话上下文管理方案 v2） -->
         <div v-if="thresholdBreached === 'hard'" class="handoff-bar" style="max-width:820px;margin:0 auto 10px">
           <i class="ti ti-alert-triangle"></i>
@@ -1472,10 +1565,11 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+        <!-- 会话指标行：置于输入框正下方，与其居中对齐 -->
+        <SessionMetricsLine :metrics="sessionMetrics" :turn-metrics="currentTurnMetrics" :live-tokens-per-second="liveThroughput.tokensPerSecond.value" />
       </div>
-      <!-- 空状态：底部 spacer 将 hero+composer 推离 disclaimer -->
+      <!-- 空状态：底部 spacer 将 hero+composer 推离底端 -->
       <div v-if="!messages.length && !streamText" style="flex:1"></div>
-      <div class="ai-disclaim" style="max-width:820px;margin:0 auto;padding:8px 0 4px">内容由 AI 生成，仅供参考</div>
     </div>
   </div>
 

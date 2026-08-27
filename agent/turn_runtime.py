@@ -9,11 +9,32 @@ import uuid
 from typing import Any, Awaitable, Callable
 
 from infrastructure.developer_trace import build_agent_trace
+from infrastructure.session_metrics import add_tool_time, record_step, session_metrics, turn_metrics
+from infrastructure.timeutil import now_cst
 from langfuse.integration import get_tracer
 from .decision_summary import build_tool_decision_notice
 from .repeat_tool_guard import RepeatToolGuard
 from .turn_events import TurnEventStore
 from .prompt_assembler import PROMPT_VERSION, ToolPromptBuilder
+
+
+def _format_turn_time() -> str | None:
+    """本轮时间元信息文本，追加到 messages 末尾而不进 system prompt。
+
+    进 system prompt 的分钟级时间戳每分钟第一条消息就会击穿整个前缀 cache；
+    改到 messages 尾部，只影响尾部一小段 tokens，system + tools + history
+    保持字节稳定，DeepSeek 官方 prefix cache 命中率显著提升。
+
+    文本极简化 + 精度降为"天"（T1+T2）：去掉冗余说明，只保留 [北京时间] +
+    YYYY-MM-DD。同一天内所有 turn 的 context.time 字节完全相同，直接可命中
+    prefix cache；模型仍能通过日期计算星期几，聊天场景下"精确到天"足够，
+    真需要精确时刻可由 datetime_now 工具按需返回。
+    """
+    try:
+        now = now_cst()
+        return f"[北京时间] {now:%Y-%m-%d}"
+    except Exception:  # noqa: BLE001
+        return None
 
 logger = logging.getLogger("second_person.turn_runtime")
 
@@ -108,10 +129,19 @@ class TurnRuntime:
                 if persist_user else None)
             self.events.append(turn_id, "user.message", actor="user", model_visible=True,
                                payload={"content": message, "message_id": user_message_id})
+            # 每 turn 采样一次；写在 user.message 之后 → model_messages 里
+            # 时间就跟在用户消息尾巴上；多 step 复用同一份文本，前缀稳定。
+            time_text = _format_turn_time()
+            if time_text:
+                self.events.append(turn_id, "context.time", actor="host",
+                                   model_visible=True, payload={"content": time_text})
             await runtime_emit("turn_started", {"turn_id": turn_id,
                                                   "reasoning_effort": reasoning_effort,
                                                   "max_steps": max_steps})
             for step in range(1, max_steps + 1):
+                # Match the reference timing contract: TTFT starts at the
+                # durable step boundary, before context assembly and dispatch.
+                step_started_at = time.perf_counter()
                 self.events.set_status(turn_id, "running", step=step)
                 self.events.append(turn_id, "step.started", actor="host", step=step,
                                    payload={"reasoning_effort": reasoning_effort})
@@ -123,6 +153,19 @@ class TurnRuntime:
                                                     step=step, handoff_path=handoff_path)
                 context_span.end(output={"history_messages": len(context["history"]),
                                          "memories": context.get("memory_count", 0)})
+                # step 1 才 append 上下文事件；后续 step 通过 model_messages
+                # 直接复用同一份文本，保持 turn 内前缀稳定。
+                if step == 1:
+                    memory_ctx = context.get("memory_context")
+                    if memory_ctx:
+                        self.events.append(turn_id, "context.memories", actor="host",
+                                           model_visible=True,
+                                           payload={"content": memory_ctx})
+                    handoff_ctx = context.get("handoff_context")
+                    if handoff_ctx:
+                        self.events.append(turn_id, "context.handoff", actor="host",
+                                           model_visible=True,
+                                           payload={"content": handoff_ctx})
                 snap = context["snap"]
                 effective_effort = reasoning_effort
                 supported_efforts = tuple(getattr(snap, "reasoning_efforts", ()) or ())
@@ -149,6 +192,8 @@ class TurnRuntime:
                                               metadata={"reasoning_effort": reasoning_effort})
                 content_parts: list[str] = []
                 tool_calls: list[dict] = []
+                first_token_at: float | None = None
+                step_usage: dict[str, Any] = {}
                 try:
                     # 流式：内容增量边收边发 content_delta，首字延迟由整段生成
                     # 时间降到首 chunk 到达时间；tool_calls 在流内累积，末尾 done
@@ -159,6 +204,8 @@ class TurnRuntime:
                             images=images if step == 1 else None,
                             extra_body={"reasoning_effort": effective_effort}):
                         if kind == "content":
+                            if data and first_token_at is None:
+                                first_token_at = time.perf_counter()
                             content_parts.append(data)
                             await emit("content_delta", {"text": data})
                         elif kind == "reasoning":
@@ -167,10 +214,25 @@ class TurnRuntime:
                             await emit("reasoning_delta", {"text": data, "source": "provider"})
                         elif kind == "done":
                             tool_calls = data.get("tool_calls") or []
+                            step_usage = data.get("usage") or {}
                             break
                     calls += 1
                 finally:
                     step_span.end()
+                step_completed_at = time.perf_counter()
+                llm_ms = max(0, round((step_completed_at - step_started_at) * 1000))
+                ttft_ms = (max(0, round((first_token_at - step_started_at) * 1000))
+                           if first_token_at is not None else None)
+                decode_ms = (max(0, round((step_completed_at - first_token_at) * 1000))
+                             if first_token_at is not None else None)
+                record_step(
+                    self.db, turn_id=turn_id, step=step, llm_ms=llm_ms,
+                    ttft_ms=ttft_ms, decode_ms=decode_ms,
+                    input_tokens=step_usage.get("input_tokens", 0),
+                    output_tokens=step_usage.get("output_tokens", 0),
+                    cache_read_tokens=step_usage.get("cache_read_tokens", 0),
+                    cache_write_tokens=step_usage.get("cache_write_tokens", 0),
+                )
                 if not tool_calls:
                     content = "".join(content_parts)
                     analysis_metadata = self._analysis_metadata(
@@ -200,17 +262,35 @@ class TurnRuntime:
                         turn_id=turn_id, reasoning_effort=reasoning_effort, steps=step,
                         llm_call_count=calls, latency_ms=int((time.monotonic() - started) * 1000),
                         end_reason="final_answer")})
-                    await runtime_emit("turn_completed", {"message_id": msg_id, "turn_id": turn_id,
-                                                           "reasoning_effort": reasoning_effort,
-                                                           "analysis_metadata": analysis_metadata})
+                    await runtime_emit("turn_completed", {
+                        "message_id": msg_id, "turn_id": turn_id,
+                        "reasoning_effort": reasoning_effort,
+                        "analysis_metadata": analysis_metadata,
+                        "metrics": turn_metrics(self.db, turn_id),
+                        "session_metrics": session_metrics(self.db, session_id,
+                                                           current_turn_id=turn_id),
+                    })
                     return {"turn_id": turn_id, "message_id": msg_id, "content": content}
                 self.events.append(turn_id, "assistant.tool_calls", actor="model", step=step,
                                    model_visible=True, payload={"content": "".join(content_parts),
                                                                 "tool_calls": tool_calls})
                 results = await self._run_tool_calls(turn_id, step, tool_calls, runtime_emit,
                                                      repeat_guard)
+                tool_ms = sum(int(result.get("_duration_ms", 0) or 0)
+                              for result in results)
+                if tool_ms:
+                    add_tool_time(self.db, turn_id=turn_id, step=step, tool_ms=tool_ms)
                 self.events.append(turn_id, "step.finished", actor="host", step=step,
                                    payload={"outcome": "tool_calls", "count": len(results)})
+                # 步边界推送刷新后的会话/turn 指标——对齐 deepseek-harness 的
+                # sessionStats projection 在 assistant/message 时的更新时机，
+                # 让多步 turn 在中间也能刷新 tok/s / TTFT 平均值等聚合数字。
+                await emit("step_metrics", {
+                    "turn_id": turn_id, "step": step,
+                    "metrics": turn_metrics(self.db, turn_id),
+                    "session_metrics": session_metrics(self.db, session_id,
+                                                       current_turn_id=turn_id),
+                })
             content = "任务已达到最大执行步骤，以下是已完成的结果。"
             msg_id = self.sessions.append_message(
                 session_id, "assistant", content,
@@ -231,9 +311,14 @@ class TurnRuntime:
                 reasoning_parts=reasoning_parts, system_parts=system_parts,
                 tool_events=tool_events, decision_notices=decision_notices,
                 reasoning_source=reasoning_source, end_reason="max_steps")
-            await runtime_emit("turn_completed", {"message_id": msg_id, "turn_id": turn_id,
-                                                   "reasoning_effort": reasoning_effort,
-                                                   "analysis_metadata": analysis_metadata})
+            await runtime_emit("turn_completed", {
+                "message_id": msg_id, "turn_id": turn_id,
+                "reasoning_effort": reasoning_effort,
+                "analysis_metadata": analysis_metadata,
+                "metrics": turn_metrics(self.db, turn_id),
+                "session_metrics": session_metrics(self.db, session_id,
+                                                   current_turn_id=turn_id),
+            })
             return {"turn_id": turn_id, "message_id": msg_id, "content": content}
         except asyncio.CancelledError:
             self.events.finish(turn_id, status="cancelled", end_reason="cancelled", step=0)
@@ -336,13 +421,19 @@ class TurnRuntime:
             await emit("tool_executing", {"tool_name": name, "status": "running",
                                             "turn_id": turn_id, "call_id": call_id})
             turn = self.events.get_turn(turn_id) or {}
+            tool_started_at = time.perf_counter()
             result = await self.executor.execute_tool(name, params, emit=emit,
                                                       session_id=turn.get("session_id", ""))
+            duration_ms = max(0, round((time.perf_counter() - tool_started_at) * 1000))
             if result.get("ok"):
-                return await self._record_result(turn_id, step, call_id, name, True,
-                                                 result.get("result"), emit)
-            return await self._record_result(turn_id, step, call_id, name, False,
-                                             result.get("error") or "工具执行失败", emit)
+                recorded = await self._record_result(turn_id, step, call_id, name, True,
+                                                     result.get("result"), emit)
+            else:
+                recorded = await self._record_result(
+                    turn_id, step, call_id, name, False,
+                    result.get("error") or "工具执行失败", emit)
+            recorded["_duration_ms"] = duration_ms
+            return recorded
 
         # Only explicitly read-only tools can share a model step. A write,
         # destructive, or external operation remains ordered and inspectable.

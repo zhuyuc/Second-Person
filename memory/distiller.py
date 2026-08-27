@@ -81,9 +81,17 @@ class Distiller:
         self._rededup_deleted: set[str] = set()
 
     async def distill(self, text: str, source_type: str = "memory") -> list[str]:
-        """提炼一段文本，返回新建/更新的 memory_id 列表。"""
+        """提炼一段文本，返回新建/更新的 memory_id 列表。
+
+        P4-D：单次 items cap（默认 8），避免 LLM 一句话吐 20 条候选淹没候选池。
+        """
         result = await self.extract_fn(text, source_type)
         items = result.get("items", []) if isinstance(result, dict) else []
+        cap = int(self.config.get("memory_distill_items_cap", 8))
+        if cap > 0 and len(items) > cap:
+            logger.info("distill items 超过 cap（%d > %d），截断",
+                        len(items), cap)
+            items = items[:cap]
         written: list[str] = []
         for item in items:
             # 文档/知识导入统一按外部知识入库，避免被误判为
@@ -105,7 +113,11 @@ class Distiller:
 
     async def distill_preview(self, text: str, source_type: str = "memory") -> list[dict]:
         """预览模式：只提炼 + 归属判定，不写入。返回待确认 items。
-        仅返回会写入记忆的条目（skill/soul_feedback/session_fact 仍按原路径处理）。"""
+
+        P2-D：预览阶段绝对不产生任何副作用（不 enqueue、不建 skill 草稿、不 SOUL）。
+        skill/soul_feedback/session_fact 归属的条目也一并进入预览清单，附带
+        `_preview_attribution` 供 UI 区分展示；确认时才由前端/API 决定是否入库。
+        """
         result = await self.extract_fn(text, source_type)
         items = result.get("items", []) if isinstance(result, dict) else []
         preview: list[dict] = []
@@ -113,10 +125,8 @@ class Distiller:
             if source_type == "knowledge":
                 item["attribution"] = "imported"
             attribution = item.get("attribution", "verified")
-            if attribution in ("skill", "soul_feedback", "session_fact"):
-                # 非记忆归属：照常走旁路（技能草稿/SOUL 待确认），不进预览清单
-                await self._route(item, source_type)
-                continue
+            # 标注但不再副作用调用 _route
+            item["_preview_attribution"] = attribution
             preview.append(item)
         return preview
 
@@ -183,37 +193,60 @@ class Distiller:
             link_thr = self.config.get("dedup_link_threshold", 0.6)
         else:
             merge_thr, link_thr = BM25_MERGE_THRESHOLD, BM25_LINK_THRESHOLD
-        best_id, best_score = self._find_best_candidate(
-            embedding, title, summary)
+        # P2-B：top-K 关系判定 —— 取相似度 top-K（默认 3），对每个候选都送 LLM
+        # 判定关系；任一 contradicts 就走矛盾分支（避免 top-1 是 evolved 而
+        # top-2 才是真正 contradicts 被漏）。
+        candidates = self._find_top_candidates(
+            embedding, title, summary, merge_thr,
+            top_k=int(self.config.get("dedup_judge_top_k", 3)))
 
-        if best_id and best_score >= merge_thr:
-            # 合并前先由 LLM 判定关系：相同/演变/矛盾/相关（防止高相似矛盾被静默合并，
-            # 也防止同主题不同侧面的互补记忆被误判矛盾或被静默合并）
-            relation = await self._judge_relation(item, best_id)
-            if relation == "contradicts":
+        if candidates:
+            # 优先处理：contradicts > evolved > related > same
+            relations: list[tuple[str, str, float]] = []
+            for cand_id, cand_score in candidates:
+                relation = await self._judge_relation(item, cand_id)
+                relations.append((cand_id, relation, cand_score))
+                if relation == "contradicts":
+                    break  # 找到冲突立刻处理，其他不再判
+
+            # 按优先级选择处理路径
+            contradicts = [(mid, s) for mid, r, s in relations if r == "contradicts"]
+            if contradicts:
+                best_conflict_id = contradicts[0][0]
                 mid = await self._create(item, confidence, stype, embedding,
                                          entities, entity_types, wait=True)
                 try:
-                    await self.conflict.mark_conflict(mid, best_id, title)
+                    await self.conflict.mark_conflict(mid, best_conflict_id, title)
                 except Exception:  # noqa: BLE001
-                    logger.warning("矛盾标记失败：%s vs %s", mid, best_id,
-                                   exc_info=True)
+                    logger.warning("矛盾标记失败：%s vs %s", mid,
+                                   best_conflict_id, exc_info=True)
                 return mid
-            if relation == "evolved":
-                return await self._merge_evolved(best_id, item)
-            if relation == "related":
-                # 同主题不同侧面：各自独立成条，建 related 引用
+
+            evolved = [(mid, s) for mid, r, s in relations if r == "evolved"]
+            if evolved:
+                return await self._merge_evolved(evolved[0][0], item)
+
+            related = [(mid, s) for mid, r, s in relations if r == "related"]
+            same = [(mid, s) for mid, r, s in relations if r == "same"]
+            if same:
+                # 相同关系：合并到相似度最高的一条
+                return await self._merge_into(same[0][0], item, confidence)
+            if related:
                 mid = await self._create(item, confidence, stype, embedding,
                                          entities, entity_types)
-                await self.linker.add_link(mid, best_id, "related")
+                for r_id, _ in related[:2]:  # 最多建 2 条 related
+                    await self.linker.add_link(mid, r_id, "related")
                 return mid
-            return await self._merge_into(best_id, item, confidence)
 
-        # 新建
+        # 新建；如果相似度在 link 区间但未达 merge 阈值，与最相近的建 related
         mid = await self._create(item, confidence, stype, embedding,
                                  entities, entity_types)
-        if best_id and link_thr <= best_score < merge_thr:
-            await self.linker.add_link(mid, best_id, "related")
+        near = self._find_top_candidates(embedding, title, summary,
+                                          threshold=link_thr, top_k=1)
+        if near:
+            best_id, best_score = near[0]
+            if link_thr <= best_score < merge_thr:
+                await self.linker.add_link(mid, best_id, "related")
         return mid
 
     async def _judge_relation(self, item: dict, target_id: str) -> str:
@@ -263,11 +296,53 @@ class Distiller:
                 "WHERE memories_fts MATCH ? ORDER BY s DESC LIMIT 1", (match,))
         except Exception:  # noqa: BLE001
             return None, 0.0
+        # \u53ea\u4fdd\u7559 top-1 \u517c\u5bb9\u8def\u5f84\uff1bP2-B/P2-C \u7684\u591a\u5019\u9009\u4e0e\u76f8\u5bf9\u5f52\u4e00\u8d70 _find_top_candidates
+        # \uff08\u89c1\u672c\u7c7b\u4e0b\u65b9 _find_top_candidates\uff09
         if rows:
             # 归一化到 0-1 粗略映射（BM25 降级区间：合并 0.75）
             bm25_divisor = self.config.get("bm25_normalization_divisor", 10.0)
             return rows[0]["memory_id"], min(1.0, rows[0]["s"] / bm25_divisor)
         return None, 0.0
+
+    def _find_top_candidates(self, embedding, title, summary,
+                              threshold: float, top_k: int = 3
+                              ) -> list[tuple[str, float]]:
+        """P2-B：返回相似度 >= threshold 的 top-K 候选。
+
+        embedding 可用时走向量 top_similar；否则退回 BM25 降级：
+        P2-C 修正 —— BM25 归一由固定除数改成相对 top-1 比值（top-1 恒为 1.0），
+        避免 embedding 挂时短 query 拿到 8+ 分被归一到 0.8+ 误合并。
+        """
+        if embedding is not None and self.vs.loaded and self.vs.dim:
+            cands = self.vs.top_similar(embedding, n=max(20, top_k * 4))
+            filtered = [(mid, s) for mid, s in cands if s >= threshold]
+            return filtered[:top_k]
+        q = f"{title} {summary}".strip()
+        import re as _re
+        tokens = _re.findall(r"[\w一-鿿]+", q)
+        if not tokens:
+            return []
+        match = " OR ".join(f'"{t}"' for t in tokens[:20])
+        try:
+            rows = self.db.query_all(
+                "SELECT memory_id, -bm25(memories_fts) s FROM memories_fts "
+                "WHERE memories_fts MATCH ? ORDER BY s DESC LIMIT ?",
+                (match, max(top_k * 4, 20)))
+        except Exception:  # noqa: BLE001
+            return []
+        if not rows:
+            return []
+        top_score = float(rows[0]["s"] or 0.0)
+        if top_score <= 0:
+            return []
+        out: list[tuple[str, float]] = []
+        for r in rows:
+            relative = float(r["s"]) / top_score  # 0-1，top-1 恒为 1.0
+            if relative >= threshold:
+                out.append((r["memory_id"], relative))
+            if len(out) >= top_k:
+                break
+        return out
 
     async def _create(self, item, confidence, source_type, embedding, entities,
                       entity_types: dict | None = None, wait: bool = False) -> str:
@@ -322,7 +397,11 @@ class Distiller:
         return mid
 
     async def _merge_evolved(self, target_id: str, item: dict) -> str:
-        """观点演变 → 合并到同一 md，详情段分层保留新旧观点，不升 confidence。"""
+        """观点演变 → 合并到同一 md，详情段分层保留新旧观点，不升 confidence。
+
+        P3-D：verification_state 保守合并 —— 只降不升。历史某条如果是 inferred，
+        evolved 后仍视为 inferred（新观点不能"洗白"历史不确定性）。
+        """
         from pathlib import Path
         from .md_file import parse_memory_md
         row = self.palace.get(target_id)
@@ -333,6 +412,12 @@ class Distiller:
         doc = await asyncio.to_thread(
             lambda: parse_memory_md(f.read_text(encoding="utf-8")))
         now = now_cst()
+        # verification_state 保守合并
+        _VS_RANK = {"unverified": 0, "inferred": 1, "direct": 2}
+        old_vs = row.get("verification_state") or "unverified"
+        new_vs = item.get("verification_state") or "unverified"
+        doc.frontmatter["verification_state"] = min(
+            (old_vs, new_vs), key=lambda v: _VS_RANK.get(v, 0))
         old_detail = doc.detail.strip()
         # 已分层过的旧详情不重复包裹“当前观点”头，只降级为历史段
         # （### 为当前写入格式；## 兄容早期数据，当时与结构段标题同级）
@@ -423,8 +508,9 @@ class Distiller:
                 best_id, best_score = cid, score
 
         if best_id and best_score >= merge_thr:
-            # 幸存者取 id 更小者（更早创建），较新的一条并入后删除
-            survivor, dup = (best_id, mid) if best_id < mid else (mid, best_id)
+            # P3-A：幸存者优先级 —— (write_channel==explicit) > (evidence_count) > (id 小)
+            # 防止用户主动 memory_save 的记忆被合并进"垃圾早期候选"
+            survivor, dup = self._pick_survivor(mid, best_id)
             await self._merge_existing(dup, survivor)
             await self._clear_dedup_pending(survivor)
             return survivor
@@ -445,6 +531,31 @@ class Distiller:
         merged = len(self._rededup_deleted)
         self._rededup_deleted.clear()
         return {"scanned": scanned, "merged": merged}
+
+    def _pick_survivor(self, a: str, b: str) -> tuple[str, str]:
+        """P3-A：在 (a, b) 中挑幸存者，另一个当 dup。
+
+        优先级：
+        1. write_channel == explicit（用户主动保存）
+        2. evidence_count 大者
+        3. id 小者（历史契约，创建更早）
+        任一元数据缺失时按剩余规则打分；两者相等按 id 小的胜。
+        """
+        row_a = self.palace.get(a)
+        row_b = self.palace.get(b)
+
+        def _key(row) -> tuple:
+            explicit = 1 if (row and str(row.get("write_channel") or "").lower() == "explicit") else 0
+            ev = int((row and row.get("evidence_count")) or 0)
+            return (explicit, ev)
+
+        ka, kb = _key(row_a), _key(row_b)
+        if ka > kb:
+            return a, b
+        if kb > ka:
+            return b, a
+        # 相等 → id 小者胜（历史契约）
+        return (a, b) if a < b else (b, a)
 
     async def _merge_existing(self, dup_id: str, survivor_id: str) -> None:
         """把 dup_id 合并进 survivor_id：更新幸存者变更历史/置信度/活跃度 →

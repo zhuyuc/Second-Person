@@ -52,6 +52,23 @@ def _uid() -> str:
     return uuid.uuid4().hex
 
 
+def _redact_for_trace(value: Any) -> Any:
+    """LangFuse 上报前的强制脱敏包装。
+
+    敏感原文（API key / 手机 / 邮箱 / 地址等）在 span input/output/metadata
+    进入 Langfuse 前一律替换为 [REDACTED:...] 占位。函数是纯的，不改传入对象。
+    出错兜底返原值（可观测性>安全时的最后一档保守）；memory.sensitivity 模块
+    没安装/加载失败也不阻塞 tracer 主流程。
+    """
+    if value is None:
+        return None
+    try:
+        from memory.sensitivity import redact_payload_for_trace
+        return redact_payload_for_trace(value)
+    except Exception:  # noqa: BLE001 - 兜底：不能因为脱敏抛错就丢 trace
+        return value
+
+
 def mark_preview(value: Any, *, content_type: str, limit: int | None = None) -> dict:
     """预览字段统一标记：说明"这块是什么内容" + 原始长度 + 截断标志 + 内容。
 
@@ -113,17 +130,17 @@ class _Trace:
                level=None, status_message=None) -> None:
         body: dict = {"id": self.id, "timestamp": _now()}
         if output is not None:
-            body["output"] = output
+            body["output"] = _redact_for_trace(output)
         if metadata is not None:
             # 深度合并：保留已有 metadata 字段，新值覆盖同名 key
             existing = getattr(self, "_metadata", None)
             merged = _deep_merge(existing, metadata) if existing else metadata
             self._metadata = merged
-            body["metadata"] = merged
+            body["metadata"] = _redact_for_trace(merged)
         if level:
             body["level"] = level
         if status_message:
-            body["statusMessage"] = status_message
+            body["statusMessage"] = _redact_for_trace(status_message)
         self._t._emit("trace-create", body)
 
     def end(self, output=None, level=None, status_message=None) -> None:
@@ -160,9 +177,9 @@ class _Span:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "timestamp": _now()}
         if self._output is not None:
-            body["output"] = self._output
+            body["output"] = _redact_for_trace(self._output)
         if self._meta is not None:
-            body["metadata"] = self._meta
+            body["metadata"] = _redact_for_trace(self._meta)
         self._t._emit("span-update", body)
 
     def end(self, output=None, level=None, status_message=None) -> None:
@@ -175,13 +192,13 @@ class _Span:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if self._output is not None:
-            body["output"] = self._output
+            body["output"] = _redact_for_trace(self._output)
         if self._meta is not None:
-            body["metadata"] = self._meta
+            body["metadata"] = _redact_for_trace(self._meta)
         if level:
             body["level"] = level
         if status_message:
-            body["statusMessage"] = status_message
+            body["statusMessage"] = _redact_for_trace(status_message)
         self._t._emit("span-update", body)
         try:
             _active_obs.reset(self._tok)
@@ -205,15 +222,15 @@ class _Generation:
         body: dict = {"id": self.id,
                       "traceId": self.trace_id, "endTime": _now()}
         if output is not None:
-            body["output"] = output
+            body["output"] = _redact_for_trace(output)
         if usage:
             body["usage"] = usage
         if metadata is not None:
-            body["metadata"] = metadata
+            body["metadata"] = _redact_for_trace(metadata)
         if level:
             body["level"] = level
         if status_message:
-            body["statusMessage"] = status_message
+            body["statusMessage"] = _redact_for_trace(status_message)
         self._t._emit("generation-update", body)
 
 
@@ -261,7 +278,8 @@ class PipelineTracer:
         else:
             meta = {"degradation": {"decision_reason": str(decision)}}
         self._emit("span-update", {"id": sid, "traceId": _active_trace.get(),
-                                   "timestamp": _now(), "metadata": meta})
+                                   "timestamp": _now(),
+                                   "metadata": _redact_for_trace(meta)})
 
     async def flush(self) -> None:
         if self._client:
@@ -285,9 +303,9 @@ class PipelineTracer:
         if user_id is not None:
             body["userId"] = user_id
         if input is not None:
-            body["input"] = input
+            body["input"] = _redact_for_trace(input)
         if metadata is not None:
-            body["metadata"] = metadata
+            body["metadata"] = _redact_for_trace(metadata)
         if tags:
             body["tags"] = tags
         if self.config.release:
@@ -314,9 +332,9 @@ class PipelineTracer:
         body: dict = {"id": sid, "traceId": tid, "name": name, "startTime": _now(),
                       "parentObservationId": parent_observation_id or _active_obs.get()}
         if input is not None:
-            body["input"] = input
+            body["input"] = _redact_for_trace(input)
         if metadata is not None:
-            body["metadata"] = metadata
+            body["metadata"] = _redact_for_trace(metadata)
         self._emit("span-create", body)
         tok = _active_obs.set(sid)
         return _Span(self, tid, sid, tok)
@@ -334,9 +352,9 @@ class PipelineTracer:
         if model_parameters is not None:
             body["modelParameters"] = model_parameters
         if input is not None:
-            body["input"] = input
+            body["input"] = _redact_for_trace(input)
         if metadata is not None:
-            body["metadata"] = metadata
+            body["metadata"] = _redact_for_trace(metadata)
         self._emit("generation-create", body)
         return _Generation(self, tid, gid)
 

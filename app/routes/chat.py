@@ -25,6 +25,7 @@ from app.contracts import (
     read_json_object,
 )
 from infrastructure.prompt_loader import PROMPTS
+from infrastructure.session_metrics import session_metrics
 from infrastructure.sse_contract import SSEContractError, validate_sse_event
 
 router = APIRouter()
@@ -238,6 +239,19 @@ async def chat_send(request: Request):
     is_first = row and row["message_count"] == 0
     if is_first:
         asyncio.create_task(_gen_title(c, sid, message))
+
+    # P1-D：用户否认信号 → 即时抑制该会话最近入池的候选，避免下轮回顾复原
+    try:
+        from memory.write_gate import has_denial_signal
+        if message and has_denial_signal(message) and getattr(c, "memory_gate", None):
+            suppressed = c.memory_gate.suppress_recent_from_denial(
+                sid, minutes=int(c.config.get("memory_denial_suppress_window_minutes", 30)))
+            if suppressed:
+                logging.getLogger("second_person.chat").info(
+                    "用户否认信号触发抑制：session=%s 影响候选=%d", sid, suppressed)
+    except Exception:  # noqa: BLE001 - 抑制失败不阻塞主流程
+        logging.getLogger("second_person.chat").warning(
+            "denial-signal suppress failed", exc_info=True)
 
     async def produce():
         """后台消费 Agent 事件流写入缓冲：SSE 断开不影响生成，
@@ -459,6 +473,20 @@ async def sessions(keyword: str = None, page: int = 1, page_size: int = 20):
 @router.get("/chat/messages")
 async def messages(session_id: str, before_id: int = None, limit: int = 50):
     return {"code": 200, "data": _c().sessions.get_messages(session_id, before_id, limit)}
+
+
+@router.get("/chat/session/{session_id}/metrics")
+async def session_metrics_route(session_id: str):
+    """Return whole-session counters and the latest completed-turn speed."""
+    c = _c()
+    if not c.db.query_one("SELECT 1 FROM sessions WHERE session_id=?", (session_id,)):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    latest = c.db.query_one(
+        "SELECT id FROM agent_turns WHERE session_id=? AND status='completed' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (session_id,))
+    return {"code": 200, "data": session_metrics(
+        c.db, session_id, current_turn_id=latest["id"] if latest else None)}
 
 
 @router.post("/chat/feedback")

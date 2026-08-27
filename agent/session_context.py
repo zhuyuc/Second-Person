@@ -421,7 +421,14 @@ class SessionStore:
 
         仅加载当前活跃分支的消息（is_active=1）。
         Head：会话最初 2 轮（存在压缩摘要时才拼入）；
-        Summary：压缩摘要（有则拼入）；Tail：水位之后的全部原文。
+        Summary：压缩摘要（有则拼入，以 user 消息形式）；
+        Tail：水位之后的全部原文，按 id 顺序追加。
+
+        Cache 友好设计（N1+N4 击穿修复）：
+        - 消息严格按 id 单调递增顺序投影，不因 protected 前置而错位；
+          protected_from_compression 只是给压缩阶段的"跳过标记"，不改变投影顺序。
+        - Summary 使用 role=user 而非 system，避免 Anthropic 适配器把它拼进
+          主 system 头造成 provider prefix cache 从 token 0 击穿。
         """
         row = self.db.query_one(
             "SELECT compressed_summary_path,last_compressed_message_id FROM sessions "
@@ -437,10 +444,22 @@ class SessionStore:
         watermark = row["last_compressed_message_id"]
         head_msgs = 4  # 2 轮 × 每轮 2 条（user + assistant）
 
-        # 活跃分支过滤条件
         active_filter = "AND (is_active=1 OR is_active IS NULL)"
-
-        # Tail：水位之后的全部活跃原文
+        msgs: list[dict] = []
+        if summary_text and watermark:
+            head_rows = self.db.query_all(
+                "SELECT id,role,content FROM conversations WHERE session_id=? "
+                f"AND id<=? AND message_type='normal' {active_filter} ORDER BY id LIMIT ?",
+                (sid, watermark, head_msgs))
+            for r in head_rows:
+                if r["role"] in ("user", "assistant"):
+                    msgs.append({"role": r["role"], "content": r["content"],
+                                 "id": r["id"]})
+            msgs.append({
+                "role": "user",
+                "content": PROMPTS.load_raw("agent/prompts/compact_prefix")
+                + "\n" + summary_text,
+            })
         if watermark:
             tail_rows = self.db.query_all(
                 "SELECT id,role,content FROM conversations "
@@ -451,29 +470,6 @@ class SessionStore:
                 "SELECT id,role,content FROM conversations "
                 f"WHERE session_id=? AND message_type='normal' {active_filter} ORDER BY id",
                 (sid,))
-        msgs = []
-        # 第一优先级：protected + 活跃的消息完整原文
-        protected_rows = self.db.query_all(
-            "SELECT id,role,content FROM conversations "
-            "WHERE session_id=? AND message_type='normal' "
-            f"AND protected_from_compression=1 {active_filter} ORDER BY id",
-            (sid,))
-        for r in protected_rows:
-            if r["role"] in ("user", "assistant"):
-                msgs.append({"role": r["role"], "content": r["content"],
-                             "id": r["id"]})
-        if summary_text:
-            head_rows = self.db.query_all(
-                "SELECT id,role,content FROM conversations WHERE session_id=? "
-                f"AND id<=? AND message_type='normal' {active_filter} ORDER BY id LIMIT ?",
-                (sid, watermark or 0, head_msgs)) if watermark else []
-            for r in head_rows:
-                if r["role"] in ("user", "assistant"):
-                    msgs.append({"role": r["role"], "content": r["content"],
-                                 "id": r["id"]})
-            msgs.append({"role": "system",
-                         "content": PROMPTS.load_raw("agent/prompts/compact_prefix")
-                         + "\n" + summary_text})
         for r in tail_rows:
             if r["role"] in ("user", "assistant"):
                 msgs.append({"role": r["role"], "content": r["content"],
