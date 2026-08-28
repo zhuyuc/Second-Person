@@ -75,7 +75,7 @@ def test_is_important_decays_after_no_access(tmp_path: Path):
         palace = Palace(db)
         writer = FileWriter(db, palace, _FakeVS(), data_dir)
         lifecycle = LifecycleManager(db, palace, writer, data_dir,
-                                     {"important_memory_decay_days": 30})
+                                     {"memory_horizon_days": 90})
         await writer.start()
         try:
             mid = "mem_000001"

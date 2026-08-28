@@ -439,7 +439,8 @@ class OutputStyleBuilder:
         interval = self.config.get("output_style_review_interval_days", 7)
         if (now_cst() - last_dt) >= timedelta(days=interval):
             return True
-        batch = self.config.get("output_style_signal_batch_threshold", 100)
+        from memory import _constants as _mem_const
+        batch = _mem_const.OUTPUT_STYLE_SIGNAL_BATCH_THRESHOLD
         new_signals = self.db.query_one(
             "SELECT count(*) c FROM response_signals WHERE create_time > ?",
             (last,))["c"]
@@ -455,7 +456,8 @@ class OutputStyleBuilder:
         snap = self.snapshot_fn()
         if snap is None:
             return False
-        window = self.config.get("output_style_signal_window_days", 30)
+        from memory import _constants as _mem_const
+        window = _mem_const.OUTPUT_STYLE_SIGNAL_WINDOW_DAYS
         cutoff = (now_cst() - timedelta(days=window)
                   ).isoformat(timespec="seconds")
         # 双块归因数据源（v3 §反馈闭环）：response_signals JOIN 策略快照；
@@ -473,8 +475,8 @@ class OutputStyleBuilder:
             "WHERE rs.create_time>=?", (cutoff,))
         if not rows:
             return False
-        followup_window = self.config.get(
-            "strategy_followup_window_seconds", 60)
+        from memory import _constants as _mem_const
+        followup_window = _mem_const.STRATEGY_FOLLOWUP_WINDOW_SECONDS
         # 分场景统计（context_label：chat/opinion/fact_query/tech_help/other）：
         # 避免把不同场景混在一起得出“点赞平均字数”式的一刀切结论
         scenes: dict[str, dict] = {}

@@ -244,8 +244,9 @@ async def chat_send(request: Request):
     try:
         from memory.write_gate import has_denial_signal
         if message and has_denial_signal(message) and getattr(c, "memory_gate", None):
+            from memory import _constants as _mem_const
             suppressed = c.memory_gate.suppress_recent_from_denial(
-                sid, minutes=int(c.config.get("memory_denial_suppress_window_minutes", 30)))
+                sid, minutes=_mem_const.DENIAL_SUPPRESS_WINDOW_MINUTES)
             if suppressed:
                 logging.getLogger("second_person.chat").info(
                     "用户否认信号触发抑制：session=%s 影响候选=%d", sid, suppressed)

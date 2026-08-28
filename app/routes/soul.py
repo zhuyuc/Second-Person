@@ -170,7 +170,8 @@ async def output_style():
                 files[0].stat().st_mtime).isoformat(timespec="seconds")
     except Exception:  # noqa: BLE001
         pass
-    batch = c.config.get("output_style_signal_batch_threshold", 100)
+    from memory import _constants as _mem_const
+    batch = _mem_const.OUTPUT_STYLE_SIGNAL_BATCH_THRESHOLD
     return {"code": 200, "data": {
         "profile_text": sections.get("输出样式", ""),
         "auto_evolve_enabled": c.config.get("output_style_auto_evolve_enabled", True),

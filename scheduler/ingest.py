@@ -357,8 +357,8 @@ class IngestManager:
                 await progress_cb("extracting", {})
             text = await extract_text_async(stored, self.image_extract_fn)
             is_image = stored.suffix.lower() in IMAGE_EXTS
-            chunk_chars = self.config.get(
-                "ingest_chunk_tokens", 6000) * 2  # token→char 粗略
+            from memory import _constants as _mem_const
+            chunk_chars = _mem_const.INGEST_CHUNK_TOKENS * 2  # token→char 粗略
             chunks = chunk_text(text, chunk_chars)
             if progress_cb:
                 await progress_cb("chunked", {"total": len(chunks)})
@@ -457,7 +457,8 @@ class IngestManager:
         text = await web_fetch_fn(url)
         doc_id = self._next_doc_id()
         import json
-        chunk_chars = self.config.get("ingest_chunk_tokens", 6000) * 2
+        from memory import _constants as _mem_const
+        chunk_chars = _mem_const.INGEST_CHUNK_TOKENS * 2
         written: list[str] = []
         for chunk in chunk_text(text, chunk_chars):
             written.extend(await self.distiller.distill(chunk, source_type="knowledge"))

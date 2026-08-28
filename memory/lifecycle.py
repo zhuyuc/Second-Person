@@ -70,9 +70,9 @@ class LifecycleManager:
         row, doc = self._load_doc(mid)
         if not row or not doc:
             return False
-        threshold = self.config.get("important_upgrade_count", 3)
+        from . import _constants
         if (row["confidence"] == "strong" and row["lifecycle"] == "active"
-                and row["access_count"] >= threshold):
+                and row["access_count"] >= _constants.IMPORTANT_UPGRADE_COUNT):
             doc.frontmatter["lifecycle"] = "stable"
             # 守卫：用户手动移出过重要目录的记忆，升 stable 不再自动置回
             if not _row_flag(row, "user_cleared_important"):
@@ -171,7 +171,8 @@ class LifecycleManager:
 
     # ---- active → stale（Lint 过期检测批量） ------------------------------
     def detect_stale_candidates(self) -> list[str]:
-        days = self.config.get("stale_detection_days", 90)
+        from . import _constants
+        days = _constants.stale_days(self.config)
         cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         rows = self.db.query_all(
@@ -266,8 +267,9 @@ class LifecycleManager:
         任何 memory update 时由 fix_index_drift/normal write 同步。避免此处
         触发 FileWriter 队列在同步/异步双路径下的 event loop 复杂度。
         """
+        from . import _constants
         days = int(days if days is not None
-                   else self.config.get("important_memory_decay_days", 30))
+                   else _constants.important_decay_days(self.config))
         cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         # user_cleared_important 已置位的不再改；同时用 last_accessed 做过滤

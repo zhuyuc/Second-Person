@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
 
+from . import _mood_constants as _mood
+
 logger = logging.getLogger("second_person.mood")
 
 DECAY_FLOOR = 0.05     # 有效强度低于该值视为 neutral（不注入）
@@ -144,7 +146,7 @@ class MoodManager:
             "SELECT count(*) c FROM mood_history "
             "WHERE scope=? AND mood IN ('warm','affectionate','trusting','grateful') "
             "AND create_time > ?", (scope, warm_since))["c"]
-        if warm_count >= self.config.get("mood_baseline_warm_threshold", 5):
+        if warm_count >= _mood.BASELINE_WARM_THRESHOLD:
             return "平静但有暖意"
         curious_since = (now_cst() - timedelta(days=1)
                          ).isoformat(timespec="seconds")
@@ -152,7 +154,7 @@ class MoodManager:
             "SELECT count(*) c FROM mood_history "
             "WHERE scope=? AND mood IN ('curious','eager','aspiring') "
             "AND create_time > ?", (scope, curious_since))["c"]
-        if curious_count >= self.config.get("mood_baseline_curious_threshold", 2):
+        if curious_count >= _mood.BASELINE_CURIOUS_THRESHOLD:
             return "平静而好奇"
         return "平静"
 
@@ -197,8 +199,7 @@ class MoodManager:
             }
 
         # 传染
-        contagion_factor = self.config.get("mood_contagion_factor", 0.25)
-        new_moods = self._apply_contagion(new_moods, contagion_factor)
+        new_moods = self._apply_contagion(new_moods, _mood.CONTAGION_FACTOR)
 
         # 平复事件
         peace_applied = False
@@ -263,7 +264,7 @@ class MoodManager:
 
     def _apply_peace_event(self, new_moods: dict, event: str) -> dict:
         """平复事件触发快速衰减 + 情绪方向转换。"""
-        decay = self.config.get("mood_peace_event_decay_factor", 0.3)
+        decay = _mood.PEACE_EVENT_DECAY_FACTOR
         for scope in ("user", "ai"):
             data = new_moods[scope]
             if data["mood"] in NEGATIVE_MOODS:
@@ -294,9 +295,8 @@ class MoodManager:
             "WHERE create_time > ? "
             "ORDER BY id DESC LIMIT 6", (recent_since,))
         all_neutral = all(m["mood"] == "neutral" for m in recent_moods)
-        min_turns = self.config.get(
-            "mood_natural_decline_min_neutral_turns", 3)
-        factor = self.config.get("mood_natural_decline_factor", 0.7)
+        min_turns = _mood.NATURAL_DECLINE_MIN_NEUTRAL_TURNS
+        factor = _mood.NATURAL_DECLINE_FACTOR
         if recent_triggers == 0 and all_neutral and len(recent_moods) >= min_turns:
             row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
             for scope in ("user", "ai"):

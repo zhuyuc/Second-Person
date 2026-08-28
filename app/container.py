@@ -271,8 +271,8 @@ class AppContainer:
                 logger.warning(
                     "extract_fn JSON 修复失败：source_type=%s consecutive=%d err=%s",
                     source_type, REPAIR_STATS.consecutive_failures, exc)
-                threshold = int(self.config.get(
-                    "json_repair_alert_threshold", 5))
+                from memory import _constants as _mem_const
+                threshold = _mem_const.JSON_REPAIR_ALERT_THRESHOLD
                 if (REPAIR_STATS.consecutive_failures >= threshold
                         and hasattr(self, "notifications")):
                     try:

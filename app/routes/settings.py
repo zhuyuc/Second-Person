@@ -1014,7 +1014,8 @@ async def list_tasks():
     # 调度/描述文本根据当前参数动态生成，与参数页保持一致
     review = c.config.get("passive_review_interval_days", 3)
     os_days = c.config.get("output_style_review_interval_days", 7)
-    os_batch = c.config.get("output_style_signal_batch_threshold", 100)
+    from memory import _constants as _mem_const
+    os_batch = _mem_const.OUTPUT_STYLE_SIGNAL_BATCH_THRESHOLD
     sig_keep = c.config.get("output_style_signal_retention_days", 90)
     backup_keep = c.config.get("backup_retention_count", 3)
     dynamic = {

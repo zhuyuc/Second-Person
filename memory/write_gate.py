@@ -345,9 +345,8 @@ class MemoryWriteGate:
                 and item.get("attribution") != "session_fact":
             item["attribution"] = "inferred"
             item["confidence"] = "low"
-        sensitivity = (sensitivity_level(text)
-                       if _cfg(self.config, "memory_sensitive_scan_enabled", True)
-                       else "none")
+        # 敏感信息扫描始终开启（安全兜底不给关的选项）
+        sensitivity = sensitivity_level(text)
         if sensitivity == "high":
             return GateDecision(False, channel, 0.0, "rejected", "命中敏感信息，禁止写入原文", sensitivity)
         if channel == "session_only":
@@ -369,7 +368,8 @@ class MemoryWriteGate:
             return GateDecision(True, channel, score, "approved", "用户明确要求保存", sensitivity)
         if score < min_score:
             return GateDecision(False, channel, score, "rejected", "长期复用价值不足")
-        negative_threshold = int(_cfg(self.config, "memory_negative_suppress_count", 2))
+        from . import _constants as _mem_const
+        negative_threshold = _mem_const.NEGATIVE_SUPPRESS_COUNT
         if negative_count >= negative_threshold:
             return GateDecision(False, channel, score, "pending", "近期检索负反馈，转人工确认", sensitivity)
         min_evidence = int(_cfg(self.config, "memory_min_evidence_cross_session", 2))
@@ -391,7 +391,8 @@ class MemoryWriteGate:
         bucket = content_bucket(item)
         # P4-D：domain 每日入池上限。已 rejected 不计（不阻塞 rejected 记录）
         domain = item.get("domain", "general")
-        daily_cap = int(_cfg(self.config, "memory_domain_daily_cap", 20))
+        from . import _constants as _mem_const
+        daily_cap = _mem_const.DOMAIN_DAILY_CAP
         if daily_cap > 0 and domain and self.db:
             today = now[:10]
             try:

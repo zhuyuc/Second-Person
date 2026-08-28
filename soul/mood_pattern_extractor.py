@@ -13,6 +13,7 @@ from collections import Counter
 from datetime import timedelta
 
 from infrastructure.timeutil import now_cst
+from soul import _mood_constants as _mood
 from soul.mood_manager import _mood_cn
 
 logger = logging.getLogger("second_person.mood_pattern")
@@ -27,7 +28,7 @@ class MoodPatternExtractor:
     async def extract(self) -> int:
         """分析 mood_history，为达标情绪写入记忆。返回新增记忆条数。"""
         window_days = self.config.get("mood_pattern_window_days", 14)
-        min_occurrences = self.config.get("mood_pattern_min_occurrences", 5)
+        min_occurrences = _mood.PATTERN_MIN_OCCURRENCES
         cutoff = (now_cst() - timedelta(days=window_days)
                   ).isoformat(timespec="seconds")
 

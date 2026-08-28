@@ -66,7 +66,7 @@ function toggleMobile() {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 1.5px;
   max-height: 100%;
   padding: 8px 0;
   pointer-events: auto;
@@ -78,7 +78,7 @@ function toggleMobile() {
   align-items: center;
   justify-content: center;
   width: 40px;
-  height: 12px;
+  height: 6px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -88,7 +88,7 @@ function toggleMobile() {
 /* 默认样式：短细虚化横线（参考 Codex 侧边定位） */
 .message-anchor-line {
   display: block;
-  width: 14px;
+  width: 9px;
   height: 1.5px;
   border-radius: 2px;
   background: var(--muted);
@@ -99,7 +99,7 @@ function toggleMobile() {
 /* 唯一的高亮触发条件：鼠标悬停或键盘聚焦 */
 .message-anchor-mark:hover .message-anchor-line,
 .message-anchor-mark:focus-visible .message-anchor-line {
-  width: 28px;
+  width: 19px;
   height: 2px;
   background: var(--fg);
   opacity: 0.95;

@@ -87,7 +87,8 @@ class Distiller:
         """
         result = await self.extract_fn(text, source_type)
         items = result.get("items", []) if isinstance(result, dict) else []
-        cap = int(self.config.get("memory_distill_items_cap", 8))
+        from . import _constants as _mem_const
+        cap = _mem_const.DISTILL_ITEMS_CAP
         if cap > 0 and len(items) > cap:
             logger.info("distill items 超过 cap（%d > %d），截断",
                         len(items), cap)

@@ -85,7 +85,8 @@ class AgentCore:
         del regenerate_message_id
         effort = normalize_reasoning_effort(
             reasoning_effort or self.config.get("default_reasoning_effort", "high"))
-        limit = self.config.get("session_queue_limit", 3)
+        from memory import _constants as _mem_const
+        limit = _mem_const.SESSION_QUEUE_LIMIT
         if self._session_queue[session_id] >= limit:
             yield {"event": "error", "data": {"code": 429, "message": "会话繁忙，请稍后再试"}}
             return
@@ -160,12 +161,11 @@ class AgentCore:
         ]
         context_text = "\n".join(str(item.get("content", "")) for item in history[-6:])
         retrieval = await self.retriever.retrieve(
-            message, llm_available=False, session_id=session_id,
-            context_text=context_text)
-        memories = retrieval.hits[:3]
-        memory_text = "\n\n".join(
-            f"- {item.get('title', '记忆')}: {item.get('detail') or item.get('summary') or ''}"
-            for item in memories)
+            message, session_id=session_id, context_text=context_text)
+        # 常态化拼装图结构：主命中 + 关联记忆按关系分组，显式表达图关系给模型；
+        # 若本轮候选池里有争议记忆，附上争议提醒（不注入原文，只感知）
+        memory_text = self._compose_memory_context(
+            retrieval.hits, retrieval.related, retrieval.disputed)
         # N2/N3 击穿修复：memory / handoff 不再作为 dynamic_blocks 进 system prompt
         # （system 尾部一变整个前缀就废）；改为 turn 级独立元信息，由 turn_runtime
         # 追加到 messages 末尾。这样只影响尾部一小段 tokens，system + tools + history
@@ -182,7 +182,65 @@ class AgentCore:
                 "dynamic_blocks": [],  # 保留字段以兼容 _build_system_prompt 签名
                 "memory_context": memory_context,
                 "handoff_context": handoff_context,
-                "memory_count": len(memories), "turn_id": turn_id, "step": step}
+                "memory_count": len(retrieval.hits) + len(retrieval.related),
+                "turn_id": turn_id, "step": step}
+
+    @staticmethod
+    def _compose_memory_context(hits: list[dict],
+                                 related: list[dict],
+                                 disputed: list[dict] | None = None) -> str:
+        """把主命中 + 关联记忆按关系分组拼进上下文，显式表达图结构。
+
+        分组顺序：核心 → 演变（evolved）→ 冲突（contradicts）→ 相关 →
+                共实体 → 共引 → 争议提醒
+        每条附带 verification/freshness 标签供模型识别弱证据。
+        争议提醒不注入原文，只让模型/UI 感知"这里有未裁决的争议"。
+        """
+        def _fmt(item: dict, tag: str = "") -> str:
+            body = item.get("detail") or item.get("summary") or ""
+            title = item.get("title", "记忆")
+            state = []
+            vs = item.get("verification_state")
+            if vs == "inferred":
+                state.append("推断")
+            fs = item.get("freshness_state")
+            if fs in ("expired", "review_due"):
+                state.append("可能过时")
+            conf = item.get("confidence")
+            if conf == "low":
+                state.append("低置信")
+            label = f"[{','.join(state)}]" if state else ""
+            prefix = f"{tag} " if tag else ""
+            return f"- {prefix}{title}{label}: {body}"
+
+        parts: list[str] = []
+        if hits:
+            parts.append("[核心记忆]")
+            parts.extend(_fmt(h) for h in hits)
+        buckets: dict[str, list[dict]] = {}
+        for r in related:
+            buckets.setdefault(r.get("relation") or "related", []).append(r)
+        order = [("evolved_from", "[演变记忆]"),
+                 ("contradicts", "[存在冲突]"),
+                 ("related", "[相关记忆]"),
+                 ("entity_shared", "[共实体记忆]"),
+                 ("co_cited", "[共引记忆（曾一起被引用）]")]
+        for key, header in order:
+            group = buckets.get(key)
+            if not group:
+                continue
+            parts.append(header)
+            for item in group:
+                seed = item.get("from_seed")
+                tag = f"(源自 {seed})" if seed else ""
+                parts.append(_fmt(item, tag))
+        # F3：争议提醒 —— 有本轮候选池里被硬砍的争议记忆时，附上标题让模型
+        # 可以主动告知"这里有争议，请到记忆中心裁决"
+        if disputed:
+            parts.append("[争议提醒（未裁决，不作为事实使用）]")
+            for d in disputed[:5]:
+                parts.append(f"- {d.get('title', '记忆')}: {d.get('summary', '')}")
+        return "\n".join(parts)
 
     def get_turn(self, turn_id: str) -> dict | None:
         return self.turn_events.get_turn(turn_id)
@@ -306,7 +364,8 @@ class AgentCore:
 
     def _build_action_ctx(self, sid: str) -> dict:
         """Return the small host state used by the optional mood action policy."""
-        window = self.config.get("mood_task_repeat_window", 20)
+        from soul import _mood_constants as _mood
+        window = _mood.TASK_REPEAT_WINDOW
         row = self.db.query_one(
             "SELECT count(*) c FROM conversations WHERE session_id=? AND role='user' "
             "AND id > (SELECT COALESCE(MAX(id)-?, 0) FROM conversations WHERE session_id=?) "

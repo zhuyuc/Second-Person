@@ -86,7 +86,8 @@ class TurnRuntime:
         system_parts: list[str] = []
         decision_notices: list[dict[str, Any]] = []
         tool_events: list[dict[str, Any]] = []
-        repeat_guard = RepeatToolGuard(self.config.get("repeat_tool_thresholds", (3, 5, 8)))
+        from memory import _constants as _mem_const
+        repeat_guard = RepeatToolGuard(_mem_const.REPEAT_TOOL_THRESHOLDS)
         reasoning_source = "none"
 
         async def runtime_emit(event: str, data: dict) -> None:
