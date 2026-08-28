@@ -355,15 +355,15 @@ class MemoryWriteGate:
         if channel == "knowledge":
             # T1-C：knowledge 通道也过最低分门禁；文档里"描述第三人"的候选（低
             # user_specificity）会被这里自然拦下，不再裸奔进 L3
-            knowledge_min = float(_cfg(
-                self.config, "memory_knowledge_min_score", 55))
+            from . import _constants as _mem_const
+            _, _, knowledge_min = _mem_const.write_strictness_thresholds(self.config)
             if score < knowledge_min:
                 return GateDecision(False, channel, score, "rejected",
                                     "知识条目复用价值不足（低于 knowledge 门槛）", sensitivity)
             return GateDecision(True, channel, score, "approved",
                                 "外部知识进入知识记忆通道", sensitivity)
-        min_score = float(_cfg(self.config, "memory_candidate_min_score", 70))
-        auto_score = float(_cfg(self.config, "memory_auto_write_score", 85))
+        from . import _constants as _mem_const
+        min_score, auto_score, _ = _mem_const.write_strictness_thresholds(self.config)
         if explicit:
             return GateDecision(True, channel, score, "approved", "用户明确要求保存", sensitivity)
         if score < min_score:

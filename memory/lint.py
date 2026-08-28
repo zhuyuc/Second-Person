@@ -115,7 +115,8 @@ class LintEngine:
 
     # ---- 重复检测：相似度 > lint_duplicate_threshold -----------------------
     def detect_duplicates(self, lint_run_id: str) -> list[str]:
-        threshold = self.config.get("lint_duplicate_threshold", 0.9)
+        from . import _constants as _mem_const
+        _, _, threshold = _mem_const.dedup_thresholds(self.config)
         sug_ids = []
         checked: set[tuple] = set()
         rows = self.db.query_all(

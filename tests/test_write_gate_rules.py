@@ -72,7 +72,7 @@ def test_gate_forces_inferred_on_tentative():
 
 def test_knowledge_channel_has_min_score():
     """imported 走 knowledge 通道时也过 memory_knowledge_min_score。"""
-    gate = MemoryWriteGate(None, _Cfg(memory_knowledge_min_score=55))
+    gate = MemoryWriteGate(None, _Cfg(memory_write_strictness="normal"))
     # 描述第三人的低 specificity 文档条目（含实体过 is_well_formed）
     low = _item("张三是这个团队的核心", attribution="imported",
                 entities=["张三", "团队"],

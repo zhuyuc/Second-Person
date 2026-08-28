@@ -128,7 +128,7 @@ class AppContainer:
         self.domain_labeler = DomainLabeler(self.db, domain_translate_fn)
 
         self.vs = VectorStore(
-            self.db, self.config.get("vector_cache_max_mb", 512))
+            self.db, __import__("memory._constants", fromlist=["VECTOR_CACHE_MAX_MB"]).VECTOR_CACHE_MAX_MB)
         self.index_builder = IndexBuilder(self.db, self.palace, d)
         self.ctx_entry = ContextEntryManager(d)
         self.sessions = SessionStore(self.db, d)
@@ -528,8 +528,9 @@ class AppContainer:
                                        self.notifications, self.config, self.ingest)
 
     def _purge_old_signals(self) -> int:
-        """清理超 output_style_signal_retention_days（默认 90）天的 response_signals。"""
-        days = self.config.get("output_style_signal_retention_days", 90)
+        """清理超保留期的 response_signals。"""
+        from memory import _constants as _mem_const
+        days = _mem_const.OUTPUT_STYLE_SIGNAL_RETENTION_DAYS
         cutoff = (now_cst() - timedelta(days=days)
                   ).isoformat(timespec="seconds")
         cur = self.db.execute(

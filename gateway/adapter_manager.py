@@ -64,7 +64,7 @@ class AdapterManager:
         adapter = cls(
             row["id"], cfg, core=self.core, sessions=self.sessions, db=self.db,
             notifier=self.notifications.push,
-            im_max_chars=self.config.get("im_message_max_chars", 4000),
+            im_max_chars=__import__("memory._constants", fromlist=["IM_MESSAGE_MAX_CHARS"]).IM_MESSAGE_MAX_CHARS,
             data_dir=self.data_dir, ingest=self.ingest)
         try:
             await adapter.connect()

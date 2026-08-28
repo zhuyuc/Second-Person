@@ -46,7 +46,9 @@ class Linker:
         vec = deserialize_vector(vrow["embedding"])
         candidates = self.vs.top_similar(vec, n=5)
         for mid, score in candidates:
-            if mid != orphan_id and score >= self.config.get("dedup_link_threshold", 0.6):
+            from . import _constants as _mem_const
+            _, link_thr, _ = _mem_const.dedup_thresholds(self.config)
+            if mid != orphan_id and score >= link_thr:
                 await self.add_link(orphan_id, mid, "related")
                 return mid
         return None

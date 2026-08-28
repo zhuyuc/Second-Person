@@ -68,7 +68,8 @@ class TurnRuntime:
                   assistant_parent_id: int | None = None,
                   assistant_version_group_id: int | None = None,
                   handoff_path: str | None = None) -> dict[str, Any]:
-        max_steps = self.config.get("agent_max_steps", 8)
+        from memory import _constants as _mem_const
+        max_steps = _mem_const.AGENT_MAX_STEPS
         tracer = get_tracer()
         trace = tracer.trace_start(
             "agent.turn", session_id=session_id,

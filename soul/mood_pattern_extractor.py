@@ -27,7 +27,7 @@ class MoodPatternExtractor:
 
     async def extract(self) -> int:
         """分析 mood_history，为达标情绪写入记忆。返回新增记忆条数。"""
-        window_days = self.config.get("mood_pattern_window_days", 14)
+        window_days = _mood.MOOD_PATTERN_WINDOW_DAYS
         min_occurrences = _mood.PATTERN_MIN_OCCURRENCES
         cutoff = (now_cst() - timedelta(days=window_days)
                   ).isoformat(timespec="seconds")

@@ -375,7 +375,7 @@ async def usage_summary(source: str = "", model: str = ""):
         "today_used": today_used, "today_budget": daily_budget, "today_ratio": today_ratio,
         "month_used": month_used, "month_budget": monthly_budget, "month_ratio": month_ratio,
         "alert_ratio": alert_ratio,
-        "over_budget_strategy": c.config.get("over_budget_strategy", "remind_only"),
+        "over_budget_strategy": __import__("memory._constants", fromlist=["OVER_BUDGET_STRATEGY"]).OVER_BUDGET_STRATEGY,
         "is_alert": today_ratio >= alert_ratio or month_ratio >= alert_ratio}}
 
 

@@ -190,8 +190,8 @@ class Distiller:
 
         # 跨时间合并判定（BM25 降级时切换双区间阈值 0.75/0.5）
         if embedding is not None:
-            merge_thr = self.config.get("dedup_merge_threshold", 0.85)
-            link_thr = self.config.get("dedup_link_threshold", 0.6)
+            from . import _constants as _mem_const
+            merge_thr, link_thr, _ = _mem_const.dedup_thresholds(self.config)
         else:
             merge_thr, link_thr = BM25_MERGE_THRESHOLD, BM25_LINK_THRESHOLD
         # P2-B：top-K 关系判定 —— 取相似度 top-K（默认 3），对每个候选都送 LLM
@@ -495,8 +495,8 @@ class Distiller:
             return None  # 向量尚未就绪，保持 pending，待补偿后再触发
         from .vector_store import deserialize_vector
         vec = deserialize_vector(vrow["embedding"])
-        merge_thr = self.config.get("dedup_merge_threshold", 0.85)
-        link_thr = self.config.get("dedup_link_threshold", 0.6)
+        from . import _constants as _mem_const
+        merge_thr, link_thr, _ = _mem_const.dedup_thresholds(self.config)
 
         best_id, best_score = None, 0.0
         for cid, score in self.vs.top_similar(vec, n=20):

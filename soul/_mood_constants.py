@@ -27,3 +27,6 @@ PATTERN_MIN_OCCURRENCES = 5
 # 平静基线阈值
 BASELINE_WARM_THRESHOLD = 5      # 近 7 天温暖/信任/感激类情绪次数
 BASELINE_CURIOUS_THRESHOLD = 2   # 近 1 天好奇/渴望类情绪次数
+
+# 情绪模式提取窗口（天）
+MOOD_PATTERN_WINDOW_DAYS = 14

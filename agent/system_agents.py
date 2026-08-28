@@ -436,7 +436,8 @@ class OutputStyleBuilder:
             last_dt = datetime.fromisoformat(last)
         except ValueError:
             return True
-        interval = self.config.get("output_style_review_interval_days", 7)
+        from memory import _constants as _mem_const
+        interval = _mem_const.OUTPUT_STYLE_REVIEW_INTERVAL_DAYS
         if (now_cst() - last_dt) >= timedelta(days=interval):
             return True
         from memory import _constants as _mem_const

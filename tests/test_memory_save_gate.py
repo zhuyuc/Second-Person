@@ -35,13 +35,13 @@ def _wire(tmp_path):
     (tmp_path / "memories").mkdir(exist_ok=True)
     palace = Palace(db)
     fw = FileWriter(db, palace, _FakeVS(), tmp_path)
-    gate = MemoryWriteGate(db, {"memory_candidate_min_score": 45})
+    gate = MemoryWriteGate(db, {"memory_write_strictness": "loose"})
     sandbox = Sandbox(tmp_path)
     registry = ToolRegistry()
     register_builtins(
         registry, palace=palace, retriever=_FakeRetriever(), file_writer=fw,
         sandbox=sandbox, data_dir=tmp_path,
-        config={"memory_candidate_min_score": 45}, memory_gate=gate)
+        config={"memory_write_strictness": "loose"}, memory_gate=gate)
     return db, fw, registry
 
 

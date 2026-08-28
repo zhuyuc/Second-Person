@@ -41,7 +41,7 @@ def test_denial_signal_detects_zh_and_en():
 def test_suppress_recent_from_denial(tmp_path: Path):
     db = Database(tmp_path / "sp.db")
     db.run_migrations(ROOT / "migrations")
-    gate = MemoryWriteGate(db, _Cfg(memory_candidate_min_score=45))
+    gate = MemoryWriteGate(db, _Cfg(memory_write_strictness="loose"))
     item = {"title": "偏好", "summary": "我一直偏好直接的沟通",
             "detail": "我一直偏好直接的沟通", "domain": "work",
             "attribution": "verified", "entities": []}

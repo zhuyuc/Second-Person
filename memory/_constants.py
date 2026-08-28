@@ -39,7 +39,25 @@ SESSION_QUEUE_LIMIT = 3
 # 导入文档时按多大的 token 块切分
 INGEST_CHUNK_TOKENS = 6000
 
-# ---- 时效感知（CFG-E 合并 3 个"多少天"为 memory_horizon_days）----------
+# ---- 边缘工程参数（收敛自 CFG-I）---------------------------------------
+AGENT_MAX_STEPS = 8
+TOOL_APPROVAL_TTL_MINUTES = 10
+HANDOFF_SUMMARY_TOKEN_LIMIT = 10000
+OUTPUT_STYLE_REVIEW_INTERVAL_DAYS = 7
+OUTPUT_STYLE_SIGNAL_RETENTION_DAYS = 90
+LOCAL_DIR_MAX_FILES_PER_SCAN = 50
+IM_MESSAGE_MAX_CHARS = 4000
+WEB_FETCH_TIMEOUT_SECONDS = 15
+VECTOR_CACHE_MAX_MB = 512
+GRAPH_MAX_NODES = 300
+GRAPH_MAX_EDGES = 2000
+BM25_RELATIVE_FLOOR = 0.3
+RRF_K = 60
+RECALL_FALLBACK_THRESHOLD = 0.35
+MOOD_PATTERN_WINDOW_DAYS = 14
+OVER_BUDGET_STRATEGY = "remind_only"
+
+# ---- 时效感知（CFG-E 合并 3 个多少天为 memory_horizon_days）------------
 # 用户可拧 memory_horizon_days（默认 90）；下面三个下游派生
 HORIZON_DEFAULT_DAYS = 90
 
@@ -62,7 +80,9 @@ def freshness_boost_days(cfg) -> int:
 # ---- 记忆写入严格度（CFG-F 合并 3 个分数为 memory_write_strictness enum）-
 _WRITE_STRICTNESS_MAP = {
     # (candidate_min, auto_write, knowledge_min)
-    "loose":  (55, 75, 45),
+    # loose 用比 normal 更低的入池门槛与知识条目门槛；auto_write 与 normal 持平
+    # （宽松只是"更容易进候选池观察"，不代表"更容易跳过复核直接写入"）
+    "loose":  (45, 85, 40),
     "normal": (70, 85, 55),
     "strict": (80, 92, 65),
 }

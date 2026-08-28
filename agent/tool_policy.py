@@ -61,7 +61,8 @@ class ToolPolicy:
         if approved and policy == "once_per_turn":
             return ToolDecision("execute", risk, approval_id=approved["id"])
         approval_id = f"apr_{uuid.uuid4().hex}"
-        expires = now_cst() + timedelta(minutes=self.config.get("tool_approval_ttl_minutes", 10))
+        from memory import _constants as _mem_const
+        expires = now_cst() + timedelta(minutes=_mem_const.TOOL_APPROVAL_TTL_MINUTES)
         self.db.execute(
             "INSERT INTO tool_approvals(id,turn_id,call_id,tool_name,normalized_args_hash,"
             "risk_level,scope_json,status,expires_at,created_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)",

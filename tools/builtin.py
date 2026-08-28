@@ -211,13 +211,15 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
 
     async def web_fetch_tool(url: str, timeout: int = 15) -> str:
         # LLM 传入的 timeout 生效，上限不超过全局配置防滥用
-        cap = config.get("web_fetch_timeout_seconds", 15)
+        from memory import _constants as _mem_const
+        cap = _mem_const.WEB_FETCH_TIMEOUT_SECONDS
         return await _web_fetch(url, timeout=min(timeout or cap, cap),
                                 allow_private=config.get_raw("allow_private_network_fetch", False))
 
     async def web_search_tool(query: str, max_results: int = 5) -> list:
+        from memory import _constants as _mem_const
         return await _web_search(query, max_results=max_results,
-                                 timeout=config.get("web_fetch_timeout_seconds", 15))
+                                 timeout=_mem_const.WEB_FETCH_TIMEOUT_SECONDS)
 
     async def generate_document(title: str, format: str = "docx",
                                 content: str = "") -> dict:

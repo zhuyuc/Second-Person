@@ -32,28 +32,11 @@ from .md_file import parse_memory_md
 
 logger = logging.getLogger("second_person.retriever")
 
-# 问题类型启发式分类（用于 memory/knowledge 来源权重）
-PERSONAL_QUERY_PATTERNS = [
-    r"我的", r"我(喜欢|偏好|习惯|讨厌|常用)", r"你记得我", r"我(是|在|做)什么",
-    r"我(说过|提过|告诉过)", r"帮我回忆", r"关于我",
-]
-KNOWLEDGE_QUERY_PATTERNS = [
-    r"什么是", r"是什么", r"如何(实现|配置|使用|部署)", r"怎么(实现|配置|用|部署)",
-    r"(文档|资料|知识库)(里|中)", r"原理", r"定义", r"区别是", r"介绍一下",
-]
-
-# 保留一个纯"回忆意图"识别，仅用于兜底路径调低阈值再跑一次（不用于关门）
+# 唯一保留的意图识别：明确回忆语（"你还记得/我之前说过"），仅用于兜底路径
+# 调低阈值再跑一次。不用于任何"关门"（不再有 personal / knowledge 分流）。
 RECALL_INTENT_PATTERNS = [
     r"你还记得", r"我之前(说过|提过|讲过)", r"我上次", r"还记不记得", r"之前(聊|谈)过",
 ]
-
-
-def classify_query(query: str) -> str:
-    if any(re.search(p, query) for p in PERSONAL_QUERY_PATTERNS):
-        return "personal"
-    if any(re.search(p, query) for p in KNOWLEDGE_QUERY_PATTERNS):
-        return "knowledge"
-    return "neutral"
 
 
 def has_recall_intent(query: str) -> bool:
@@ -117,11 +100,12 @@ class Retriever:
     async def hybrid_presearch(self, query: str, query_vec=None,
                                fallback: bool = False) -> _PresearchResult:
         cfg = self.config
-        vthr = cfg.get("recall_fallback_threshold", 0.35) if fallback \
+        from . import _constants as _mem_const
+        vthr = _mem_const.RECALL_FALLBACK_THRESHOLD if fallback \
             else cfg.get("vector_threshold", 0.55)
-        bm25_floor = 0.15 if fallback else cfg.get("bm25_relative_floor", 0.3)
+        bm25_floor = 0.15 if fallback else _mem_const.BM25_RELATIVE_FLOOR
         top_k = cfg.get("retrieval_top_k", 10)
-        rrf_k = cfg.get("rrf_k", 60)
+        rrf_k = _mem_const.RRF_K
 
         vector_hits: list[tuple[str, float]] = []
         if query_vec is not None and self.vs.loaded and self.vs.dim:
@@ -181,9 +165,6 @@ class Retriever:
         from . import _constants
         cfg = self.config
         stale_factor = _constants.STALE_SCORE_FACTOR
-        qtype = classify_query(query)
-        pk_factor = cfg.get("personal_query_knowledge_factor", 0.7)
-        km_factor = cfg.get("knowledge_query_memory_factor", 0.85)
         important_factor = _constants.IMPORTANT_MEMORY_FACTOR
         freshness_boost = _constants.FRESHNESS_BOOST_FACTOR
         freshness_days = _constants.freshness_boost_days(cfg)
@@ -221,12 +202,8 @@ class Retriever:
                 factor *= inferred_factor
             if freshness in ("expired", "review_due"):
                 factor *= expired_factor
-            # 来源类型加权
-            stype = row["source_type"] or "memory"
-            if qtype == "personal" and stype == "knowledge":
-                factor *= pk_factor
-            elif qtype == "knowledge" and stype == "memory":
-                factor *= km_factor
+            # H：不再按"问题类型"启发式给来源加权；LLM 精筛看得到 source_type
+            # 标签会自己决定用/不用哪一类记忆
             # 重要 + 负反馈 + 新鲜度
             try:
                 if row["is_important"]:
@@ -374,7 +351,6 @@ class Retriever:
             "context_chars": len(context_text or ""),
             "retrieval_time_ms": elapsed_ms,
             "refined_count": len(chosen_ids),
-            "query_type": classify_query(query),
             "graph_neighbors": len(graph_neighbors),
             "candidate_ids": [c.memory_id for c in candidates[:20]],
             "selected_ids": list(chosen_ids),
@@ -392,7 +368,6 @@ class Retriever:
             "top_vector_score": round(pre.top_vector_score, 4),
             "gate": "presearch_empty",
             "context_chars": len(context_text or ""),
-            "query_type": classify_query(query),
             "graph_neighbors": 0,
             "candidate_ids": [], "selected_ids": [], "rejected": [],
             "retrieval_time_ms": round((time.perf_counter() - start) * 1000, 2),

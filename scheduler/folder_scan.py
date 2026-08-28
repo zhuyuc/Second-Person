@@ -134,7 +134,8 @@ class FolderScanner:
         if not root.is_dir():
             return {"dir_id": d["id"], "path": d["path"], "skipped": True,
                     "reason": "目录不存在或不可访问"}
-        max_files = self.config.get("local_dir_max_files_per_scan", 50)
+        from memory import _constants as _mem_const
+        max_files = _mem_const.LOCAL_DIR_MAX_FILES_PER_SCAN
         include_images = self.config.get("local_dir_include_images", False)
         now = now_cst().isoformat(timespec="seconds")
 

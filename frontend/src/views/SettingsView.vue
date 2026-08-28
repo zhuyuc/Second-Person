@@ -478,8 +478,8 @@ async function testEditChannel() {
   else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
 
-const groups = ['memory', 'conversation', 'cost', 'retrieval', 'visualization', 'other']
-const groupNames = { memory: '记忆参数', conversation: '对话参数', cost: '成本控制', retrieval: '检索与去重', visualization: '可视化', other: '其他' }
+const groups = ['memory', 'conversation', 'cost', 'retrieval', 'other']
+const groupNames = { memory: '记忆参数', conversation: '对话参数', cost: '成本控制', retrieval: '检索与去重', other: '其他' }
 const effectNames = { immediate: '立即生效', next_turn: '下一轮对话生效', next_session: '下次会话生效' }
 const enumLabels = { remind_only: '仅提醒（不阻断）' }
 function enumLabel(o) { return enumLabels[o] || o }

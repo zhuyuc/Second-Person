@@ -24,7 +24,7 @@ def _item(text="用户偏好直接的项目沟通"):
 
 
 def test_gate_rejects_session_and_sensitive_content():
-    cfg = _Config(memory_candidate_min_score=70, memory_auto_write_score=85)
+    cfg = _Config(memory_write_strictness="normal")
     gate = MemoryWriteGate(None, cfg)
     session = gate.evaluate({**_item("这次先用方案二"), "channel": "session_only"})
     assert session.status == "rejected"
@@ -37,7 +37,7 @@ def test_candidate_requires_evidence_then_can_confirm(tmp_path: Path):
     async def scenario():
         db = Database(tmp_path / "palace.db")
         db.run_migrations(ROOT / "migrations")
-        cfg = _Config(memory_candidate_min_score=45, memory_auto_write_score=85,
+        cfg = _Config(memory_write_strictness="loose",
                       memory_min_evidence_cross_session=2, memory_candidate_ttl_days=7)
         gate = MemoryWriteGate(db, cfg)
         item = _item()
@@ -75,8 +75,7 @@ def test_candidate_fingerprint_is_stable():
 def test_repeated_evidence_reference_does_not_inflate_count(tmp_path: Path):
     db = Database(tmp_path / "palace.db")
     db.run_migrations(ROOT / "migrations")
-    gate = MemoryWriteGate(db, _Config(memory_candidate_min_score=45,
-                                       memory_auto_write_score=85,
+    gate = MemoryWriteGate(db, _Config(memory_write_strictness="loose",
                                        memory_min_evidence_cross_session=2))
     item = _item()
     cid = gate.enqueue(item, session_id="s1", evidence={"source_ref": "s1:1"})
@@ -90,9 +89,7 @@ def test_repeated_evidence_reference_does_not_inflate_count(tmp_path: Path):
 def test_negative_feedback_requires_confirmation(tmp_path: Path):
     db = Database(tmp_path / "palace.db")
     db.run_migrations(ROOT / "migrations")
-    gate = MemoryWriteGate(db, _Config(memory_candidate_min_score=45,
-                                       memory_auto_write_score=85,
-                                       memory_negative_suppress_count=2))
+    gate = MemoryWriteGate(db, _Config(memory_write_strictness="loose"))
     # 用第一人称文本确保规则派生的 user_specificity 上限较高，score 能过 min_score，
     # 才能走到 negative_count 判定分支。规则化再评分（T1-A）后，
     # 无第一人称信号的文本会被 user_specificity_cap=0.25 直接压分。

@@ -354,8 +354,9 @@ async def delete(request: Request):
 @router.get("/memory/graph")
 async def graph(limit: int = None):
     c = _c()
-    max_nodes = min(limit or c.config.get("graph_max_nodes", 300), 500)
-    max_edges = c.config.get("graph_max_edges", 2000)
+    from memory import _constants as _mem_const
+    max_nodes = min(limit or _mem_const.GRAPH_MAX_NODES, 500)
+    max_edges = _mem_const.GRAPH_MAX_EDGES
     # 请求路径只做增量布点（O(新增实体数) 毫秒级），禁止全量重算阻塞事件循环；
     # 全量力导向精排由夜间维护链在工作线程兑底刷新。
     from memory.graph_layout import place_missing

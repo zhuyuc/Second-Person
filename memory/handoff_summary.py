@@ -57,7 +57,8 @@ class HandoffSummaryGenerator:
         失败时生成 status=failed 的占位文件，不抛异常。
         超时 timeoout 秒后降级为 failed。
         """
-        limit = self.config.get("handoff_summary_token_limit", 10000)
+        from . import _constants as _mem_const
+        limit = _mem_const.HANDOFF_SUMMARY_TOKEN_LIMIT
         handoff_dir = self.data_dir / "artifacts" / "handoffs"
         handoff_dir.mkdir(parents=True, exist_ok=True)
         output_path = handoff_dir / f"{to_session_id}.md"
