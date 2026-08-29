@@ -14,6 +14,7 @@ import HandoffAttachment from '@/components/HandoffAttachment.vue'
 import MessageAnchorRail from '@/components/MessageAnchorRail.vue'
 import SessionMetricsLine from '@/components/SessionMetricsLine.vue'
 import SelectionActionBar from '@/components/SelectionActionBar.vue'
+import QuoteComposer from '@/components/QuoteComposer.vue'
 import { useMessageSelection } from '@/composables/useMessageSelection'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
@@ -230,7 +231,8 @@ async function openSession(sid, opts = {}) {
   // 历史消息：若用户消息含附件上下文前缀，只展示真实提问 + 附件胶囊
   for (const m of msgs) {
     if (m.role === 'user' && typeof m.content === 'string'
-      && m.content.includes('\n---\n') && m.content.includes('【附件：')) {
+      && m.content.includes('\n---\n')
+      && (m.content.includes('【附件：') || m.content.includes('【选中的文本】'))) {
       m.atts = extractAttachments(m.content)
       m.content = m.content.split('\n---\n').pop()
     }
@@ -289,24 +291,34 @@ async function tryReattach(sid) {
   } catch { /* 无进行中请求或接口异常：静默跳过 */ }
 }
 // 从历史消息的附件上下文前缀中还原各附件的名称与正文
-// （粘贴文本可据此在弹窗中回看全文；文档附件仅取名称与字数）
+// 支持两种格式：老 【附件：xxx】\n{text} 与新 【选中的文本】\n{quote}[\n\n【用户评论】\n{comment}]
+// 后者是引用附件专用，可选携带评论；前者其它附件继续沿用。
 function extractAttachments(content) {
   const head = content.split('\n---\n').slice(0, -1).join('\n---\n')
+  if (!head) return []
+  // 同时匹配"【附件：xxx】"和"【选中的文本】"两种起始标签
+  const re = /【附件：([^】]+?)(?:（内容已截断）)?】|【选中的文本】/g
   const found = []
-  const re = /【附件：([^】]+?)(?:（内容已截断）)?】\n?/g
   let m, prev = null
   while ((m = re.exec(head))) {
-    if (prev) prev.text = head.slice(prev.end, m.index).replace(/\n+$/, '')
-    prev = { name: m[1], end: re.lastIndex }
+    if (prev) prev.body = head.slice(prev.end, m.index).replace(/\n+$/, '').replace(/^\n+/, '')
+    prev = { isQuote: !m[1], name: m[1] || '引用', end: re.lastIndex }
     found.push(prev)
   }
-  if (prev) prev.text = head.slice(prev.end).replace(/\n+$/, '')
+  if (prev) prev.body = head.slice(prev.end).replace(/\n+$/, '').replace(/^\n+/, '')
   return found.map(a => {
-    const isQuote = /^引用(?:\s|$)/.test(a.name)
+    if (a.isQuote) {
+      // 引用块可能内嵌一段 【用户评论】 子段；胶囊显示统一叫"引用"
+      const body = a.body || ''
+      const idx = body.indexOf('\n\n【用户评论】\n')
+      const text = idx >= 0 ? body.slice(0, idx) : body
+      const comment = idx >= 0 ? body.slice(idx + '\n\n【用户评论】\n'.length) : ''
+      return { name: '引用', pasted: true, kind: 'quote',
+               text, comment, chars: text.length }
+    }
     return {
-      name: a.name, pasted: /^粘贴的文本/.test(a.name) || isQuote,
-      kind: isQuote ? 'quote' : undefined,
-      text: a.text || '', chars: (a.text || '').length
+      name: a.name, pasted: /^粘贴的文本/.test(a.name),
+      text: a.body || '', chars: (a.body || '').length
     }
   })
 }
@@ -402,6 +414,8 @@ async function copySelection() {
   }
   selection.hide()
 }
+// QuoteComposer 弹窗暂存的引用原文与元信息；visible 控制弹窗开合
+const pendingQuote = ref({ visible: false, text: '', sourceMsgId: null, sourceRole: null })
 function quoteSelection() {
   const t = selection.text.value
   if (!t) return
@@ -411,19 +425,41 @@ function quoteSelection() {
     selection.hide()
     return
   }
-  // 与"粘贴的文本"共用同一通道：同一形状、同一发送格式、同一历史还原正则。
-  // kind:'quote' 只在渲染层用来切换图标和胶囊底色。命名递增避免多引用重名。
+  // 打开评论录入弹窗；确认后再落到 attachments。这里先把原文与来源
+  // 暂存下来，收起 SelectionActionBar 并清空浏览器选区，避免 toolbar 复现
+  pendingQuote.value = {
+    visible: true, text: t,
+    sourceMsgId: selection.sourceMsgId.value,
+    sourceRole: selection.sourceRole.value,
+  }
+  selection.hide()
+  window.getSelection?.()?.removeAllRanges?.()
+}
+function cancelQuoteComposer() {
+  pendingQuote.value = { visible: false, text: '', sourceMsgId: null, sourceRole: null }
+}
+function commitQuoteAttachment({ comment }) {
+  const q = pendingQuote.value
+  const t = q.text
+  if (!t) { cancelQuoteComposer(); return }
+  const MAX = 5
+  if (attachments.value.length >= MAX) {
+    toast.push('warning', `最多 ${MAX} 个附件`)
+    cancelQuoteComposer()
+    return
+  }
+  // 与"粘贴的文本"共用同一通道：同一形状、同一附件面板、同一历史还原路径。
+  // kind:'quote' 用于渲染层切图标/胶囊底色；comment 可选，弹窗留空即为 ''。
+  // 胶囊显示统一叫"引用"，弹窗内用"选中的文本"段头呼应发送到模型的 【选中的文本】。
   const n = attachments.value.filter(a => a.kind === 'quote').length
   attachments.value.push({
     name: n ? `引用 ${n + 1}` : '引用',
     pasted: true, kind: 'quote', parsed: true, isImage: false, uploading: false,
-    text: t, chars: t.length, lines: t.split('\n').length,
-    sourceMsgId: selection.sourceMsgId.value,
-    sourceRole: selection.sourceRole.value,
+    text: t, comment: comment || '',
+    chars: t.length, lines: t.split('\n').length,
+    sourceMsgId: q.sourceMsgId, sourceRole: q.sourceRole,
   })
-  selection.hide()
-  // 清空浏览器选区，避免下一次 pointerup 又基于旧选区弹 toolbar
-  window.getSelection?.()?.removeAllRanges?.()
+  cancelQuoteComposer()
   nextTick(() => { ta.value?.focus() })
 }
 
@@ -463,7 +499,8 @@ const attachView = ref(null)   // { type: 'text'|'image'|'file', ... }
 function openAttachment(a) {
   if (a.uploading || a.error) return
   if (a.pasted) {
-    attachView.value = { type: 'text', name: a.name, text: a.text, chars: a.chars, lines: a.lines }
+    attachView.value = { type: 'text', name: a.name, text: a.text, chars: a.chars,
+                         lines: a.lines, kind: a.kind, comment: a.comment }
   } else if (a.isImage) {
     attachView.value = { type: 'image', name: a.name, src: a.preview }
   } else {
@@ -474,7 +511,9 @@ function openAttachment(a) {
 function openMsgAttachment(att) {
   if (att.pasted) {
     const text = att.text || ''
-    attachView.value = { type: 'text', name: att.name, text, chars: text.length, lines: text.split('\n').length }
+    attachView.value = { type: 'text', name: att.name, text,
+                         chars: text.length, lines: text.split('\n').length,
+                         kind: att.kind, comment: att.comment }
   } else {
     attachView.value = { type: 'file', name: att.name, file: att.file || null, size: att.file ? att.file.size : null, chars: att.chars }
   }
@@ -571,18 +610,25 @@ async function send() {
     hPath = `artifacts/handoffs/${sessStore.currentSid}.md`
   }
   // 构造发送给后端的消息：把附件解析文本作为上下文前置（不截断，完整交给模型）
-  // 引用附件（kind:'quote'）与粘贴文本走同一 【附件：xxx】 格式，
-  // 历史还原、气泡胶囊全部复用同一条链路，无需专门分支。
+  // 引用附件（kind:'quote'）走 【选中的文本】\n{原文} + 可选 \n\n【用户评论】\n{评论}
+  // 双标签，让模型清楚地区分"被引用的原文"和"用户对这段的评论"。
+  // 其它附件（粘贴/文档）继续 【附件：xxx】 老格式；主输入文字仍用 \n---\n 尾部分隔。
   let backendMsg = text
   if (atts.length) {
-    const blocks = atts.map(a => `【附件：${a.name}】\n${a.text || ''}`).join('\n\n')
+    const blocks = atts.map(a => {
+      if (a.kind === 'quote') {
+        const base = `【选中的文本】\n${a.text || ''}`
+        return a.comment ? `${base}\n\n【用户评论】\n${a.comment}` : base
+      }
+      return `【附件：${a.name}】\n${a.text || ''}`
+    }).join('\n\n')
     backendMsg = blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
   }
   if (!backendMsg && imgs.length) backendMsg = '请看图并回应。'
   // 气泡附件：保留粘贴全文与原始 File，供发送后点击弹窗回看/下载
-  // kind 保留后气泡胶囊可以按引用/粘贴/文件切换图标与底色
+  // kind 保留后气泡胶囊可以按引用/粘贴/文件切换图标与底色；comment 用于胶囊"·带评论"标记
   const bubbleAtts = attachments.value.filter(a => !a.isImage).map(a => ({
-    name: a.name, pasted: !!a.pasted, kind: a.kind,
+    name: a.name, pasted: !!a.pasted, kind: a.kind, comment: a.comment,
     text: a.pasted ? a.text : undefined, file: a.file, chars: a.chars
   }))
   const bubbleImages = attachments.value.filter(a => a.isImage && a.preview).map(a => a.preview)
@@ -789,7 +835,8 @@ async function reloadMessages(sid) {
     const msgs = await api.get(withQuery('/chat/messages', { session_id: sid }))
     for (const m of msgs) {
       if (m.role === 'user' && typeof m.content === 'string'
-        && m.content.includes('\n---\n') && m.content.includes('【附件：')) {
+        && m.content.includes('\n---\n')
+      && (m.content.includes('【附件：') || m.content.includes('【选中的文本】'))) {
         m.atts = extractAttachments(m.content)
         m.content = m.content.split('\n---\n').pop()
       }
@@ -899,7 +946,8 @@ async function switchVersion(msg, direction) {
     // 历史消息：附件还原
     for (const m of siblings.messages) {
       if (m.role === 'user' && typeof m.content === 'string'
-        && m.content.includes('\n---\n') && m.content.includes('【附件：')) {
+        && m.content.includes('\n---\n')
+      && (m.content.includes('【附件：') || m.content.includes('【选中的文本】'))) {
         m.atts = extractAttachments(m.content)
         m.content = m.content.split('\n---\n').pop()
       }
@@ -1318,6 +1366,9 @@ onUnmounted(() => {
     <!-- 消息气泡文字选中浮层：复制 / 引用 -->
     <SelectionActionBar :visible="selection.visible.value" :rect="selection.rect.value"
       @copy="copySelection" @quote="quoteSelection" />
+    <!-- 引用评论录入弹窗（点"引用"后弹出，确认后写入附件条） -->
+    <QuoteComposer :visible="pendingQuote.visible" :quote-text="pendingQuote.text"
+      @confirm="commitQuoteAttachment" @cancel="cancelQuoteComposer" />
     <!-- 定位锚点栏：独立左列，宽度不随右侧内容变化；与对话状态解耦，仅悬停触发 -->
     <MessageAnchorRail :anchors="anchorItems" @select="scrollToAnchor" />
     <!-- 对话区（会话列表已合并到全局侧栏 SessionSidebar） -->
@@ -1360,6 +1411,8 @@ onUnmounted(() => {
                     <i class="ti"
                       :class="f.kind === 'quote' ? 'ti-quote' : (f.pasted ? 'ti-clipboard-text' : 'ti-paperclip')"></i>
                     {{ f.name }}
+                    <span v-if="f.kind === 'quote' && f.comment" class="quote-comment-mark"
+                      title="包含用户评论">·带评论</span>
                   </span>
                 </div>
                 <div v-if="m.images && m.images.length"
@@ -1546,6 +1599,8 @@ onUnmounted(() => {
               <span v-else-if="a.isImage" class="muted">图片</span>
               <span v-else-if="!a.parsed" class="dang">无文本</span>
               <span v-else class="muted">{{ a.chars }} 字{{ a.truncated ? '·已截断' : '' }}</span>
+              <span v-if="a.kind === 'quote' && a.comment" class="quote-comment-mark"
+                title="包含用户评论">·带评论</span>
               <span v-if="!a.isImage && !a.pasted && a.parsed" class="muted" title="发送后自动存入知识库"><i
                   class="ti ti-database"></i>
                 入库</span>
@@ -1689,12 +1744,21 @@ onUnmounted(() => {
   <BaseModal v-if="attachView"
     :title="attachView.type === 'text' ? '文本内容' : attachView.type === 'image' ? '图片预览' : '附件详情'"
     :size="attachView.type === 'file' ? 'sm' : 'lg'" stacked @close="attachView = null">
-    <!-- 粘贴文本：全文预览 -->
+    <!-- 粘贴文本 / 引用：全文预览；引用带评论时追加评论段 -->
     <div v-if="attachView.type === 'text'">
       <div class="muted" style="margin-bottom:10px">{{ attachView.chars }} 字 · {{ attachView.lines }} 行</div>
+      <div v-if="attachView.kind === 'quote'" class="label" style="margin-bottom:6px">
+        <i class="ti ti-quote"></i> 选中的文本
+      </div>
       <div
         style="white-space:pre-wrap;word-break:break-all;font-family:var(--mono);font-size:var(--fs-base);line-height:1.6;color:var(--sec);background:var(--surface-2);border:1px solid var(--bd);border-radius:var(--radius-sm);padding:14px;max-height:60vh;overflow-y:auto">
         {{ attachView.text }}</div>
+      <div v-if="attachView.kind === 'quote' && attachView.comment" style="margin-top:14px">
+        <div class="label" style="margin-bottom:6px"><i class="ti ti-message-2"></i> 用户评论</div>
+        <div
+          style="white-space:pre-wrap;word-break:break-all;font-size:var(--fs-base);line-height:1.6;color:var(--pri);background:var(--brand-soft);border:1px solid rgba(59,110,246,.18);border-radius:var(--radius-sm);padding:12px;max-height:30vh;overflow-y:auto">
+          {{ attachView.comment }}</div>
+      </div>
     </div>
     <!-- 图片：应用内大图预览 -->
     <div v-else-if="attachView.type === 'image'" style="text-align:center">
