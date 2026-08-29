@@ -20,7 +20,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.contracts import (
     ContractValidationError,
-    ToolApprovalDecisionRequest,
     parse_chat_send,
     read_json_object,
 )
@@ -337,19 +336,6 @@ async def get_turn_events(turn_id: str, after_seq: int = 0):
     return {"code": 200, "data": _c().core.get_turn_events(turn_id, after_seq)}
 
 
-@router.post("/chat/turns/{turn_id}/approvals/{approval_id}")
-async def decide_tool_approval(turn_id: str, approval_id: str,
-                               body: ToolApprovalDecisionRequest):
-    row = _c().core.decide_tool_approval(approval_id, body.approved)
-    if not row or row["turn_id"] != turn_id:
-        raise HTTPException(status_code=404, detail="待确认工具不存在或已处理")
-    return {"code": 200, "data": {
-        "approval_id": approval_id,
-        "turn_id": turn_id,
-        "status": row["status"],
-    }}
-
-
 class SwitchVersionRequest(BaseModel):
     session_id: str
     version_group_id: int
@@ -469,6 +455,16 @@ async def active_request(session_id: str):
 @router.get("/chat/sessions")
 async def sessions(keyword: str = None, page: int = 1, page_size: int = 20):
     return {"code": 200, "data": _c().sessions.list_sessions(keyword, page, page_size)}
+
+
+@router.get("/chat/search")
+async def chat_search(q: str = "", scope: str = "all", limit: int = 30):
+    """跨会话搜索：命中标题 / 用户消息 / AI 回复，按会话聚合并高亮。
+
+    scope: all | title | user | assistant （非法值降级为 all）
+    """
+    return {"code": 200,
+            "data": _c().sessions.search_conversations(q, scope, limit)}
 
 
 @router.get("/chat/messages")

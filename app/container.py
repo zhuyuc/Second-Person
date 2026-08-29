@@ -237,7 +237,9 @@ class AppContainer:
             resp = await self.llm.chat(snap, prompt, source="agent",
                                        session_id=session_id, json_mode=True)
             data = repair_json(resp["content"])
-            return data.get("ids", [])[:3]
+            # Δ5：不再硬 clamp 到 3；上限由 retriever.retrieval_refine_max 控制
+            # （避免 container 与 retriever 两处 max 值错位，出现"配置调了没用"的迷雾）
+            return data.get("ids", [])
 
         self.retriever = Retriever(self.db, self.vs, self.palace, self.config, d,
                                    embed_fn=embed_fn, llm_refine_fn=llm_refine)

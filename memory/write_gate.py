@@ -206,7 +206,6 @@ def derive_rule_signals(item: dict[str, Any]) -> dict[str, float]:
     stability=0.9 直接跳过 gate 阈值的核心校验。
     """
     text = _text(item)
-    lowered = text.lower()
     temporary = any(re.search(p, text) for p in _TEMPORARY_PATTERNS)
     tentative = has_tentative_marker(text)
     explicit_anchor = has_explicit_anchor(text)

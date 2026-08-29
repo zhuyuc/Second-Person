@@ -18,6 +18,7 @@ from pathlib import Path
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
 from memory.naming import session_id as make_session_id
 from agent.context_signals import detect_fake_claim, detect_proposal_sentence
+from infrastructure.fts import fts_escape
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
 
@@ -70,10 +71,13 @@ class SessionStore:
     def list_sessions(self, keyword: str = None, page: int = 1,
                       page_size: int = 20) -> dict:
         if keyword:
+            match_expr = fts_escape(keyword)
+            if not match_expr:
+                return {"total": 0, "list": []}
             ids = [r["session_id"] for r in self.db.query_all(
-                "SELECT DISTINCT session_id FROM conversations c "
+                "SELECT DISTINCT c.session_id FROM conversations c "
                 "JOIN conversations_fts f ON c.id=f.rowid WHERE conversations_fts MATCH ?",
-                (self._fts(keyword),))]
+                (match_expr,))]
             if not ids:
                 return {"total": 0, "list": []}
             ph = ",".join("?" * len(ids))
@@ -600,6 +604,128 @@ class SessionStore:
             }
             for r in rows
         ]
+
+    def search_conversations(
+        self,
+        query: str,
+        scope: str = "all",
+        limit: int = 30,
+        snippets_per_session: int = 3,
+    ) -> dict:
+        """跨会话搜索：标题 + 用户消息 + AI 回复，按会话聚合并高亮命中。
+
+        Args:
+            query: 用户原始查询串（会做 FTS 转义）
+            scope: all | title | user | assistant
+            limit: 返回会话数上限（1~100）
+            snippets_per_session: 单会话最多返回多少条消息 snippet
+        """
+        q = (query or "").strip()
+        if not q:
+            return {"query": "", "total_sessions": 0, "sessions": []}
+        limit = max(1, min(int(limit or 30), 100))
+        scope = scope if scope in ("all", "title", "user", "assistant") else "all"
+
+        # --- 会话标题命中（LIKE 已足够；sessions 量级小）--------------------
+        title_hits: dict[str, str] = {}  # sid -> title_html
+        if scope in ("all", "title"):
+            like_pat = "%" + q.replace("\\", "\\\\").replace(
+                "%", "\\%").replace("_", "\\_") + "%"
+            for r in self.db.query_all(
+                "SELECT session_id, title FROM sessions "
+                "WHERE title LIKE ? ESCAPE '\\' "
+                "ORDER BY pinned DESC, last_active DESC LIMIT ?",
+                (like_pat, limit)):
+                title_hits[r["session_id"]] = _highlight_plain(r["title"], q)
+
+        # --- 消息命中（FTS + 可选 role 过滤）--------------------------------
+        msg_hits: dict[str, list[dict]] = {}
+        msg_counts: dict[str, int] = {}
+        if scope in ("all", "user", "assistant"):
+            match_expr = fts_escape(q)
+            if match_expr:
+                role_sql = ""
+                params: list = [match_expr]
+                if scope in ("user", "assistant"):
+                    role_sql = " AND c.role = ?"
+                    params.append(scope)
+                # 单会话 snippet 数由后续聚合裁剪；总条数按 limit*snippets 保守拉取
+                params.append(limit * max(snippets_per_session, 1) * 4)
+                rows = self.db.query_all(
+                    f"""
+                    SELECT c.session_id, c.id, c.role, c.create_time,
+                           snippet(conversations_fts, 0, '<mark>', '</mark>',
+                                   '…', 14) AS snip,
+                           bm25(conversations_fts) AS score
+                    FROM conversations c
+                    JOIN conversations_fts ON c.id = conversations_fts.rowid
+                    WHERE conversations_fts MATCH ?
+                      AND c.message_type = 'normal'{role_sql}
+                    ORDER BY score
+                    LIMIT ?
+                    """,
+                    tuple(params))
+                for r in rows:
+                    sid = r["session_id"]
+                    msg_counts[sid] = msg_counts.get(sid, 0) + 1
+                    bucket = msg_hits.setdefault(sid, [])
+                    if len(bucket) < snippets_per_session:
+                        bucket.append({
+                            "message_id": r["id"],
+                            "role": r["role"],
+                            "snippet_html": r["snip"],
+                            "created_at": r["create_time"],
+                        })
+
+        # --- 聚合与排序 -----------------------------------------------------
+        sid_set = set(title_hits.keys()) | set(msg_hits.keys())
+        if not sid_set:
+            return {"query": q, "total_sessions": 0, "sessions": []}
+        ph = ",".join("?" * len(sid_set))
+        rows = self.db.query_all(
+            f"SELECT * FROM sessions WHERE session_id IN ({ph}) "
+            f"ORDER BY pinned DESC, last_active DESC LIMIT ?",
+            list(sid_set) + [limit])
+        sessions = []
+        for r in rows:
+            sid = r["session_id"]
+            sessions.append({
+                "session_id": sid,
+                "title": r["title"],
+                "title_hit": sid in title_hits,
+                "title_html": title_hits.get(sid) or (r["title"] or ""),
+                "last_active": r["last_active"],
+                "channel": r["channel"],
+                "pinned": bool(r["pinned"]),
+                "readonly": bool(r["readonly"]),
+                "hits": msg_hits.get(sid, []),
+                "hit_count": msg_counts.get(sid, 0),
+            })
+        return {"query": q, "total_sessions": len(sessions), "sessions": sessions}
+
+
+def _highlight_plain(text: str, query: str) -> str:
+    """给纯文本 title 做安全的关键词高亮：先转义 HTML，再包 <mark>。
+
+    仅按 fts_escape 分出的 token 做大小写不敏感替换，与 FTS 命中口径保持一致；
+    未命中则返回转义后的原文，避免注入。
+    """
+    text = text or ""
+    escaped = (text.replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+    if not query:
+        return escaped
+    tokens = _TITLE_TOKEN_RE.findall(query)
+    if not tokens:
+        return escaped
+    # 逐 token 替换；按长度降序减少嵌套匹配
+    for tok in sorted({t for t in tokens if t}, key=len, reverse=True):
+        pattern = re.compile(re.escape(tok), re.IGNORECASE)
+        escaped = pattern.sub(lambda m: f"<mark>{m.group(0)}</mark>", escaped)
+    return escaped
+
+
+_TITLE_TOKEN_RE = re.compile(r"[\w一-鿿]+")
 
 
 def _handoff_status_from_row(r) -> str | None:

@@ -5,7 +5,9 @@ const ALLOWED_TAGS = new Set([
     'TR', 'TH', 'TD', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'IMG',
     // 代码块操作条按钮（预览/下载/复制/源码/图片）：由前端渲染器生成，
     // 事件属性已被下方过滤，放行 BUTTON 才能让 handleMermaidActions 委派生效
-    'BUTTON'
+    'BUTTON',
+    // 搜索结果高亮
+    'MARK'
 ])
 
 const ALLOWED_ATTRS = new Set([

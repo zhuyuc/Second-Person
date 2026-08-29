@@ -518,8 +518,21 @@ def main():
     supervisor.start_all()
 
     if not args.no_browser:
-        threading.Timer(1.5, lambda: webbrowser.open(
-            f"http://localhost:{port}")).start()
+        def _open_browser_when_ready():
+            """后台轮询服务端口，HTTP 可响应后再打开浏览器，最长等待 30 秒。"""
+            url = f"http://localhost:{port}"
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                try:
+                    urllib.request.urlopen(url, timeout=2)
+                    webbrowser.open(url)
+                    return
+                except Exception:
+                    time.sleep(0.5)
+            # 超时兜底：仍然尝试打开，让用户看到浏览器反馈
+            webbrowser.open(url)
+
+        threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
     print(f"Second Person 启动于 http://localhost:{port}")
     try:

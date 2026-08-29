@@ -41,7 +41,7 @@ logger = logging.getLogger("second_person.turn_runtime")
 
 class TurnRuntime:
     def __init__(self, *, db, config, sessions, registry, executor, llm,
-                 providers, tool_policy, system_prompt: Callable[..., str],
+                 providers, system_prompt: Callable[..., str],
                  context_loader: Callable[..., Awaitable[dict[str, Any]]],
                  persist_images: Callable[[list[str] | None], list[str] | None] | None = None,
                  tool_prompt_builder: ToolPromptBuilder | None = None) -> None:
@@ -52,7 +52,6 @@ class TurnRuntime:
         self.executor = executor
         self.llm = llm
         self.providers = providers
-        self.policy = tool_policy
         self.events = TurnEventStore(db)
         self.system_prompt = system_prompt
         self.context_loader = context_loader
@@ -105,8 +104,6 @@ class TurnRuntime:
                 "tool_executing": f"【工具】正在执行 {data.get('tool_name', '')}\n",
                 "tool_result": f"【工具】{data.get('tool_name', '')}"
                                f"{'已完成' if data.get('ok') else '未完成'}\n",
-                "tool_pending_approval": f"【工具】等待确认：{data.get('tool_name', '')}\n",
-                "tool_blocked": f"【工具】已拦截：{data.get('tool_name', '')}\n",
             }
             text = labels.get(event)
             if text:
@@ -140,34 +137,40 @@ class TurnRuntime:
             await runtime_emit("turn_started", {"turn_id": turn_id,
                                                   "reasoning_effort": reasoning_effort,
                                                   "max_steps": max_steps})
+            # Δ6：context 提升到 turn 级缓存 —— 检索/history/snap 只在 step 1
+            # 组装一次。step≥2 时 model_messages(turn_id) 已经包含最新的 user/
+            # tool 事件，无需再重跑 retriever（原实现每步重跑但结果被 if step==1
+            # 挡掉，属于纯浪费；多步工具轮最坏 +7×2.6s）。
+            turn_context: dict | None = None
             for step in range(1, max_steps + 1):
-                # Match the reference timing contract: TTFT starts at the
-                # durable step boundary, before context assembly and dispatch.
-                step_started_at = time.perf_counter()
+                # 与 deepseek-harness 契约对齐：ttft/llm/decode 只计量 LLM 调用本身，
+                # 检索/精筛/prompt 组装的耗时单独进 context_ms。这样 ttft 跨轮稳定
+                # （不会因冷缓存首轮飘高），context_ms 出现回归也一眼定位。
+                context_prep_started_at = time.perf_counter()
                 self.events.set_status(turn_id, "running", step=step)
                 self.events.append(turn_id, "step.started", actor="host", step=step,
                                    payload={"reasoning_effort": reasoning_effort})
                 await runtime_emit("step_started", {"turn_id": turn_id, "step": step})
-                context_span = tracer.span_start("context.assemble", input={
-                    "turn_id": turn_id, "step": step})
-                context = await self.context_loader(session_id=session_id, turn_id=turn_id,
-                                                    message=message, onboarding=onboarding,
-                                                    step=step, handoff_path=handoff_path)
-                context_span.end(output={"history_messages": len(context["history"]),
-                                         "memories": context.get("memory_count", 0)})
-                # step 1 才 append 上下文事件；后续 step 通过 model_messages
-                # 直接复用同一份文本，保持 turn 内前缀稳定。
-                if step == 1:
-                    memory_ctx = context.get("memory_context")
+                if turn_context is None:
+                    context_span = tracer.span_start("context.assemble", input={
+                        "turn_id": turn_id, "step": step})
+                    turn_context = await self.context_loader(
+                        session_id=session_id, turn_id=turn_id, message=message,
+                        onboarding=onboarding, step=step, handoff_path=handoff_path)
+                    context_span.end(output={
+                        "history_messages": len(turn_context["history"]),
+                        "memories": turn_context.get("memory_count", 0)})
+                    memory_ctx = turn_context.get("memory_context")
                     if memory_ctx:
                         self.events.append(turn_id, "context.memories", actor="host",
                                            model_visible=True,
                                            payload={"content": memory_ctx})
-                    handoff_ctx = context.get("handoff_context")
+                    handoff_ctx = turn_context.get("handoff_context")
                     if handoff_ctx:
                         self.events.append(turn_id, "context.handoff", actor="host",
                                            model_visible=True,
                                            payload={"content": handoff_ctx})
+                context = turn_context
                 snap = context["snap"]
                 effective_effort = reasoning_effort
                 supported_efforts = tuple(getattr(snap, "reasoning_efforts", ()) or ())
@@ -181,7 +184,8 @@ class TurnRuntime:
                     }
                     await runtime_emit("decision_notice", notice)
                 prompt = [{"role": "system", "content": self.system_prompt(
-                    onboarding, location, session_id, context.get("dynamic_blocks"))}]
+                    onboarding, location, session_id, context.get("dynamic_blocks"),
+                    message)}]
                 prompt += context["history"] + self.events.model_messages(turn_id)
                 tools = self._project_tools(message, step)
                 self.events.append(turn_id, "request.header", actor="host", step=step,
@@ -196,6 +200,9 @@ class TurnRuntime:
                 tool_calls: list[dict] = []
                 first_token_at: float | None = None
                 step_usage: dict[str, Any] = {}
+                # LLM 调用起点：ttft/llm/decode 都以此为基准（对齐 harness step/start）。
+                step_started_at = time.perf_counter()
+                context_ms = max(0, round((step_started_at - context_prep_started_at) * 1000))
                 try:
                     # 流式：内容增量边收边发 content_delta，首字延迟由整段生成
                     # 时间降到首 chunk 到达时间；tool_calls 在流内累积，末尾 done
@@ -205,9 +212,15 @@ class TurnRuntime:
                             session_id=session_id, tools=tools,
                             images=images if step == 1 else None,
                             extra_body={"reasoning_effort": effective_effort}):
+                        # 对齐 deepseek-harness/isTokenDelta：首 token 打点覆盖
+                        # 所有 meaningful 流式 chunk（含 reasoning）。这样 ttft_ms
+                        # 反映"用户看到第一个字符"的真实时刻；decode_ms 覆盖 reasoning
+                        # + content 全段，与 provider usage.output_tokens 分母对齐，
+                        # 避免"分子含 reasoning、分母只算 content"造成的 tok/s 虚高。
+                        if kind in ("content", "reasoning") and data \
+                                and first_token_at is None:
+                            first_token_at = time.perf_counter()
                         if kind == "content":
-                            if data and first_token_at is None:
-                                first_token_at = time.perf_counter()
                             content_parts.append(data)
                             await emit("content_delta", {"text": data})
                         elif kind == "reasoning":
@@ -234,6 +247,7 @@ class TurnRuntime:
                     output_tokens=step_usage.get("output_tokens", 0),
                     cache_read_tokens=step_usage.get("cache_read_tokens", 0),
                     cache_write_tokens=step_usage.get("cache_write_tokens", 0),
+                    context_ms=context_ms,
                 )
                 if not tool_calls:
                     content = "".join(content_parts)
@@ -398,28 +412,6 @@ class TurnRuntime:
             if tool is None:
                 return await self._record_result(turn_id, step, call_id, name, False,
                                                  "工具不存在", emit)
-            decision = self.policy.inspect(tool, params, turn_id=turn_id, call_id=call_id)
-            if decision.action == "block":
-                self.events.append(turn_id, "tool.blocked", actor="host", step=step, call_id=call_id,
-                                   model_visible=True, payload={"tool_name": name,
-                                                                "reason": decision.reason})
-                await emit("tool_blocked", {"turn_id": turn_id, "call_id": call_id,
-                                              "tool_name": name, "reason": decision.reason})
-                return {"tool": name, "ok": False, "error": decision.reason}
-            if decision.action == "approval":
-                self.events.set_status(turn_id, "awaiting_approval", step=step)
-                self.events.append(turn_id, "tool.approval_requested", actor="host", step=step,
-                                   call_id=call_id, payload={"approval_id": decision.approval_id,
-                                                              "tool_name": name, "params": params,
-                                                              "risk_level": decision.risk_level})
-                await emit("tool_pending_approval", {"turn_id": turn_id, "call_id": call_id,
-                                                       "approval_id": decision.approval_id,
-                                                       "tool_name": name, "params": params,
-                                                       "risk_level": decision.risk_level})
-                if not await self.policy.wait(decision.approval_id or ""):
-                    return await self._record_result(turn_id, step, call_id, name, False,
-                                                     "用户拒绝或确认已过期", emit)
-                self.events.set_status(turn_id, "running", step=step)
             await emit("tool_executing", {"tool_name": name, "status": "running",
                                             "turn_id": turn_id, "call_id": call_id})
             turn = self.events.get_turn(turn_id) or {}

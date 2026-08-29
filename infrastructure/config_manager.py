@@ -50,13 +50,9 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "desc": "未达到写入门槛的候选超过该天数后自动过期。"},
     # -- 对话参数 --
     {"key": "default_reasoning_effort", "type": "enum", "options": ["off", "low", "high", "max"],
-     "default": "high", "effect": "next_turn", "group": "conversation", "order": 10,
+     "default": "low", "effect": "next_turn", "group": "conversation", "order": 10,
      "label": "默认推理等级",
-     "desc": "每轮请求使用统一的推理等级；模型自行判断是否调用工具，不再走快速/深度意图分流。"},
-    {"key": "tool_writes_require_approval", "type": "bool", "default": True,
-     "effect": "immediate", "group": "conversation", "order": 13,
-     "label": "写入工具需确认",
-     "desc": "开启后，宿主程序会在执行写入或外部副作用操作前请求确认。"},
+     "desc": "每轮请求使用统一的推理等级；模型自行判断是否调用工具。日常对话建议 low，复杂调研/编码可临时调至 high/max。"},
     # -- 情绪 --
     {"key": "mood_enabled", "type": "bool", "default": True,
      "effect": "next_turn", "group": "conversation", "order": 4,

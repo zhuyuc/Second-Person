@@ -55,8 +55,7 @@ class TurnEventStore:
 
     def active_turn(self, session_id: str) -> dict[str, Any] | None:
         return self.db.query_one(
-            "SELECT * FROM agent_turns WHERE session_id=? "
-            "AND status IN ('running','awaiting_approval','awaiting_input') "
+            "SELECT * FROM agent_turns WHERE session_id=? AND status='running' "
             "ORDER BY created_at DESC LIMIT 1", (session_id,))
 
     def append(self, turn_id: str, event_type: str, *, actor: str,
@@ -148,5 +147,5 @@ class TurnEventStore:
         calls = {e["call_id"]: e for e in self.events(turn_id)
                  if e["type"] == "tool.call" and e["call_id"]}
         terminal = {e["call_id"] for e in self.events(turn_id)
-                    if e["type"] in {"tool.result", "tool.blocked"} and e["call_id"]}
+                    if e["type"] == "tool.result" and e["call_id"]}
         return [event for call_id, event in calls.items() if call_id not in terminal]

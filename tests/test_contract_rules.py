@@ -58,16 +58,17 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
         "queued", "error", "reasoning_delta", "decision_notice", "tool_executing",
         "tool_visual", "content_delta", "citations",
         "handoff_ready", "mood_updated", "turn_completed",
-        "turn_started", "step_started", "tool_pending_approval", "tool_blocked",
+        "turn_started", "step_started",
         "tool_result", "step_metrics",
     }
     assert expected == set(SSE_EVENT_SPECS)
     assert SSE_TERMINAL_EVENTS == {"turn_completed", "error"}
     assert "tool_confirm" not in SSE_EVENT_SPECS
+    assert "tool_pending_approval" not in SSE_EVENT_SPECS
+    assert "tool_blocked" not in SSE_EVENT_SPECS
 
-    validate_sse_event("tool_pending_approval", {
-        "turn_id": "turn_1", "approval_id": "apr_1", "tool_name": "file_write",
-        "risk_level": "destructive",
+    validate_sse_event("tool_result", {
+        "turn_id": "turn_1", "tool_name": "file_write", "ok": True,
     })
     with pytest.raises(SSEContractError, match="missing fields"):
         validate_sse_event("content_delta", {})
@@ -102,8 +103,9 @@ def test_routes_use_the_shared_json_object_reader():
         assert "read_json_object" in source, filename
 
 
-def test_product_document_declares_host_owned_tool_approval():
+def test_product_document_does_not_reference_removed_tool_approval():
     product_doc = (ROOT / "docs/SecondPerson-全系统产品方案.md").read_text(encoding="utf-8")
     assert "POST /chat/tool-confirm" not in product_doc
     assert "tool_confirm" not in product_doc
-    assert "获得用户确认后执行" in product_doc
+    assert "tool_pending_approval" not in product_doc
+    assert "获得用户确认后执行" not in product_doc

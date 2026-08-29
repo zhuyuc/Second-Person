@@ -30,8 +30,6 @@ SSE_EVENT_SPECS: dict[str, SSEEventSpec] = {
     "turn_started": SSEEventSpec("持久化任务轮次已创建", frozenset({"turn_id", "reasoning_effort"})),
     "step_started": SSEEventSpec("模型/工具循环的新步骤", frozenset({"turn_id", "step"})),
     "tool_executing": SSEEventSpec("工具调用状态", frozenset({"tool_name", "status"})),
-    "tool_pending_approval": SSEEventSpec("等待用户确认的副作用工具", frozenset({"turn_id", "approval_id", "tool_name", "risk_level"})),
-    "tool_blocked": SSEEventSpec("被宿主策略阻断的工具", frozenset({"turn_id", "tool_name", "reason"})),
     "tool_result": SSEEventSpec("工具执行结果摘要", frozenset({"turn_id", "tool_name", "ok"})),
     "tool_visual": SSEEventSpec("工具生成的可视化", frozenset({"type", "data"})),
     "content_delta": SSEEventSpec("回复正文增量", frozenset({"text"})),

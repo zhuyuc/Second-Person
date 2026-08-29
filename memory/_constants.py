@@ -41,7 +41,6 @@ INGEST_CHUNK_TOKENS = 6000
 
 # ---- 边缘工程参数（收敛自 CFG-I）---------------------------------------
 AGENT_MAX_STEPS = 8
-TOOL_APPROVAL_TTL_MINUTES = 10
 HANDOFF_SUMMARY_TOKEN_LIMIT = 10000
 OUTPUT_STYLE_REVIEW_INTERVAL_DAYS = 7
 OUTPUT_STYLE_SIGNAL_RETENTION_DAYS = 90
@@ -56,6 +55,44 @@ RRF_K = 60
 RECALL_FALLBACK_THRESHOLD = 0.35
 MOOD_PATTERN_WINDOW_DAYS = 14
 OVER_BUDGET_STRATEGY = "remind_only"
+
+# ---- 检索链路（收敛自 retriever.py 内联默认值）----------------------------
+# LLM 精筛后主命中最多保留几条（configurable 也可覆盖）
+RETRIEVAL_REFINE_MAX = 5
+# 图扩展 seed 池大小：candidates 前 N 条作为 seed 参与图扩展
+GRAPH_EXPAND_SEED_POOL = 10
+# 图扩展节点入池后，与 seed 向量余弦门槛（低于此门槛的关联邻居直接砍掉）
+GRAPH_EXPAND_SEED_THRESHOLD = 0.6
+# 精筛未选中时，图邻居 top-N 作为「关联记忆」保留（仅在 chosen_ids 非空时生效）
+GRAPH_EXTRA_RELATED_CAP = 3
+# 实体共现召回的邻居数上限
+GRAPH_ENTITY_NEIGHBOR_CAP = 30
+# 共引召回的邻居数上限
+GRAPH_CITATION_NEIGHBOR_CAP = 15
+# 共引召回时间窗（天）
+GRAPH_CITATION_WINDOW_DAYS = 30
+# 图扩展三源合并后总量硬帽，避免大账户下失控
+GRAPH_NEIGHBOR_HARD_CAP = 15
+# 无向量的邻居（迁移期/老库）按 rrf_score 排序保留的最大条数
+GRAPH_UNCOMPUTABLE_KEEP = 2
+# 候选池送入 LLM 精筛的硬帽（原代码硬编码 20）
+CANDIDATE_POOL_HARD_CAP = 20
+# 候选池小于该数量时跳过 LLM 精筛，走 degrade_pick 兜底
+# 设为 2 意味着"仅 1 个候选时才跳过"——省下 1 次 refine 调用，同时保留
+# ≥2 个候选场景下 LLM 判断的契约（对齐 test_retriever_gates 期望）
+RETRIEVAL_REFINE_MIN_CANDIDATES = 2
+# 极短寒暄短路阈值：查询字符数 ≤ 此值且携带 context_text 又非回忆意图 → 跳过整条检索
+MIN_QUERY_CHARS_FOR_CONTEXT = 3
+# 精筛超时秒数
+RETRIEVAL_REFINE_TIMEOUT_SECONDS = 10
+# LLM 精筛判空时按候选池 top-K 写入 retrieval_negative_count（负样本反馈）
+REFINE_NEGATIVE_FEEDBACK_TOP_K = 3
+# LLM 精筛不可用时的相对得分兜底比例
+REFINE_DEGRADE_SCORE_RATIO = 0.5
+
+# ---- 待确认记忆频次（收敛自 agent/core.py 硬编码 UX 规则）-----------------
+# 用户消息 < 该字符数时不追加「待确认记忆」块（避免打扰"你好"这种寒暄）
+LOW_CONFIRM_MIN_MSG_CHARS = 6
 
 # ---- 时效感知（CFG-E 合并 3 个多少天为 memory_horizon_days）------------
 # 用户可拧 memory_horizon_days（默认 90）；下面三个下游派生

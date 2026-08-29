@@ -140,12 +140,6 @@ class ChatSendRequest(BaseModel):
         return self
 
 
-class ToolApprovalDecisionRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    approved: bool
-
-
 def parse_chat_send(body: Any) -> ChatSendRequest:
     """Return a normalized chat request or a route-safe validation error."""
     if not isinstance(body, dict):

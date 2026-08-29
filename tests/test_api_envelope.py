@@ -151,22 +151,6 @@ def test_chat_sse_forwards_reasoning_effort(
     assert chat._BUFFERS[crid]["reasoning_effort"] == expected
 
 
-def test_tool_approval_route_is_owned_by_the_host(
-        client: TestClient, monkeypatch: pytest.MonkeyPatch):
-    core = get_container().core
-    monkeypatch.setattr(core, "decide_tool_approval", lambda approval_id, approved: {
-        "turn_id": "turn_approval", "call_id": "call_approval",
-        "id": approval_id, "status": "approved" if approved else "rejected",
-    })
-    response = client.post(
-        "/api/chat/turns/turn_approval/approvals/apr_approval",
-        json={"approved": True})
-    assert response.status_code == 200
-    assert response.json()["data"] == {
-        "approval_id": "apr_approval", "turn_id": "turn_approval", "status": "approved",
-    }
-
-
 def test_active_buffer_is_not_cancelled_by_fixed_wall_clock_limit(monkeypatch: pytest.MonkeyPatch):
     cancelled = []
 

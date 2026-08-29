@@ -418,6 +418,7 @@ a:hover {
     text-overflow: ellipsis
 }
 
+/* 旧样式保留兜底：如有外部引用不至于 404，实际元素已换为 side-nav-item */
 .side-new-chat {
     width: 100%;
     padding: 10px;
@@ -433,6 +434,23 @@ a:hover {
     margin-bottom: 10px;
     padding-bottom: 10px;
     border-bottom: 1px solid var(--bd)
+}
+
+/* 顶部动作组（新建/搜索）：与 nav 同风格，仅去掉底部边框，靠下一组 side-nav 的 border 分隔 */
+.side-nav.side-nav-top {
+    border-bottom: none;
+    padding-bottom: 4px;
+    margin-bottom: 4px
+}
+
+.side-nav-kbd {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--surface-2);
+    border-radius: 4px;
+    padding: 1px 6px;
+    letter-spacing: .5px
 }
 
 .side-nav-item {
@@ -1633,6 +1651,71 @@ code {
     background: var(--surface-3)
 }
 
+/* 引用胶囊（消息选中 → 引用生成，视觉上与普通粘贴附件区分） */
+.attach-chip.attach-quote {
+    background: var(--brand-soft);
+    color: var(--acctx);
+    border: 1px solid rgba(59, 110, 246, .18)
+}
+
+.attach-chip.attach-quote:hover {
+    background: rgba(59, 110, 246, .18)
+}
+
+/* 消息气泡文字选中后的悬浮 toolbar（复制 / 引用） */
+.selection-actionbar {
+    position: fixed;
+    z-index: calc(var(--z-menu) + 2);
+    display: inline-flex;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--bd);
+    border-radius: 10px;
+    box-shadow: var(--shadow-2);
+    padding: 4px;
+    gap: 2px;
+    user-select: none
+}
+
+.selection-actionbar .sab-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    color: var(--sec);
+    cursor: pointer;
+    transition: background var(--dur-fast), color var(--dur-fast)
+}
+
+.selection-actionbar .sab-btn:hover {
+    background: var(--surface-2);
+    color: var(--pri)
+}
+
+.selection-actionbar .sab-sep {
+    width: 1px;
+    height: 16px;
+    background: var(--bd)
+}
+
+.selection-actionbar .ti {
+    font-size: 14px
+}
+
+.fade-enter-active,
+.fade-leave-active {
+    transition: opacity var(--dur-fast)
+}
+
+.fade-enter-from,
+.fade-leave-to {
+    opacity: 0
+}
+
 /* AI 生成文档的下载卡片（generate_document 产物） */
 .file-card {
     display: inline-flex;
@@ -1899,12 +1982,27 @@ code {
     align-items: center;
     gap: 6px;
     min-width: 0;
+    flex: 1 1 auto;
+    justify-content: flex-end;
     color: var(--muted)
 }
 
 .model-control-row-value .ti {
     flex: 0 0 auto;
     font-size: 17px
+}
+
+/* 模型名过长时省略号（原生 text-overflow 需要 block/inline-block + overflow:hidden） */
+.model-control-row-text {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis
+}
+
+/* 左侧标签固定不被挤压，右侧值区拿到剩余空间才能触发省略 */
+.model-control-row-label {
+    flex: 0 0 auto
 }
 
 .model-control-back {
@@ -2080,9 +2178,10 @@ code {
 }
 
 .sess-menu {
-    position: absolute;
-    right: 8px;
-    top: 34px;
+    /* 用 fixed 逃出 .side-sess 的 overflow:auto 裁剪区，坐标由 JS 按触发按钮
+       的 getBoundingClientRect() 计算；空间不够时向上翻转（transform:
+       translateY(-100%)），最底部会话点更多也不会被裁掉 */
+    position: fixed;
     /* 必须高于"点击外部关闭"的全屏遮罩（var(--z-menu)），否则同层级时遮罩 DOM 靠后会盖住菜单，
        导致菜单项点击全部被遮罩吞掉（删除/重命名/置顶失效） */
     z-index: calc(var(--z-menu) + 1);
@@ -2091,7 +2190,7 @@ code {
     border-radius: 12px;
     box-shadow: var(--shadow-2);
     padding: 6px;
-    min-width: 132px
+    min-width: 168px
 }
 
 .sess-menu>div {
@@ -2122,6 +2221,267 @@ code {
     padding: 3px 8px;
     font-size: 13px;
     border-radius: 8px
+}
+
+/* ---- 侧栏搜索面板 ---- */
+.sess-search {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 4px 4px 8px
+}
+
+.sess-search-hd {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 4px 8px;
+    color: var(--sec)
+}
+
+.sess-search-back {
+    padding: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 16px
+}
+
+.sess-search-back:hover {
+    background: var(--surface-2);
+    color: var(--fg)
+}
+
+.sess-search-hd-title {
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted)
+}
+
+.sess-search-input-wrap {
+    position: relative;
+    display: flex;
+    align-items: center
+}
+
+.sess-search-input-wrap>.ti-search {
+    position: absolute;
+    left: 10px;
+    color: var(--muted);
+    font-size: 16px;
+    pointer-events: none
+}
+
+.sess-search-input {
+    width: 100%;
+    padding: 8px 30px 8px 32px;
+    font-size: 13px;
+    border-radius: 10px;
+    background: var(--surface-2);
+    border: 1px solid transparent;
+    transition: border-color var(--dur-fast), background var(--dur-fast)
+}
+
+.sess-search-input:focus {
+    border-color: var(--brand-soft);
+    background: var(--surface)
+}
+
+.sess-search-clear {
+    position: absolute;
+    right: 8px;
+    padding: 2px;
+    border-radius: 4px;
+    color: var(--muted);
+    cursor: pointer
+}
+
+.sess-search-clear:hover {
+    background: var(--surface-2);
+    color: var(--fg)
+}
+
+.sess-search-scopes {
+    display: flex;
+    gap: 4px;
+    margin: 8px 0 4px;
+    flex-wrap: wrap
+}
+
+.sess-search-chip {
+    padding: 3px 10px;
+    font-size: 12px;
+    border-radius: 999px;
+    background: transparent;
+    border: 1px solid var(--bd);
+    color: var(--sec);
+    cursor: pointer;
+    transition: background var(--dur-fast), color var(--dur-fast), border-color var(--dur-fast)
+}
+
+.sess-search-chip:hover {
+    background: var(--surface-2);
+    color: var(--fg)
+}
+
+.sess-search-chip.active {
+    background: var(--brand-soft);
+    color: var(--acctx);
+    border-color: transparent
+}
+
+.sess-search-body {
+    flex: 1;
+    overflow-y: auto;
+    margin-top: 4px
+}
+
+.sess-search-hint {
+    padding: 24px 8px;
+    color: var(--muted);
+    font-size: 12.5px;
+    text-align: center
+}
+
+.sess-search-summary {
+    padding: 4px 6px 6px;
+    font-size: 11.5px;
+    color: var(--muted)
+}
+
+.sess-search-card {
+    border-radius: 10px;
+    padding: 6px 4px 8px;
+    margin-bottom: 4px;
+    transition: background var(--dur-fast)
+}
+
+.sess-search-card:hover {
+    background: var(--surface-2)
+}
+
+.sess-search-card.active {
+    background: var(--brand-soft)
+}
+
+.sess-search-card-hd {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--fg)
+}
+
+.sess-search-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap
+}
+
+.sess-search-count {
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--surface);
+    border-radius: 999px;
+    padding: 1px 8px;
+    flex-shrink: 0
+}
+
+.sess-search-hit {
+    display: flex;
+    gap: 6px;
+    padding: 4px 8px;
+    margin: 2px 0 2px 22px;
+    font-size: 12px;
+    color: var(--sec);
+    line-height: 1.5;
+    border-radius: 6px;
+    cursor: pointer
+}
+
+.sess-search-hit:hover {
+    background: var(--surface);
+    color: var(--fg)
+}
+
+.sess-search-role {
+    flex-shrink: 0;
+    font-size: 10.5px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--surface-2);
+    color: var(--muted);
+    line-height: 18px
+}
+
+.sess-search-role.role-user {
+    background: var(--brand-soft);
+    color: var(--acctx)
+}
+
+.sess-search-role.role-assistant {
+    background: var(--surface);
+    color: var(--sec);
+    border: 1px solid var(--bd)
+}
+
+.sess-search-time {
+    flex-shrink: 0;
+    color: var(--muted);
+    font-size: 10.5px;
+    padding-top: 2px
+}
+
+.sess-search-snip {
+    flex: 1;
+    min-width: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word
+}
+
+.sess-search-more {
+    margin: 4px 8px 0 22px;
+    font-size: 11.5px;
+    color: var(--acctx);
+    cursor: pointer
+}
+
+.sess-search-more:hover {
+    text-decoration: underline
+}
+
+.sess-search mark,
+.sess-search-title mark {
+    background: var(--brand-soft);
+    color: var(--acctx);
+    padding: 0 2px;
+    border-radius: 3px
+}
+
+.sp-spin {
+    display: inline-block;
+    animation: sp-spin 1s linear infinite
+}
+
+@keyframes sp-spin {
+    to { transform: rotate(360deg) }
+}
+
+/* 消息高亮：搜索跳转后短暂闪烁 */
+.msg-flash {
+    animation: sp-msg-flash 1.6s ease-out
+}
+
+@keyframes sp-msg-flash {
+    0% { background: var(--brand-soft) }
+    100% { background: transparent }
 }
 
 /* ---- 空状态 ---- */

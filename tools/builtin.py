@@ -334,8 +334,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             "detail": {"type": "string"}, "domain": {"type": "string"},
             "confidence": {"type": "string", "enum": ["strong", "medium", "low"]},
             "links": {"type": "array"}, "entities": {"type": "array"}},
-         "required": ["title", "summary", "detail", "domain"]},
-        destructive=True), memory_save)
+         "required": ["title", "summary", "detail", "domain"]}), memory_save)
 
     registry.register_function(ToolSpec(
         "memory_search", "检索记忆宫殿（仅第 1 层 Hybrid 预筛，返回 title+summary）",
@@ -361,13 +360,13 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         {"type": "object", "properties": {
             "path": {"type": "string"}, "content": {"type": "string"},
             "mode": {"type": "string", "enum": ["w", "a"]}},
-         "required": ["path", "content"]}, destructive=True), file_write)
+         "required": ["path", "content"]}), file_write)
 
     registry.register_function(ToolSpec(
         "shell_exec", "在工作区执行 shell 命令",
         {"type": "object", "properties": {
             "cmd": {"type": "string"}, "timeout": {"type": "integer"}},
-         "required": ["cmd"]}, destructive=True), shell_exec)
+         "required": ["cmd"]}), shell_exec)
 
     registry.register_function(ToolSpec(
         "web_fetch", "抓取网页正文",
@@ -491,8 +490,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                              "description": "Mermaid 图表类型：flowchart/sequenceDiagram/classDiagram/stateDiagram/erDiagram/pie/gantt/timeline/mindmap 等"},
             "mermaid_code": {"type": "string", "description": "Mermaid DSL 源码（不含 ```mermaid 围栏）"},
             "type": {"type": "string", "const": "mermaid"}},
-         "required": ["diagram_type", "mermaid_code"]},
-        destructive=False), render_mermaid)
+         "required": ["diagram_type", "mermaid_code"]}), render_mermaid)
 
     registry.register_function(ToolSpec(
         "render_flowchart",
@@ -516,8 +514,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                 "label": {"type": "string", "description": "分支标签，如 是/否（仅判断分支需要）"}},
                 "required": ["from", "to"]}},
             "type": {"type": "string", "const": "flowchart"}},
-         "required": ["nodes", "edges"]},
-        destructive=False), render_flowchart)
+         "required": ["nodes", "edges"]}), render_flowchart)
 
     registry.register_function(ToolSpec(
         "generate_document",
@@ -545,4 +542,4 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                          "description": "格式适用的场景名称，如'产品文档''技术方案''周报'"},
             "attachment_text": {"type": "string",
                                 "description": "附件正文（系统自动注入，无需手动填写）"}},
-         "required": ["scenario"]}, destructive=True), format_template_save)
+         "required": ["scenario"]}), format_template_save)

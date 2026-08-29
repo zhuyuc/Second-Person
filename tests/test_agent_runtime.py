@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from agent.tool_policy import ToolPolicy
 from agent.turn_events import TurnEventStore
 from agent.turn_runtime import TurnRuntime
 from infrastructure.db import Database
@@ -79,8 +78,7 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
     async def scenario():
         db = _db(tmp_path)
         try:
-            config = _Config(agent_max_steps=4, tool_approval_ttl_minutes=5,
-                             tool_writes_require_approval=True)
+            config = _Config(agent_max_steps=4)
             registry = ToolRegistry()
             registry.register_function(ToolSpec(
                 "lookup", "read a value", {"type": "object", "properties": {
@@ -99,7 +97,6 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
             runtime = TurnRuntime(
                 db=db, config=config, sessions=_Sessions(), registry=registry,
                 executor=_Executor(), llm=llm, providers=_Providers(),
-                tool_policy=ToolPolicy(db, config),
                 system_prompt=lambda *_args: "system", context_loader=context_loader)
             outcome = await runtime.run(
                 session_id="sess_runtime", message="查询 A", reasoning_effort="high",
@@ -147,38 +144,11 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
     asyncio.run(scenario())
 
 
-def test_write_tool_requires_explicit_approval_and_records_decision(tmp_path: Path):
-    async def scenario():
-        db = _db(tmp_path)
-        try:
-            config = _Config(tool_approval_ttl_minutes=5, tool_writes_require_approval=True)
-            registry = ToolRegistry()
-            registry.register_function(ToolSpec(
-                "write_note", "write", {"type": "object", "properties": {}},
-                risk_level="write", approval_policy="every_call", parallel_safe=False),
-                lambda **_kwargs: None)
-            policy = ToolPolicy(db, config)
-            decision = policy.inspect(registry.get("write_note"), {}, turn_id="turn_policy",
-                                      call_id="call_policy")
-            assert decision.action == "approval"
-            assert decision.approval_id
-            waiter = asyncio.create_task(policy.wait(decision.approval_id))
-            await asyncio.sleep(0)
-            row = policy.decide(decision.approval_id, approved=True)
-            assert row and row["status"] == "approved"
-            assert await waiter is True
-        finally:
-            db.close()
-
-    asyncio.run(scenario())
-
-
 def test_provider_reasoning_is_separate_from_tool_progress_and_persisted(tmp_path: Path):
     async def scenario():
         db = _db(tmp_path)
         try:
-            config = _Config(agent_max_steps=2, tool_approval_ttl_minutes=5,
-                             tool_writes_require_approval=True)
+            config = _Config(agent_max_steps=2)
             registry = ToolRegistry()
             events: list[tuple[str, dict]] = []
 
@@ -202,7 +172,6 @@ def test_provider_reasoning_is_separate_from_tool_progress_and_persisted(tmp_pat
             runtime = TurnRuntime(
                 db=db, config=config, sessions=_Sessions(), registry=registry,
                 executor=_Executor(), llm=ReasoningLLM(), providers=_Providers(),
-                tool_policy=ToolPolicy(db, config),
                 system_prompt=lambda *_args: "system", context_loader=context_loader)
             outcome = await runtime.run(
                 session_id="sess_reasoning", message="核对", reasoning_effort="high", emit=emit)
@@ -243,8 +212,7 @@ def test_reasoning_effort_switch_keeps_messages_and_tools_stable(tmp_path: Path)
     async def scenario():
         db = _db(tmp_path)
         try:
-            config = _Config(agent_max_steps=1, tool_approval_ttl_minutes=5,
-                             tool_writes_require_approval=False)
+            config = _Config(agent_max_steps=1)
             registry = ToolRegistry()
             llm = _CapturingLLM()
 
@@ -257,7 +225,6 @@ def test_reasoning_effort_switch_keeps_messages_and_tools_stable(tmp_path: Path)
             runtime = TurnRuntime(
                 db=db, config=config, sessions=_Sessions(), registry=registry,
                 executor=_Executor(), llm=llm, providers=_Providers(),
-                tool_policy=ToolPolicy(db, config),
                 system_prompt=lambda *_args: "system", context_loader=context_loader)
 
             # 冻结时间源：turn_runtime._format_turn_time() 用 now_cst，若两次 run

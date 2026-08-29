@@ -13,6 +13,8 @@ import BaseModal from '@/components/BaseModal.vue'
 import HandoffAttachment from '@/components/HandoffAttachment.vue'
 import MessageAnchorRail from '@/components/MessageAnchorRail.vue'
 import SessionMetricsLine from '@/components/SessionMetricsLine.vue'
+import SelectionActionBar from '@/components/SelectionActionBar.vue'
+import { useMessageSelection } from '@/composables/useMessageSelection'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
 import { formatRelative, formatTimeFull, fmtSize, nowLocalIso, friendlyError } from '@/utils/format'
@@ -65,6 +67,8 @@ marked.setOptions({ renderer: mermaidRenderer })
 const toast = useToast()
 const sse = useSSE()
 const sessStore = useSessions()   // 会话列表/当前会话共享状态（侧栏在 SessionSidebar）
+// 消息气泡文字选中 → 悬浮 toolbar（复制/引用）
+const selection = useMessageSelection()
 const messages = ref([])
 const input = ref('')
 const generating = ref(false)
@@ -90,7 +94,6 @@ const messageElements = new Map()
 const messageElementKeys = new WeakMap()
 let localMessageKeySeq = 0
 
-const pendingToolApproval = ref(null)
 const thresholdBreached = ref(null)  // null / 'soft' / 'hard'
 const softToastShown = ref(false)
 // handoff 附件状态
@@ -205,15 +208,6 @@ function pickReasoningEffort(v) {
   closeModelControl()
 }
 
-async function decideToolApproval(approved) {
-  const item = pendingToolApproval.value
-  if (!item) return
-  try {
-    await api.post(`/chat/turns/${item.turn_id}/approvals/${item.approval_id}`, { approved })
-    pendingToolApproval.value = null
-    toast.push('success', approved ? '已允许执行' : '已拒绝执行')
-  } catch { /* API layer displays the failure and the pending prompt remains */ }
-}
 // 点击面板外部关闭模型与推理等级菜单（菜单与入口按钮自身的事件已 stop）
 function onDocClickModelControl(e) {
   if (!modelControlOpen.value) return
@@ -227,7 +221,7 @@ function stripToastNotifs(msgs) {
     && TOAST_ONLY_NOTIF.includes(m.notification_type)))
 }
 
-async function openSession(sid) {
+async function openSession(sid, opts = {}) {
   sessStore.setCurrent(sid)
   const [msgs, metrics] = await Promise.all([
     api.get(withQuery('/chat/messages', { session_id: sid })),
@@ -244,8 +238,27 @@ async function openSession(sid) {
   messages.value = stripToastNotifs(msgs)
   sessionMetrics.value = metrics
   currentTurnMetrics.value = metrics?.current_turn || null
-  scrollBottom()
+  if (opts.messageId) scrollToMessage(opts.messageId)
+  else scrollBottom()
   tryReattach(sid)
+}
+
+// 搜索跳转：滚动到指定消息并短暂高亮闪烁
+function scrollToMessage(mid) {
+  nextTick(() => {
+    // 消息可能因懒渲染稍后进 DOM；两次尝试足够覆盖 v-for 完成的时序
+    const tryScroll = (retry) => {
+      const el = document.querySelector(`[data-msg-id="${mid}"]`)
+      if (!el) {
+        if (retry > 0) window.setTimeout(() => tryScroll(retry - 1), 60)
+        return
+      }
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+      el.classList.add('msg-flash')
+      window.setTimeout(() => el.classList.remove('msg-flash'), 1800)
+    }
+    tryScroll(3)
+  })
 }
 // 刷新/切回会话时重挂进行中的生成：后端生成与连接已解耦，
 // 同 crid 重连从头回放缓冲并续跟实时事件，生成不会因刷新丢失
@@ -288,10 +301,14 @@ function extractAttachments(content) {
     found.push(prev)
   }
   if (prev) prev.text = head.slice(prev.end).replace(/\n+$/, '')
-  return found.map(a => ({
-    name: a.name, pasted: /^粘贴的文本/.test(a.name),
-    text: a.text || '', chars: (a.text || '').length
-  }))
+  return found.map(a => {
+    const isQuote = /^引用(?:\s|$)/.test(a.name)
+    return {
+      name: a.name, pasted: /^粘贴的文本/.test(a.name) || isQuote,
+      kind: isQuote ? 'quote' : undefined,
+      text: a.text || '', chars: (a.text || '').length
+    }
+  })
 }
 
 // 附件上传（拖拽 / 点击选择，解析常见格式）
@@ -371,6 +388,43 @@ function clearAttachments(opts = {}) {
     if (a.isImage && a.preview && !(keep && keep.has(a.preview))) URL.revokeObjectURL(a.preview)
   }
   attachments.value = []
+}
+
+// ---- 消息选中操作（复制 / 引用） -----------------------------------------
+async function copySelection() {
+  const t = selection.text.value
+  if (!t) return
+  try {
+    await navigator.clipboard.writeText(t)
+    toast.push('success', '已复制')
+  } catch {
+    toast.push('warning', '复制失败，请手动 Ctrl+C')
+  }
+  selection.hide()
+}
+function quoteSelection() {
+  const t = selection.text.value
+  if (!t) return
+  const MAX = 5
+  if (attachments.value.length >= MAX) {
+    toast.push('warning', `最多 ${MAX} 个附件`)
+    selection.hide()
+    return
+  }
+  // 与"粘贴的文本"共用同一通道：同一形状、同一发送格式、同一历史还原正则。
+  // kind:'quote' 只在渲染层用来切换图标和胶囊底色。命名递增避免多引用重名。
+  const n = attachments.value.filter(a => a.kind === 'quote').length
+  attachments.value.push({
+    name: n ? `引用 ${n + 1}` : '引用',
+    pasted: true, kind: 'quote', parsed: true, isImage: false, uploading: false,
+    text: t, chars: t.length, lines: t.split('\n').length,
+    sourceMsgId: selection.sourceMsgId.value,
+    sourceRole: selection.sourceRole.value,
+  })
+  selection.hide()
+  // 清空浏览器选区，避免下一次 pointerup 又基于旧选区弹 toolbar
+  window.getSelection?.()?.removeAllRanges?.()
+  nextTick(() => { ta.value?.focus() })
 }
 
 // ---- 表情选择器：点击表情插入输入框光标处（支持连续插入，点击外部关闭） ----
@@ -517,6 +571,8 @@ async function send() {
     hPath = `artifacts/handoffs/${sessStore.currentSid}.md`
   }
   // 构造发送给后端的消息：把附件解析文本作为上下文前置（不截断，完整交给模型）
+  // 引用附件（kind:'quote'）与粘贴文本走同一 【附件：xxx】 格式，
+  // 历史还原、气泡胶囊全部复用同一条链路，无需专门分支。
   let backendMsg = text
   if (atts.length) {
     const blocks = atts.map(a => `【附件：${a.name}】\n${a.text || ''}`).join('\n\n')
@@ -524,8 +580,9 @@ async function send() {
   }
   if (!backendMsg && imgs.length) backendMsg = '请看图并回应。'
   // 气泡附件：保留粘贴全文与原始 File，供发送后点击弹窗回看/下载
+  // kind 保留后气泡胶囊可以按引用/粘贴/文件切换图标与底色
   const bubbleAtts = attachments.value.filter(a => !a.isImage).map(a => ({
-    name: a.name, pasted: !!a.pasted,
+    name: a.name, pasted: !!a.pasted, kind: a.kind,
     text: a.pasted ? a.text : undefined, file: a.file, chars: a.chars
   }))
   const bubbleImages = attachments.value.filter(a => a.isImage && a.preview).map(a => a.preview)
@@ -610,15 +667,6 @@ function handleEvent(ev, data) {
     toolEvents.value.push({ type: ev, ...data })
     maybeScroll(); scrollThink()
   }
-  else if (ev === 'tool_pending_approval') {
-    pendingToolApproval.value = data
-    toolEvents.value.push({ type: ev, ...data })
-    maybeScroll(); scrollThink()
-  }
-  else if (ev === 'tool_blocked') {
-    toolEvents.value.push({ type: ev, ...data })
-    maybeScroll(); scrollThink()
-  }
   else if (ev === 'decision_notice') {
     decisionNotices.value.push(data)
     maybeScroll(); scrollThink()
@@ -634,7 +682,6 @@ function handleEvent(ev, data) {
     liveThroughput.calibrate(currentTurnMetrics.value?.output_tokens)
     streamAnalysisMetadata = data.analysis_metadata || streamAnalysisMetadata
     finishStream(data.message_id)
-    pendingToolApproval.value = null
     if (data.threshold) handleThreshold(data.threshold)
   }
   else if (ev === 'step_metrics') {
@@ -642,7 +689,7 @@ function handleEvent(ev, data) {
     sessionMetrics.value = data.session_metrics || sessionMetrics.value
     currentTurnMetrics.value = data.metrics || sessionMetrics.value?.current_turn || currentTurnMetrics.value
   }
-  else if (ev === 'error') { pendingToolApproval.value = null; toast.push('error', friendlyError(data.message)); finishStream() }
+  else if (ev === 'error') { toast.push('error', friendlyError(data.message)); finishStream() }
   // handoff 摘要就绪（会话上下文管理方案 v2）
   else if (ev === 'handoff_ready') {
     handoffStatus.value = data.status
@@ -1143,7 +1190,12 @@ function resetToHome() {
 }
 
 // 侧栏点击历史会话 → 加载消息
-function onOpenSession(e) { openSession(e.detail) }
+function onOpenSession(e) {
+  // 兼容旧调用：detail 为字符串 → 仅切换会话；对象 {sid, messageId} → 跳转并滚动
+  const d = e.detail
+  if (typeof d === 'string') openSession(d)
+  else if (d && d.sid) openSession(d.sid, { messageId: d.messageId })
+}
 
 onMounted(() => {
   sessStore.load(); loadProviders()
@@ -1263,6 +1315,9 @@ onUnmounted(() => {
 
 <template>
   <div style="display:flex;height:100vh;margin:-28px -40px;max-width:none;width:auto">
+    <!-- 消息气泡文字选中浮层：复制 / 引用 -->
+    <SelectionActionBar :visible="selection.visible.value" :rect="selection.rect.value"
+      @copy="copySelection" @quote="quoteSelection" />
     <!-- 定位锚点栏：独立左列，宽度不随右侧内容变化；与对话状态解耦，仅悬停触发 -->
     <MessageAnchorRail :anchors="anchorItems" @select="scrollToAnchor" />
     <!-- 对话区（会话列表已合并到全局侧栏 SessionSidebar） -->
@@ -1282,7 +1337,7 @@ onUnmounted(() => {
             <h2>Second Person 比你更懂你！</h2>
           </div>
           <div v-for="(m, i) in messages" :key="messageKey(m, i)" :ref="el => registerMessageElement(messageKey(m, i), el)"
-            class="chat-message-item" :data-anchor-key="m.role === 'user' ? messageKey(m, i) : undefined">
+            class="chat-message-item" :data-msg-id="m.id || undefined" :data-anchor-key="m.role === 'user' ? messageKey(m, i) : undefined">
             <!-- 用户气泡 -->
             <div v-if="m.role === 'user'" class="msg-user">
               <div :style="editingId === m.id ? { width: '78%' } : { maxWidth: '78%' }">
@@ -1299,8 +1354,12 @@ onUnmounted(() => {
                 <div v-if="m.atts && m.atts.length"
                   style="display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;margin-bottom:6px">
                   <span v-for="(f, fi) in m.atts" :key="fi" class="attach-chip attach-click"
-                    :title="f.pasted ? '点击查看全文' : '点击查看详情'" @click="openMsgAttachment(f)">
-                    <i class="ti" :class="f.pasted ? 'ti-clipboard-text' : 'ti-paperclip'"></i> {{ f.name }}
+                    :class="{ 'attach-quote': f.kind === 'quote' }"
+                    :title="f.kind === 'quote' ? '点击查看引用全文' : f.pasted ? '点击查看全文' : '点击查看详情'"
+                    @click="openMsgAttachment(f)">
+                    <i class="ti"
+                      :class="f.kind === 'quote' ? 'ti-quote' : (f.pasted ? 'ti-clipboard-text' : 'ti-paperclip')"></i>
+                    {{ f.name }}
                   </span>
                 </div>
                 <div v-if="m.images && m.images.length"
@@ -1475,10 +1534,12 @@ onUnmounted(() => {
           <!-- 附件条（胶囊可点击：粘贴文本/图片预览，其他格式看详情） -->
           <div v-if="attachments.length" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">
             <span v-for="(a, ai) in attachments" :key="ai" class="attach-chip attach-click"
-              :title="a.pasted ? '点击查看全文' : a.isImage ? '点击预览' : '点击查看详情'" @click="openAttachment(a)">
+              :class="{ 'attach-quote': a.kind === 'quote' }"
+              :title="a.kind === 'quote' ? '点击查看引用全文' : a.pasted ? '点击查看全文' : a.isImage ? '点击预览' : '点击查看详情'"
+              @click="openAttachment(a)">
               <img v-if="a.isImage && a.preview" :src="a.preview" class="attach-thumb" />
               <i v-else class="ti"
-                :class="a.uploading ? 'ti-loader-2' : (a.error ? 'ti-alert-triangle' : (a.pasted ? 'ti-clipboard-text' : 'ti-paperclip'))"></i>
+                :class="a.uploading ? 'ti-loader-2' : (a.error ? 'ti-alert-triangle' : (a.kind === 'quote' ? 'ti-quote' : (a.pasted ? 'ti-clipboard-text' : 'ti-paperclip')))"></i>
               {{ a.name }}
               <span v-if="a.uploading" class="muted">解析中…</span>
               <span v-else-if="a.error" class="dang">失败</span>
@@ -1528,12 +1589,18 @@ onUnmounted(() => {
                 <div v-if="modelControlOpen" class="model-control-menu" role="dialog" aria-label="模型与推理等级" @click.stop>
                   <template v-if="modelControlPanel === 'overview'">
                     <button type="button" class="model-control-row" @click="openModelControlPanel('model')">
-                      <span>模型</span>
-                      <span class="model-control-row-value">{{ selectedModelLabel }}<i class="ti ti-chevron-right"></i></span>
+                      <span class="model-control-row-label">模型</span>
+                      <span class="model-control-row-value">
+                        <span class="model-control-row-text" :title="selectedModelLabel">{{ selectedModelLabel }}</span>
+                        <i class="ti ti-chevron-right"></i>
+                      </span>
                     </button>
                     <button type="button" class="model-control-row" @click="openModelControlPanel('reasoning')">
-                      <span>推理等级</span>
-                      <span class="model-control-row-value">{{ reasoningEffortCompactLabel }}<i class="ti ti-chevron-right"></i></span>
+                      <span class="model-control-row-label">推理等级</span>
+                      <span class="model-control-row-value">
+                        <span class="model-control-row-text" :title="reasoningEffortCompactLabel">{{ reasoningEffortCompactLabel }}</span>
+                        <i class="ti ti-chevron-right"></i>
+                      </span>
                     </button>
                   </template>
                   <template v-else-if="modelControlPanel === 'model'">
@@ -1589,15 +1656,6 @@ onUnmounted(() => {
     </template>
   </BaseModal>
 
-  <BaseModal v-if="pendingToolApproval" title="确认工具操作" size="sm" stacked @close="decideToolApproval(false)">
-    <p class="modal-subtitle">{{ pendingToolApproval.tool_name }} 将执行{{ pendingToolApproval.risk_level === 'destructive' ? '破坏性' : '写入或外部' }}操作。</p>
-    <pre style="max-height:180px;overflow:auto;white-space:pre-wrap">{{ JSON.stringify(pendingToolApproval.params, null, 2) }}</pre>
-    <template #footer>
-      <button type="button" @click="decideToolApproval(false)">拒绝</button>
-      <button type="button" class="btn-primary" @click="decideToolApproval(true)">允许</button>
-    </template>
-  </BaseModal>
-
   <!-- 引用记忆详情弹窗（点击对话中的引用打开，二级层叠；SP-UI v4 统一走 BaseModal） -->
   <BaseModal v-if="memDetail" title="记忆详情" size="md" stacked @close="memDetail = null">
     <h3 class="modal-subtitle">{{ memDetail.frontmatter?.title || memDetail.id }}</h3>
@@ -1629,7 +1687,7 @@ onUnmounted(() => {
 
   <!-- 附件查看弹窗：粘贴文本/图片应用内预览，其他格式信息+下载（二级层叠，统一走 BaseModal） -->
   <BaseModal v-if="attachView"
-    :title="attachView.type === 'text' ? '粘贴的内容' : attachView.type === 'image' ? '图片预览' : '附件详情'"
+    :title="attachView.type === 'text' ? '文本内容' : attachView.type === 'image' ? '图片预览' : '附件详情'"
     :size="attachView.type === 'file' ? 'sm' : 'lg'" stacked @close="attachView = null">
     <!-- 粘贴文本：全文预览 -->
     <div v-if="attachView.type === 'text'">

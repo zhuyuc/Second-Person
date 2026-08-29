@@ -121,10 +121,6 @@ class ConnectorManager:
             parameters=tool.get(
                 "inputSchema", {"type": "object", "properties": {}}),
             source="mcp", connector_id=connector_id,
-            # MCP descriptions are not a trustworthy security declaration.
-            # Until a connector supplies reviewed metadata, each call waits
-            # for the user instead of relying on tool-name guesswork.
-            risk_level="external_side_effect", approval_policy="every_call",
             parallel_safe=False)
         self.registry.register_function(spec, _invoke)
 

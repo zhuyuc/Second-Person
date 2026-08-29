@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
+from infrastructure.fts import fts_escape as _fts_escape
 from infrastructure.timeutil import now_cst
 
 from .md_file import parse_memory_md
@@ -41,6 +42,21 @@ RECALL_INTENT_PATTERNS = [
 
 def has_recall_intent(query: str) -> bool:
     return any(re.search(p, query) for p in RECALL_INTENT_PATTERNS)
+
+
+# 极短寒暄短路：query 极短 且携带 context_text 且非回忆意图 → 跳过整条检索链路
+# 直觉：单独一个"你好"不该被上一话题的向量把无关记忆拽出来。
+# 无 context_text 时不短路（真正的"零上下文你好"仍走完整链路，兼容测试用例）。
+def _should_short_circuit(query: str, context_text: str | None,
+                           min_chars: int) -> bool:
+    q = (query or "").strip()
+    if not q:
+        return True
+    if not context_text:
+        return False
+    if has_recall_intent(query):
+        return False
+    return len(q) <= max(0, int(min_chars))
 
 
 @dataclass
@@ -255,6 +271,18 @@ class Retriever:
         result = RetrievalResult()
         diag_gate = "none"
 
+        # 0) 极短寒暄短路：只在"query 极短 + 已有 context_text + 非回忆意图"三条同时
+        #    满足时才跳过。"你好"这种寒暄若单独出现不短路；但接在讨论 AI 模型的话题
+        #    后面就短路，防止上一话题的向量把无关记忆拽出来。
+        from . import _constants as _mem_const
+        min_chars = int(self.config.get(
+            "min_query_chars_for_context", _mem_const.MIN_QUERY_CHARS_FOR_CONTEXT))
+        if _should_short_circuit(query, context_text, min_chars):
+            result.diagnostics = self._empty_diagnostics(
+                query, _PresearchResult(), context_text, "", _start)
+            result.diagnostics["gate"] = "short_query_shortcircuit"
+            return result
+
         # 1) embed 线索：上下文 + 当轮，始终参与（embedding 自然过滤无关话题）
         q_part = query[:self.EMBED_QUERY_MAX_CHARS]
         budget = self.EMBED_QUERY_MAX_CHARS - len(q_part) - 1
@@ -287,7 +315,7 @@ class Retriever:
 
         # 3) 图扩展：从 candidates[:seed_pool_size] 出发做双向 links + 实体共现
         seed_pool = candidates[:int(self.config.get(
-            "graph_expand_seed_pool", 10))]
+            "graph_expand_seed_pool", _mem_const.GRAPH_EXPAND_SEED_POOL))]
         graph_neighbors = await self._expand_graph(
             [c.memory_id for c in seed_pool], query_vec)
         # 合并进候选池（图节点也送 LLM 精筛裁决）
@@ -319,11 +347,13 @@ class Retriever:
                     result.hits.append(detail)
                 result.loaded_ids.append(mid)
 
-        # 若精筛只挑到 hits，把图扩展里 top-N 关联（未被选中的）也保留供上层参考
-        # —— 这样即便 LLM 只给了 1 条主命中，也能顺带带回图上下文
+        # 若精筛挑到 hits，把图扩展里 top-N 关联（未被选中的）也保留供上层参考
+        # —— 这样即便 LLM 只给了 1 条主命中，也能顺带带回图上下文。
+        # 但当 LLM 明确判空（chosen_ids 为空）时，必须尊重"宁缺毋滥"信号，
+        # 不再强行注入图邻居，否则会污染上下文（本次修复的关键 bug）。
         extra_related_cap = int(self.config.get(
-            "graph_extra_related_cap", 3))
-        if extra_related_cap > 0:
+            "graph_extra_related_cap", _mem_const.GRAPH_EXTRA_RELATED_CAP))
+        if chosen_ids and extra_related_cap > 0:
             neighbor_pool = [c for c in graph_neighbors
                              if c.memory_id not in chosen_set
                              and c.memory_id not in result.loaded_ids]
@@ -336,6 +366,11 @@ class Retriever:
                     detail["from_seed"] = cand.from_seed
                     result.related.append(detail)
                     result.loaded_ids.append(cand.memory_id)
+
+        # E7 负样本反馈：LLM 精筛判空 = 本轮候选整体不相关。把候选池 top-K
+        # 的 retrieval_negative_count 加一，让下次同 seed 主题再次被检索时降权。
+        if not chosen_ids and candidates:
+            self._record_negative_feedback(candidates)
 
         elapsed_ms = round((time.perf_counter() - _start) * 1000, 2)
         logger.info("检索 trace：candidates=%d hits=%d related=%d %.0fms degraded=%s",
@@ -379,10 +414,21 @@ class Retriever:
                        session_id: str | None,
                        context_text: str | None,
                        result: RetrievalResult) -> list[str]:
+        from . import _constants as _mem_const
         if not self.llm_refine_fn:
             return self._degrade_pick(candidates)
+        # Δ4：候选池太小时跳过 LLM 精筛，直接走得分兜底。省下固定 ~2s 开销。
+        min_cands = int(self.config.get(
+            "retrieval_refine_min_candidates",
+            _mem_const.RETRIEVAL_REFINE_MIN_CANDIDATES))
+        if len(candidates) < max(1, min_cands):
+            return self._degrade_pick(candidates)
         try:
-            timeout = self.config.get("retrieval_refine_timeout_seconds", 10)
+            timeout = self.config.get(
+                "retrieval_refine_timeout_seconds",
+                _mem_const.RETRIEVAL_REFINE_TIMEOUT_SECONDS)
+            pool_cap = int(self.config.get(
+                "candidate_pool_hard_cap", _mem_const.CANDIDATE_POOL_HARD_CAP))
             payload = [{"id": c.memory_id, "title": c.title,
                         "summary": c.summary, "source_type": c.source_type,
                         "confidence": c.confidence,
@@ -390,14 +436,14 @@ class Retriever:
                         "freshness_state": c.freshness_state,
                         "relation": c.relation or "primary",
                         "from_seed": c.from_seed}
-                       for c in candidates[:20]]
+                       for c in candidates[:pool_cap]]
             chosen = await asyncio.wait_for(
                 self.llm_refine_fn(query, payload,
                                    session_id=session_id,
                                    context_text=context_text),
                 timeout=timeout)
             return list(chosen)[:int(self.config.get(
-                "retrieval_refine_max", 5))]
+                "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
         except asyncio.TimeoutError:
             result.degraded = "第 2 层精筛超时，按得分兜底"
             logger.warning("检索精筛超时")
@@ -415,20 +461,43 @@ class Retriever:
         取 top-K 中得分 ≥ top-1 × ratio 的候选（默认 0.5），K 由
         retrieval_refine_max 决定；空池返回空。
         """
+        from . import _constants as _mem_const
         if not candidates:
             return []
         top = candidates[0].final_score or 0.0
-        ratio = self.config.get("refine_degrade_score_ratio", 0.5)
-        k = int(self.config.get("retrieval_refine_max", 5))
+        ratio = self.config.get(
+            "refine_degrade_score_ratio", _mem_const.REFINE_DEGRADE_SCORE_RATIO)
+        k = int(self.config.get(
+            "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))
         picked = [c.memory_id for c in candidates[:k]
                   if top <= 0 or (c.final_score or 0.0) >= top * ratio]
         return picked or [candidates[0].memory_id]
+
+    def _record_negative_feedback(self, candidates: list[Candidate]) -> None:
+        """E7：LLM 精筛判空时，把候选池 top-K 的 retrieval_negative_count +1。
+
+        DB 出错不影响主链路（检索链路一等公民：数据观测失败不阻塞回答）。
+        """
+        from . import _constants as _mem_const
+        top_k = _mem_const.REFINE_NEGATIVE_FEEDBACK_TOP_K
+        ids = [c.memory_id for c in candidates[:top_k]]
+        if not ids:
+            return
+        try:
+            ph = ",".join("?" * len(ids))
+            self.db.execute(
+                f"UPDATE memories SET retrieval_negative_count = "
+                f"COALESCE(retrieval_negative_count, 0) + 1 "
+                f"WHERE id IN ({ph})", tuple(ids))
+        except Exception:  # noqa: BLE001
+            logger.debug("负样本反馈写入失败（忽略）", exc_info=True)
 
     # ---- 图扩展：links + entities 双源，用 vs seed 相似度门槛 --------------
     async def _expand_graph(self, seed_ids: list[str],
                              query_vec) -> list[Candidate]:
         """从 seed 出发做双向 links（out+back）+ 实体共现，
         用 **与 seed 的余弦** 作为门槛（不是与 query）。"""
+        from . import _constants as _mem_const
         if not seed_ids:
             return []
         neighbors: dict[str, Candidate] = {}
@@ -449,9 +518,16 @@ class Retriever:
                 neighbors[cand.memory_id] = cand
         # 4) 用 seed 相似度过滤（关联记忆的价值在与 seed 同主题）
         seed_threshold = float(self.config.get(
-            "graph_expand_seed_threshold", 0.6))
-        return self._filter_by_seed_similarity(
+            "graph_expand_seed_threshold", _mem_const.GRAPH_EXPAND_SEED_THRESHOLD))
+        filtered = self._filter_by_seed_similarity(
             list(neighbors.values()), seed_threshold)
+        # 5) Δ8：三源合并后总量硬帽，按 final_score 保留 top-N，避免大账户失控
+        hard_cap = int(self.config.get(
+            "graph_neighbor_hard_cap", _mem_const.GRAPH_NEIGHBOR_HARD_CAP))
+        if hard_cap > 0 and len(filtered) > hard_cap:
+            filtered.sort(key=lambda c: -c.final_score)
+            filtered = filtered[:hard_cap]
+        return filtered
 
     def _expand_via_links(self, seed_ids: list[str]) -> list[Candidate]:
         """双向 links 扩展：outlinks + backlinks，一次性批量取。"""
@@ -515,8 +591,10 @@ class Retriever:
         if not entity_ids:
             return []
         # 2) 拿这些实体关联的其它记忆（去掉 seed 自身）
+        from . import _constants as _mem_const
         eph = ",".join("?" * len(entity_ids))
-        cap = int(self.config.get("graph_entity_neighbor_cap", 30))
+        cap = int(self.config.get(
+            "graph_entity_neighbor_cap", _mem_const.GRAPH_ENTITY_NEIGHBOR_CAP))
         rows = self.db.query_all(
             f"SELECT l.memory_id, COUNT(DISTINCT l.entity_id) AS shared "
             f"FROM memory_entity_links l "
@@ -559,11 +637,13 @@ class Retriever:
         用法典型：用户问"再展开一下昨天那个方案"，就算 seed 命中的是"方案 X"，
         共引图也能把上次一起引用的"背景 Y / 决策 Z"一起带回。
         """
+        from . import _constants as _mem_const
         if not seed_ids:
             return []
         window_days = int(self.config.get(
-            "graph_citation_window_days", 30))
-        cap = int(self.config.get("graph_citation_neighbor_cap", 15))
+            "graph_citation_window_days", _mem_const.GRAPH_CITATION_WINDOW_DAYS))
+        cap = int(self.config.get(
+            "graph_citation_neighbor_cap", _mem_const.GRAPH_CITATION_NEIGHBOR_CAP))
         cutoff = (now_cst() - timedelta(days=window_days)
                   ).isoformat(timespec="seconds")
         sph = ",".join("?" * len(seed_ids))
@@ -659,7 +739,10 @@ class Retriever:
         但省掉 N 次 Python→C 上下文切换与 N 次锁开销。
 
         vs 不可用/维度未知时保守不过滤（交 LLM 精筛裁决）。
+        Δ7：缺向量的 neighbor（老库/迁移期）不再无脑放行，按 rrf_score
+             保留 top-N（graph_uncomputable_keep 条），避免语义门槛失效。
         """
+        from . import _constants as _mem_const
         if not neighbors or not self.vs.loaded or self.vs.dim is None:
             return neighbors
         try:
@@ -675,13 +758,17 @@ class Retriever:
         seed_ids = sorted({c.from_seed for c in neighbors
                             if c.from_seed and c.from_seed in idx_map})
         seed_pos = {sid: i for i, sid in enumerate(seed_ids)}
-        # 缺失索引的邻居保守放行（无法比对）
         computable = [c for c in neighbors
                       if c.from_seed in seed_pos
                       and c.memory_id in idx_map]
-        uncomputable = [c for c in neighbors if c not in computable]
+        # Δ7：无向量邻居不再全放行，按 rrf_score 降序保留 top-N
+        uncomputable_all = [c for c in neighbors if c not in computable]
+        uncomputable_keep = int(self.config.get(
+            "graph_uncomputable_keep", _mem_const.GRAPH_UNCOMPUTABLE_KEEP))
+        uncomputable_all.sort(key=lambda c: -c.final_score)
+        uncomputable = uncomputable_all[:max(0, uncomputable_keep)]
         if not computable or not seed_ids:
-            return neighbors
+            return uncomputable
         # 2) 抽取矩阵行（seed_ids 与 seed_pos 一一对应）
         seed_rows = np.vstack([matrix[idx_map[s]] for s in seed_ids])
         neigh_rows = np.vstack([matrix[idx_map[c.memory_id]] for c in computable])
@@ -692,7 +779,7 @@ class Retriever:
         neigh_unit = neigh_rows / neigh_norms
         sim_matrix = neigh_unit @ seed_unit.T  # (N, S)
         # 4) 取每个邻居对应 seed 的相似度
-        kept: list[Candidate] = list(uncomputable)  # 无法计算的一律放行
+        kept: list[Candidate] = list(uncomputable)
         for i, cand in enumerate(computable):
             sid = cand.from_seed
             j = seed_pos.get(sid)
@@ -727,11 +814,3 @@ class Retriever:
                 "domain": row.get("domain", "general"), "links": doc.links,
                 "verification_state": row.get("verification_state", "unverified"),
                 "freshness_state": row.get("freshness_state", "current")}
-
-
-def _fts_escape(query: str) -> str:
-    """将用户查询转为 FTS5 安全的 MATCH 表达式（分词后 AND 连接，加双引号防语法）。"""
-    tokens = re.findall(r"[\w一-鿿]+", query)
-    if not tokens:
-        return ""
-    return " AND ".join(f'"{t}"' for t in tokens[:8])

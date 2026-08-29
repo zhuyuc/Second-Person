@@ -52,9 +52,9 @@
 - 对话请求由 `app/contracts.py` 的 `ChatSendRequest` 规范化。
 - 对话 SSE 事件由 `infrastructure/sse_contract.py` 注册并在路由出口验证；EventBus 事件只用于后端模块间通信。
 - `off`、`low`、`high`、`max` 是唯一的公开推理等级，前后端分别从 `agent/contracts.py` 和 `frontend/src/utils/chatContract.js` 使用同一语义。
-- 普通 Agent 轮次使用 `agent_turns` 和 `agent_events` 作为可恢复事实链：宿主构造上下文和 schema，模型提出工具调用，宿主执行或等待确认，再把结果事件回填给下一步模型。
+- 普通 Agent 轮次使用 `agent_turns` 和 `agent_events` 作为可恢复事实链：宿主构造上下文和 schema，模型提出工具调用，宿主直接执行，再把结果事件回填给下一步模型。
 - `agent_events` 中的 `decision.notice` 是宿主解释层，`context.notice` 是注入下一步模型的提醒；两者都不冒充模型原生 reasoning。
-- 工具参数校验、超时、脱敏、注入防护和重试属于执行质量保障。`write`、`destructive`、`external_side_effect` 工具必须由 `ToolPolicy` 在执行前确认；前端无权直接声明工具或授权执行。
+- 工具参数校验、超时、脱敏、注入防护和重试属于执行质量保障。本地单用户场景不设沙箱与审批：所有工具（含 MCP）直接执行；前端无权直接声明工具。
 
 ## 5. 数据与写入
 

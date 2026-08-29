@@ -38,9 +38,9 @@
 
 正常对话使用短的事件化循环：宿主组装上下文和工具 schema，模型选择是否提出工具调用，宿主按工具策略执行，然后把工具结果事件投影回下一步模型上下文。`agent_events` 是单轮模型上下文的事实来源；`conversations` 保留用户可见消息历史。
 
-系统提示词由 `agent/prompt_assembler.py` 统一组装：运行时契约、安全与权限、输出契约、工具规则、SOUL/画像/技能等静态 block 先输出；记忆、handoff、时间、位置和本轮约束等动态 block 始终位于 system prompt 尾部。之后才追加会话历史和本轮事件消息，工具 schema 通过请求的 `tools` 参数独立传递。
+系统提示词由 `agent/prompt_assembler.py` 统一组装：运行时契约、事实与内容边界、输出契约、工具规则、SOUL/画像/技能等静态 block 先输出；记忆、handoff、时间、位置和本轮约束等动态 block 始终位于 system prompt 尾部。之后才追加会话历史和本轮事件消息，工具 schema 通过请求的 `tools` 参数独立传递。
 
-工具 schema 由宿主程序注册，前端只传用户消息与 `reasoning_effort`，不能指定工具或绕过策略。`read` 工具可直接执行；`write`、`destructive` 以及未审核 MCP 工具会创建持久化确认记录并等待用户。确认接口为 `POST /api/chat/turns/{turn_id}/approvals/{approval_id}`，请求体为 `{"approved": true|false}`。
+工具 schema 由宿主程序注册，前端只传用户消息与 `reasoning_effort`，不能指定工具。本地单用户场景下所有工具（含 MCP）直接执行，无审批环节；参数校验、超时、脱敏和注入防护属于执行质量保障。
 
 ## 记忆候选治理
 
@@ -72,8 +72,6 @@ data: <JSON object>
 | `turn_started` | `turn_id`, `reasoning_effort` | 已创建持久化任务轮次 |
 | `step_started` | `turn_id`, `step` | 模型/工具循环的新步骤 |
 | `tool_executing` | `tool_name`, `status` | 工具执行状态 |
-| `tool_pending_approval` | `turn_id`, `approval_id`, `tool_name`, `risk_level` | 等待确认的副作用操作 |
-| `tool_blocked` | `turn_id`, `tool_name`, `reason` | 被宿主策略阻断 |
 | `tool_result` | `turn_id`, `tool_name`, `ok` | 工具结果摘要 |
 | `tool_visual` | `type`, `data` | 工具生成的图形 |
 | `content_delta` | `text` | 回复正文增量 |
