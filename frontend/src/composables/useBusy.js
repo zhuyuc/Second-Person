@@ -6,12 +6,16 @@
 import { reactive } from 'vue'
 
 export function useBusy() {
-    const state = reactive({ keys: {} })
-    const busy = (k) => !!state.keys[k]
-    async function run(k, fn) {
-        if (state.keys[k]) return
-        state.keys[k] = true
-        try { return await fn() } finally { state.keys[k] = false }
+  const state = reactive({ keys: {} })
+  const busy = (k) => !!state.keys[k]
+  async function run(k, fn) {
+    if (state.keys[k]) return
+    state.keys[k] = true
+    try {
+      return await fn()
+    } finally {
+      state.keys[k] = false
     }
-    return { busy, run }
+  }
+  return { busy, run }
 }

@@ -1,7 +1,7 @@
 """SOUL / 用户画像 / 输出样式接口（开发文档 §2.7-2.9）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -144,9 +144,9 @@ async def confirm_pending(body: PendingConfirmRequest):
                                          "create_version": True,
                                          "diff_summary": proposed}, wait=True)
     except Exception as e:  # noqa: BLE001 - 含 WriteFailedError/QueueFullError
-        return {"code": 500,
-                "message": f"风格写入失败，本次确认未生效，下次会话将再次询问：{e}",
-                "trace_id": None, "details": None}
+        raise HTTPException(
+            status_code=500,
+            detail=f"风格写入失败，本次确认未生效，下次会话将再次询问：{e}")
     # 第三步：仅在落盘成功后才从 CONTEXT_ENTRY 移除 pending
     c.ctx_entry.remove_pending(pid)
     return {"code": 200, "data": {}}
@@ -197,9 +197,7 @@ async def put_output_style(body: OutputStyleRequest):
             "section": "auto", "content": content,
             "create_version": True, "diff_summary": "用户手动编辑"}, wait=True)
     except Exception as e:  # noqa: BLE001 - 含 WriteFailedError/QueueFullError
-        from infrastructure.observability import get_trace_id
-        return {"code": 500, "message": f"画像写入失败：{e}",
-                "trace_id": get_trace_id(), "details": None}
+        raise HTTPException(status_code=500, detail=f"画像写入失败：{e}")
     if c.oplog:
         c.oplog.log("output_style_edit", "用户手动编辑输出样式画像")
     return {"code": 200, "data": {}}
@@ -239,13 +237,9 @@ async def profile_review_confirm(body: ProfileReviewActionRequest):
         "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
         (body.id,))
     if not row:
-        from infrastructure.observability import get_trace_id
-        return {"code": 404, "message": "候选不存在或已处理",
-                "trace_id": get_trace_id(), "details": None}
+        raise HTTPException(status_code=404, detail="候选不存在或已处理")
     if row["review_type"] != "strategy_preference":
-        from infrastructure.observability import get_trace_id
-        return {"code": 400, "message": "该轨道暂不支持在线确认",
-                "trace_id": get_trace_id(), "details": None}
+        raise HTTPException(status_code=400, detail="该轨道暂不支持在线确认")
     scene = "other"
     try:
         ev = _json.loads(row["evidence"] or "{}")
@@ -258,9 +252,7 @@ async def profile_review_confirm(body: ProfileReviewActionRequest):
     except Exception as e:  # noqa: BLE001
         import logging
         logging.getLogger("second_person.soul").warning("策略偏好写入失败", exc_info=True)
-        from infrastructure.observability import get_trace_id
-        return {"code": 500, "message": "策略偏好写入失败",
-                "trace_id": get_trace_id(), "details": None}
+        raise HTTPException(status_code=500, detail="策略偏好写入失败")
     from infrastructure.timeutil import now_cst
     c.db.execute(
         "UPDATE profile_review_queue SET status='confirmed', reviewed_at=?, "
@@ -279,9 +271,7 @@ async def profile_review_reject(body: ProfileReviewActionRequest):
         "SELECT * FROM profile_review_queue WHERE id=? AND status='pending'",
         (body.id,))
     if not row:
-        from infrastructure.observability import get_trace_id
-        return {"code": 404, "message": "候选不存在或已处理",
-                "trace_id": get_trace_id(), "details": None}
+        raise HTTPException(status_code=404, detail="候选不存在或已处理")
     c.conflict_scanner.reject_and_protect(
         row["review_type"], row["change_key"], row["proposed_content"][:200])
     from infrastructure.timeutil import now_cst

@@ -118,15 +118,15 @@ class CompactionEngine:
                 logger.warning("压缩生成失败：%s", exc)
                 # 失败标记：不阻断主链路，但让摘要文件带 compression_failed 便于观察
                 try:
-                    self.sessions.mark_compression_failed(session_id)
+                    await self.sessions.mark_compression_failed(session_id)
                 except Exception:  # noqa: BLE001
                     pass
                 return result
             wrapped = self._wrap_preamble(summary_text)
             # 落盘 + 推水位
             try:
-                self.sessions.save_summary(session_id, wrapped,
-                                            span.message_ids[-1])
+                await self.sessions.save_summary(session_id, wrapped,
+                                                 span.message_ids[-1])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("摘要落盘失败：%s", exc)
                 return result

@@ -1,12 +1,12 @@
 """记忆中心接口（开发文档 §二）。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import json
-import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from app.contracts import read_json_object
 
 from infrastructure.timeutil import now_cst, now_iso
@@ -84,6 +84,8 @@ async def memory_list(request: Request):
                 (*ids, *params))
             order = {mid: i for i, mid in enumerate(ids)}
             rows = sorted(rows, key=lambda r: order.get(r["id"], 999))
+        # keyword 路径：total 是过滤后的命中数，而非全局总数
+        total = len(rows)
         page_rows = rows[start:start + page_size]
     else:
         # SQL 级分页：避免记忆库增长后全表拉取在事件循环上线性变慢
@@ -91,10 +93,13 @@ async def memory_list(request: Request):
             f"SELECT * FROM memories WHERE {clause} "
             f"ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             (*params, page_size, start))
+        # 非 keyword 路径：total 用带相同 WHERE 的 COUNT(*)，分页计数才正确
+        total = c.db.query_one(
+            f"SELECT COUNT(*) cnt FROM memories WHERE {clause}", params)["cnt"]
     stats = c.palace.stats()
     score, _ = c.lint.health_score()
     return {"code": 200, "data": {
-        "total": stats["total"],
+        "total": total,
         "stats": {"total_active": stats["total_active"],
                   "total_stable": stats["total_stable"],
                   "total_stale": stats["total_stale"],
@@ -130,20 +135,21 @@ async def memory_candidates(status: str = "pending", limit: int = 100):
 
 @router.post("/memory/candidates/{candidate_id}/confirm")
 async def confirm_memory_candidate(candidate_id: str):
-    c = _c()
-    if not c.memory_gate.confirm(candidate_id):
-        return {"code": 404, "message": "候选不存在或已处理", "trace_id": None,
-                "details": None}
-    written = await c.memory_gate.promote_ready(c.distiller)
-    return {"code": 200, "data": {"candidate_id": candidate_id, "written": written}}
+    try:
+        data = await _c().memory_svc.confirm_candidate(candidate_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"code": 200, "data": data}
 
 
 @router.post("/memory/candidates/{candidate_id}/reject")
 async def reject_memory_candidate(candidate_id: str, request: Request):
     body = await read_json_object(request)
-    if not _c().memory_gate.reject(candidate_id, str(body.get("reason") or "用户拒绝")):
-        return {"code": 404, "message": "候选不存在或已处理", "trace_id": None,
-                "details": None}
+    try:
+        _c().memory_svc.reject_candidate(
+            candidate_id, str(body.get("reason") or "用户拒绝"))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"code": 200, "data": {"candidate_id": candidate_id, "status": "rejected"}}
 
 
@@ -181,7 +187,7 @@ async def detail(id: str):
     c = _c()
     row = c.palace.get(id)
     if not row:
-        return {"code": 404, "message": "记忆不存在", "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="记忆不存在")
     f = Path(c.data_dir) / row["md_path"]
     if not f.exists():
         return {"code": 200, "data": {"id": id, "summary": row["summary"], "degraded": True}}
@@ -240,11 +246,11 @@ async def rollback(mid: str, request: Request):
         "SELECT after_json FROM memory_revisions WHERE memory_id=? AND revision_id=?",
         (mid, body.get("revision_id")))
     if not rev or not rev.get("after_json"):
-        return {"code": 404, "message": "版本不存在", "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="版本不存在")
     snapshot = json.loads(rev["after_json"])
     fm = snapshot.get("frontmatter") or {}
     if fm.get("id") != mid:
-        return {"code": 400, "message": "版本与记忆不匹配", "trace_id": None, "details": None}
+        raise HTTPException(status_code=400, detail="版本与记忆不匹配")
     await c.fw.submit("memory", {
         "op": "update", "memory_id": mid, "frontmatter": fm,
         "summary": snapshot.get("summary", ""), "detail": snapshot.get("detail", ""),
@@ -260,29 +266,10 @@ async def rollback(mid: str, request: Request):
 async def memory_feedback(request: Request):
     """记忆级反馈直接进入检索与治理闭环，不依赖回答整体评分。"""
     body = await read_json_object(request)
-    c = _c()
-    mid = body.get("memory_id")
-    kind = body.get("feedback_type")
-    if kind not in {"irrelevant", "stale", "incorrect", "helpful"} or not c.palace.get(mid):
-        return {"code": 400, "message": "无效的记忆反馈", "trace_id": None, "details": None}
-    c.lifecycle.record_feedback(mid, kind, body.get("message_id"), body.get("query_text"))
-    if kind == "stale":
-        await c.lifecycle.downvote_stale(mid)
-    elif kind == "incorrect":
-        # 幂等：同一 memory 已有 open 的 memory_incorrect 事项则不重复入队
-        already_open = c.db.query_one(
-            "SELECT 1 FROM memory_governance_items WHERE primary_memory_id=? "
-            "AND item_type='memory_incorrect' AND status='open' LIMIT 1", (mid,))
-        if not already_open:
-            row = c.palace.get(mid)
-            c.db.execute(
-                "INSERT INTO memory_governance_items(item_id,item_type,primary_memory_id,"
-                "priority,status,reason,detail_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                (f"gov_{uuid.uuid4().hex[:12]}", "memory_incorrect", mid,
-                 (row.get("access_count", 0) or 0) + 3, "open", "用户标记记忆内容不正确",
-                 json.dumps({"query": body.get("query_text")}, ensure_ascii=False), now_iso()))
-    elif kind == "helpful":
-        await c.lifecycle.upvote_upgrade(mid)
+    try:
+        await _c().memory_svc.memory_feedback(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"code": 200, "data": {}}
 
 
@@ -303,11 +290,10 @@ async def governance(status: str = "open", limit: int = 100):
 async def resolve_governance(item_id: str, request: Request):
     body = await read_json_object(request)
     action = body.get("action", "dismiss")
-    if action not in {"dismiss", "reviewed"}:
-        return {"code": 400, "message": "无效的治理动作", "trace_id": None, "details": None}
-    _c().db.execute(
-        "UPDATE memory_governance_items SET status=?,resolved_at=? WHERE item_id=? AND status='open'",
-        ("dismissed" if action == "dismiss" else "resolved", now_iso(), item_id))
+    try:
+        _c().memory_svc.resolve_governance(item_id, action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"code": 200, "data": {}}
 
 
@@ -317,7 +303,7 @@ async def attributes(mid: str, request: Request):
     c = _c()
     row = c.palace.get(mid)
     if not row:
-        return {"code": 404, "message": "记忆不存在", "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="记忆不存在")
     f = Path(c.data_dir) / row["md_path"]
     doc = parse_memory_md(f.read_text(encoding="utf-8"))
     if "is_important" in body:
@@ -383,7 +369,9 @@ async def graph(limit: int = None, project_id: str = None,
     max_edges = _mem_const.GRAPH_MAX_EDGES
     from memory.graph_layout import place_missing
     try:
-        place_missing(c.db)
+        # place_missing 是同步 CPU/DB 重操作，跑在线程池避免阻塞事件循环
+        # （与对话 SSE 同 loop，阻塞会冻结所有在线对话）
+        await asyncio.to_thread(place_missing, c.db)
     except Exception:  # noqa: BLE001
         logger.warning("知识图谱增量布点失败，回退无坐标", exc_info=True)
 
@@ -455,7 +443,7 @@ async def entity_neighbors(entity_id: str, limit: int = 30, exclude_ids: str = "
         "LEFT JOIN graph_layout g ON e.entity_id=g.entity_id WHERE e.entity_id=?",
         (entity_id,))
     if not center:
-        return {"code": 404, "message": "实体不存在", "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="实体不存在")
     # 共现邻居按 co_count 降序
     nb_rows = c.db.query_all(
         "SELECT b.entity_id tgt, COUNT(*) w FROM memory_entity_links a "
@@ -539,12 +527,20 @@ async def health():
         "lint_details": c.lint.lint_details(counts)}}
 
 
+# /memory/lint/run 全量 LLM lint，无锁可被重复点击拖垮 API 配额与 CPU。
+# 进程级互斥：同一时刻只跑一个 lint 任务，并发请求返回 409。
+_lint_run_lock = asyncio.Lock()
+
+
 @router.post("/memory/lint/run")
 async def lint_run():
     c = _c()
-    from memory.naming import task_id as mk
-    tid = mk("lint")
-    await c.lint_agent.run(tid)
+    if _lint_run_lock.locked():
+        raise HTTPException(status_code=409, detail="已有 lint 任务在运行，请稍后再试")
+    async with _lint_run_lock:
+        from memory.naming import task_id as mk
+        tid = mk("lint")
+        await c.lint_agent.run(tid)
     return {"code": 200, "data": {"task_id": tid}}
 
 
@@ -556,7 +552,7 @@ async def accept_suggestion(request: Request):
     row = c.db.query_one(
         "SELECT * FROM lint_suggestions WHERE suggestion_id=?", (sid,))
     if not row:
-        return {"code": 404, "message": "建议不存在", "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="建议不存在")
     if row["suggestion_type"] == "orphan":
         # 采纳语义 = 用户确认该记忆内容正确、应当保留；建链只是尽力而为的附带动作。
         # 无论是否找到相似记忆都关闭建议，不能让“无候选”顶回用户的确认；
@@ -595,14 +591,12 @@ async def resolve_duplicate(request: Request):
     c = _c()
     sid, res = body["suggestion_id"], body.get("resolution")
     if res not in ("keep_a", "keep_b", "keep_both", "delete_both"):
-        return {"code": 400, "message": "无效的 resolution", "trace_id": None,
-                "details": None}
+        raise HTTPException(status_code=400, detail="无效的 resolution")
     row = c.db.query_one(
         "SELECT * FROM lint_suggestions WHERE suggestion_id=? "
         "AND suggestion_type='duplicate' AND status='open'", (sid,))
     if not row:
-        return {"code": 404, "message": "建议不存在或已处理", "trace_id": None,
-                "details": None}
+        raise HTTPException(status_code=404, detail="建议不存在或已处理")
     a, b = row["primary_memory_id"], row["related_memory_id"]
     if res == "keep_both":
         c.db.execute(

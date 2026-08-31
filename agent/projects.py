@@ -158,6 +158,7 @@ class ProjectStore:
     def __init__(self, db, data_dir):
         self.db = db
         self.data_dir = Path(data_dir)
+        self._mark_internal_fn = None
 
     # ---- 查询 ------------------------------------------------------------
     def get(self, project_id: str) -> Project | None:
@@ -500,8 +501,10 @@ class ProjectStore:
             f"项目根：`{proj.path}`",
             "",
         ]
-        (pdir / f"{proj.id}.md").write_text(
-            "\n".join(fm_lines), encoding="utf-8")
+        path = pdir / f"{proj.id}.md"
+        if self._mark_internal_fn:
+            self._mark_internal_fn(str(path))
+        path.write_text("\n".join(fm_lines), encoding="utf-8")
 
     def _unlink_safe(self, p: Path) -> None:
         try:

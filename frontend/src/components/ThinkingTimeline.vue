@@ -1,28 +1,78 @@
 <script setup>
 // 思考时间线：对齐参考图布局（左侧状态图标 + 行内摘要/药丸/命令，仅「已思考」展开灰框）
 import { computed, ref } from 'vue'
+import { fmtDuration } from '@/utils/format'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
   live: { type: Boolean, default: false },
 })
+const emit = defineEmits(['open-memory'])
 
-const rendered = computed(() => Array.isArray(props.items) ? props.items : [])
+const rendered = computed(() => (Array.isArray(props.items) ? props.items : []))
 const expanded = ref(new Set())
 
-function toggle(idx) {
+function itemKey(item, idx) {
+  if (item?._key) return item._key
+  if (item?.kind === 'tool_call') return `tool-${item.name}-${item.status}-${idx}`
+  if (item?.kind === 'memory_stage') return `mem-${item.stage}-${item.status}-${idx}`
+  if (item?.kind === 'step_wait') return `wait-${item.step}-${item.label}-${idx}`
+  if (item?.kind === 'reasoning') return `reason-${idx}-${(item.text || '').length}`
+  return `${item?.kind || 'item'}-${idx}`
+}
+
+const toolRowCache = computed(() => {
+  const cache = new Map()
+  rendered.value.forEach((item, idx) => {
+    if (item.kind === 'tool_call') cache.set(itemKey(item, idx), toolRow(item))
+  })
+  return cache
+})
+
+function getToolRow(item, idx) {
+  return toolRowCache.value.get(itemKey(item, idx)) || toolRow(item)
+}
+
+function toggle(key) {
   const next = new Set(expanded.value)
-  if (next.has(idx)) next.delete(idx)
-  else next.add(idx)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
   expanded.value = next
 }
 
-function isExpanded(idx) {
-  return expanded.value.has(idx)
+function isExpanded(key) {
+  return expanded.value.has(key)
 }
 
 function isExpandable(item) {
-  return item.kind === 'reasoning' || item.kind === 'memory_stage'
+  if (item.kind === 'reasoning') return true
+  if (item.kind === 'memory_stage') {
+    // 只有真正带正文（summary / 指标 / 注入列表）的记忆步才允许展开
+    return !!(
+      item.summary ||
+      item.candidates !== null ||
+      item.hit_count !== null ||
+      item.elapsed_ms !== null ||
+      (Array.isArray(item.hits) && item.hits.length)
+    )
+  }
+  return false
+}
+
+function memoryRelationLabel(rel) {
+  return (
+    {
+      evolved_from: '演变',
+      contradicts: '冲突',
+      related: '相关',
+      entity_shared: '共实体',
+      co_cited: '共引',
+    }[rel] || ''
+  )
+}
+
+function onMemoryClick(mid) {
+  if (mid) emit('open-memory', mid)
 }
 
 function isItemRunning(item, idx) {
@@ -93,7 +143,7 @@ function toolRow(item) {
   if (name === 'shell_exec' || name.includes('terminal') || name === 'run_command') {
     const cmd = args.cmd || args.command || ''
     return {
-      label: ok ? '终端命令 已运行' : (running ? '终端命令' : '终端命令'),
+      label: ok ? '终端命令 已运行' : running ? '终端命令' : '终端命令',
       command: cmd ? truncate(cmd, 120) : null,
       running,
       ok,
@@ -117,7 +167,7 @@ function toolRow(item) {
 
   return {
     label: item.name || '工具调用',
-    pill: ok ? '已完成' : (running ? '执行中' : '失败'),
+    pill: ok ? '已完成' : running ? '执行中' : '失败',
     running,
     ok: ok && item.status !== 'fail',
     fail: item.status === 'fail',
@@ -140,8 +190,8 @@ function memoryBadge(item) {
   return ''
 }
 
-function onRowClick(idx, item) {
-  if (isExpandable(item)) toggle(idx)
+function onRowClick(key, item) {
+  if (isExpandable(item)) toggle(key)
 }
 
 /** 联网搜索 / 抓取网页的引用链接（历史消息可从 result_preview 回退解析） */
@@ -178,42 +228,83 @@ function toolCitations(item) {
 
 <template>
   <div class="think-timeline">
-    <template v-for="(item, idx) in rendered" :key="idx">
+    <template v-for="(item, idx) in rendered" :key="itemKey(item, idx)">
       <!-- 已思考：行内一行预览，点击展开灰框全文 -->
-      <div v-if="item.kind === 'reasoning'"
-           class="tl-entry tl-entry-reasoning"
-           :class="{ 'is-expanded': isExpanded(idx), 'is-active': isItemRunning(item, idx) }">
-        <button type="button" class="tl-entry-head" @click="onRowClick(idx, item)">
+      <div
+        v-if="item.kind === 'reasoning'"
+        class="tl-entry tl-entry-reasoning"
+        :class="{
+          'is-expanded': isExpanded(itemKey(item, idx)),
+          'is-active': isItemRunning(item, idx),
+        }"
+      >
+        <button type="button" class="tl-entry-head" @click="onRowClick(itemKey(item, idx), item)">
           <span class="tl-status" :class="isItemRunning(item, idx) ? 'is-running' : 'is-ok'">
             <i class="ti" :class="isItemRunning(item, idx) ? 'ti-loader-2' : 'ti-circle-check'"></i>
           </span>
           <span class="tl-label">已思考</span>
           <span class="tl-inline-preview">{{ truncate(item.text, 72) }}</span>
         </button>
-        <div v-show="isExpanded(idx)" class="tl-reasoning-box">
+        <div v-show="isExpanded(itemKey(item, idx))" class="tl-reasoning-box">
           <span>{{ item.text }}</span>
         </div>
       </div>
 
       <!-- 记忆检索：行内药丸，详情默认折叠 -->
-      <div v-else-if="item.kind === 'memory_stage'"
-           class="tl-entry tl-entry-memory"
-           :class="{ 'is-expanded': isExpanded(idx), 'is-active': isItemRunning(item, idx) }">
-        <button type="button" class="tl-entry-head" @click="onRowClick(idx, item)">
-          <span class="tl-status" :class="isItemRunning(item, idx) ? 'is-running' : (item.status === 'skipped' || memoryEffectiveStatus(item, idx) === 'ok' ? 'is-ok' : 'is-muted')">
+      <div
+        v-else-if="item.kind === 'memory_stage'"
+        class="tl-entry tl-entry-memory"
+        :class="{
+          'is-expanded': isExpanded(itemKey(item, idx)),
+          'is-active': isItemRunning(item, idx),
+        }"
+      >
+        <button type="button" class="tl-entry-head" @click="onRowClick(itemKey(item, idx), item)">
+          <span
+            class="tl-status"
+            :class="
+              isItemRunning(item, idx)
+                ? 'is-running'
+                : item.status === 'skipped' || memoryEffectiveStatus(item, idx) === 'ok'
+                  ? 'is-ok'
+                  : 'is-muted'
+            "
+          >
             <i class="ti" :class="isItemRunning(item, idx) ? 'ti-loader-2' : 'ti-circle-check'"></i>
           </span>
           <span class="tl-label">记忆检索</span>
           <span class="tl-pill">{{ memoryBadge(item) }}</span>
         </button>
-        <div v-show="isExpanded(idx)" class="tl-detail-sub">
-          <div class="tl-detail-text">{{ item.summary }}</div>
-          <div v-if="item.candidates != null || item.hit_count != null || item.elapsed_ms != null"
-               class="tl-detail-meta">
+        <div v-show="isExpanded(itemKey(item, idx))" class="tl-detail-sub">
+          <div v-if="item.summary" class="tl-detail-text">{{ item.summary }}</div>
+          <div
+            v-if="item.candidates != null || item.hit_count != null || item.elapsed_ms != null"
+            class="tl-detail-meta"
+          >
             <span v-if="item.candidates != null">候选 {{ item.candidates }}</span>
             <span v-if="item.hit_count != null">注入 {{ item.hit_count }}</span>
-            <span v-if="item.elapsed_ms != null">{{ item.elapsed_ms }}ms</span>
+            <span v-if="item.elapsed_ms != null">{{ fmtDuration(item.elapsed_ms) }}</span>
           </div>
+          <!-- 点击查看被注入的记忆全文（去记忆中心那套详情弹窗） -->
+          <ul
+            v-if="Array.isArray(item.hits) && item.hits.length"
+            class="tl-memory-list"
+          >
+            <li
+              v-for="hit in item.hits"
+              :key="hit.id || hit.title"
+              class="tl-memory-item"
+              :title="hit.summary || hit.title"
+              @click.stop="onMemoryClick(hit.id)"
+            >
+              <i class="ti ti-book-2 tl-memory-icon"></i>
+              <span class="tl-memory-title">{{ hit.title || hit.id || '未命名记忆' }}</span>
+              <span
+                v-if="memoryRelationLabel(hit.relation)"
+                class="tl-memory-tag"
+              >{{ memoryRelationLabel(hit.relation) }}</span>
+            </li>
+          </ul>
         </div>
       </div>
 
@@ -226,9 +317,11 @@ function toolCitations(item) {
       </div>
 
       <!-- 模型步间等待：工具已完成、下一轮 LLM 尚未吐首 token -->
-      <div v-else-if="item.kind === 'step_wait'"
-           class="tl-entry tl-entry-wait"
-           :class="{ 'is-active': isItemRunning(item, idx) }">
+      <div
+        v-else-if="item.kind === 'step_wait'"
+        class="tl-entry tl-entry-wait"
+        :class="{ 'is-active': isItemRunning(item, idx) }"
+      >
         <div class="tl-entry-row">
           <span class="tl-status is-running"><i class="ti ti-loader-2"></i></span>
           <span class="tl-label">{{ item.label || '准备下一步' }}</span>
@@ -237,21 +330,53 @@ function toolCitations(item) {
       </div>
 
       <!-- 工具：读取文件 / 终端命令 等，行内药丸或命令 -->
-      <div v-else-if="item.kind === 'tool_call'"
-           class="tl-entry tl-entry-tool"
-           :class="{ 'is-active': toolRow(item).running }">
+      <div
+        v-else-if="item.kind === 'tool_call'"
+        class="tl-entry tl-entry-tool"
+        :class="{ 'is-active': getToolRow(item, idx).running }"
+      >
         <div class="tl-entry-row">
-          <span class="tl-status"
-                :class="toolRow(item).running ? 'is-running' : (toolRow(item).fail ? 'is-fail' : 'is-ok')">
-            <i class="ti"
-               :class="toolRow(item).running ? 'ti-loader-2' : (toolRow(item).fail ? 'ti-x' : 'ti-circle-check')"></i>
+          <span
+            class="tl-status"
+            :class="
+              getToolRow(item, idx).running
+                ? 'is-running'
+                : getToolRow(item, idx).fail
+                  ? 'is-fail'
+                  : 'is-ok'
+            "
+          >
+            <i
+              class="ti"
+              :class="
+                getToolRow(item, idx).running
+                  ? 'ti-loader-2'
+                  : getToolRow(item, idx).fail
+                    ? 'ti-x'
+                    : 'ti-circle-check'
+              "
+            ></i>
           </span>
-          <span class="tl-label">{{ toolRow(item).label }}</span>
-          <span v-if="toolRow(item).pill" class="tl-pill">{{ toolRow(item).pill }}</span>
-          <code v-if="toolRow(item).command" class="tl-cmd">{{ toolRow(item).command }}</code>
-          <span v-if="toolRow(item).preview" class="tl-inline-preview">{{ toolRow(item).preview }}</span>
-          <span v-if="item.result_preview && !toolRow(item).pill && !toolRow(item).command && !toolRow(item).preview"
-                class="tl-inline-preview">{{ truncate(item.result_preview, 64) }}</span>
+          <span class="tl-label">{{ getToolRow(item, idx).label }}</span>
+          <span v-if="getToolRow(item, idx).pill" class="tl-pill">{{
+            getToolRow(item, idx).pill
+          }}</span>
+          <code v-if="getToolRow(item, idx).command" class="tl-cmd">{{
+            getToolRow(item, idx).command
+          }}</code>
+          <span v-if="getToolRow(item, idx).preview" class="tl-inline-preview">{{
+            getToolRow(item, idx).preview
+          }}</span>
+          <span
+            v-if="
+              item.result_preview &&
+              !getToolRow(item, idx).pill &&
+              !getToolRow(item, idx).command &&
+              !getToolRow(item, idx).preview
+            "
+            class="tl-inline-preview"
+            >{{ truncate(item.result_preview, 64) }}</span
+          >
           <span v-if="item.error" class="tl-inline-error">{{ truncate(item.error, 80) }}</span>
         </div>
         <div v-if="toolCitations(item).length" class="tl-cites-row">
@@ -282,7 +407,7 @@ function toolCitations(item) {
 }
 
 .tl-entry {
-  font-size: 12px;
+  font-size: var(--fs-sm);
   line-height: 1.45;
   color: var(--fg);
   min-width: 0;
@@ -327,11 +452,22 @@ function toolCitations(item) {
   font-size: 14px;
 }
 
-.tl-status.is-ok { color: var(--succtx, #28b478); }
-.tl-status.is-running { color: var(--acctx, #3c78dc); }
-.tl-status.is-fail { color: var(--dangtx, #c83c3c); }
-.tl-status.is-note { color: var(--muted); font-size: 13px; }
-.tl-status.is-muted { color: var(--muted); }
+.tl-status.is-ok {
+  color: var(--succtx, #28b478);
+}
+.tl-status.is-running {
+  color: var(--acctx, #3c78dc);
+}
+.tl-status.is-fail {
+  color: var(--dangtx, #c83c3c);
+}
+.tl-status.is-note {
+  color: var(--muted);
+  font-size: 13px;
+}
+.tl-status.is-muted {
+  color: var(--muted);
+}
 
 .tl-status .ti-loader-2 {
   animation: tl-spin 1s linear infinite;
@@ -425,6 +561,62 @@ function toolCitations(item) {
   color: var(--muted);
 }
 
+.tl-memory-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tl-memory-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.5;
+  min-width: 0;
+  transition: background var(--dur-fast, 0.15s);
+}
+
+.tl-memory-item:hover {
+  background: var(--brand-soft, rgba(60, 120, 220, 0.12));
+  color: var(--brand-tx, #3c78dc);
+}
+
+.tl-memory-icon {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.tl-memory-item:hover .tl-memory-icon {
+  color: var(--brand-tx, #3c78dc);
+}
+
+.tl-memory-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-memory-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-input, rgba(127, 127, 127, 0.12));
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .tl-inline-error {
   flex: 1;
   min-width: 0;
@@ -477,5 +669,9 @@ function toolCitations(item) {
   min-width: 0;
 }
 
-@keyframes tl-spin { to { transform: rotate(360deg); } }
+@keyframes tl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
 </style>

@@ -8,7 +8,7 @@
 import { ref, computed, onScopeDispose } from 'vue'
 
 const DEFAULT_CHARS_PER_TOKEN = 3.0
-const MIN_ELAPSED_MS = 250   // 首字后不足 250ms 时不出速率（避免除以极小值出现夸张值）
+const MIN_ELAPSED_MS = 250 // 首字后不足 250ms 时不出速率（避免除以极小值出现夸张值）
 const TICK_INTERVAL_MS = 500 // 与 deepseek-harness TurnStatus 的 1s tick 同数量级但更灵敏
 
 export function useLiveThroughput() {
@@ -18,7 +18,6 @@ export function useLiveThroughput() {
   const charsPerToken = ref(DEFAULT_CHARS_PER_TOKEN)
   let intervalId = 0
 
-  const running = computed(() => firstDeltaAt.value > 0)
   const tokensPerSecond = computed(() => {
     if (!firstDeltaAt.value) return 0
     const elapsedMs = nowTick.value - firstDeltaAt.value
@@ -35,7 +34,10 @@ export function useLiveThroughput() {
   }
 
   function stopTicker() {
-    if (intervalId) { clearInterval(intervalId); intervalId = 0 }
+    if (intervalId) {
+      clearInterval(intervalId)
+      intervalId = 0
+    }
   }
 
   function record(text) {
@@ -55,12 +57,6 @@ export function useLiveThroughput() {
     nowTick.value = 0
   }
 
-  // 停 tick 但保留最后一帧估算值——用于 turn_completed 到 finishStream 之间的过渡显示。
-  function freeze() {
-    stopTicker()
-    if (firstDeltaAt.value) nowTick.value = performance.now()
-  }
-
   // 用真实 output_tokens 校准 charsPerToken。异常值（比例过小或过大）忽略。
   function calibrate(actualOutputTokens) {
     const tokens = Number(actualOutputTokens)
@@ -72,5 +68,5 @@ export function useLiveThroughput() {
 
   onScopeDispose(stopTicker)
 
-  return { record, reset, freeze, calibrate, tokensPerSecond, running }
+  return { record, reset, calibrate, tokensPerSecond }
 }

@@ -260,7 +260,8 @@ async def test_agent_core_passes_session_project_id(
 
     captured = {}
 
-    async def fake_retrieve(query, *, session_id=None, context_text=None, project_id=None):
+    async def fake_retrieve(query, *, session_id=None, context_text=None,
+                            project_id=None, on_progress=None):
         captured["project_id"] = project_id
         captured["session_id"] = session_id
         from memory.retriever import RetrievalResult

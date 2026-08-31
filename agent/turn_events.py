@@ -109,10 +109,18 @@ class TurnEventStore:
                 "UPDATE agent_turns SET status=?,current_step=?,updated_at=? WHERE id=?",
                 (status, step, _now(), turn_id))
 
-    def model_messages(self, turn_id: str) -> list[dict[str, Any]]:
-        """Project durable model-visible events into OpenAI-compatible messages."""
+    def model_messages(self, turn_id: str, *, after_seq: int = 0
+                       ) -> tuple[list[dict[str, Any]], int]:
+        """Project durable model-visible events into OpenAI-compatible messages.
+
+        增量模式：传 `after_seq` 时只投影 seq > after_seq 的事件，并返回
+        (messages, last_seq)。调用方维护累计 list 即可避免每步全量重读 +
+        重解析，把多步对话从 O(steps²) 降到 O(steps)。
+        """
         messages: list[dict[str, Any]] = []
-        for event in self.events(turn_id):
+        last_seq = after_seq
+        for event in self.events(turn_id, after_seq=after_seq):
+            last_seq = event["seq"]
             if not event["model_visible"]:
                 continue
             payload = event["payload"]
@@ -155,7 +163,7 @@ class TurnEventStore:
             elif event["type"] == "context.handoff":
                 # 会话交接摘要：不常出现，仍走 messages 尾部保持前缀稳定。
                 messages.append({"role": "user", "content": payload.get("content", "")})
-        return messages
+        return messages, last_seq
 
     def unresolved_calls(self, turn_id: str) -> list[dict[str, Any]]:
         calls = {e["call_id"]: e for e in self.events(turn_id)

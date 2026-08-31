@@ -15,7 +15,7 @@ from pathlib import Path
 
 DEFAULT_IGNORE = [
     ".git", "node_modules", "__pycache__", ".venv", "venv",
-    ".mypy_cache", ".pytest_cache", "dist", "build", "target",
+    ".pytest_cache", "dist", "build", "target",
     ".next", ".nuxt", ".idea", ".vscode", ".DS_Store",
 ]
 

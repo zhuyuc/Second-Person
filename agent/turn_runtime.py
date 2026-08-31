@@ -2,114 +2,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import time
-import uuid
 from typing import Any, Awaitable, Callable
 
 from infrastructure.developer_trace import build_agent_trace
 from infrastructure.session_metrics import add_tool_time, record_step, session_metrics, turn_metrics
-from infrastructure.timeutil import now_cst
 from langfuse.integration import get_tracer
-from .decision_summary import build_tool_decision_notice
 from .repeat_tool_guard import RepeatToolGuard
 from .turn_events import TurnEventStore
 from .prompt_assembler import PROMPT_VERSION, SessionCtx, ToolPromptBuilder
+from . import turn_runtime_helpers as _tr_helpers
+from .turn_runtime_helpers import (
+    format_turn_time as _format_turn_time,
+    summarize_tool_result as _summarize_tool_result,
+)
+from .turn_runtime_tools import TurnToolRunner
 
-
-def _summarize_tool_result(result: Any) -> str:
-    """Compress an arbitrary tool result to a one-line preview for the timeline card.
-
-    Returns "" when nothing sensible can be projected. Never raises — the
-    timeline card is telemetry, and a preview failure should not affect the
-    turn.
-    """
-    if result is None:
-        return ""
-    try:
-        if isinstance(result, str):
-            text = result
-        elif isinstance(result, dict):
-            for key in ("summary", "preview", "content", "path", "matches",
-                         "total_lines", "action"):
-                if key in result:
-                    v = result[key]
-                    if isinstance(v, (list, tuple)):
-                        text = f"{key}={len(v)}"
-                    else:
-                        text = f"{key}={v}"
-                    break
-            else:
-                text = str({k: result[k] for k in list(result)[:3]})
-        elif isinstance(result, (list, tuple)):
-            text = f"{len(result)} items"
-        else:
-            text = str(result)
-    except Exception:  # noqa: BLE001
-        return ""
-    text = " ".join((text or "").split())
-    return text[:200]
-
-
-def _extract_web_citations(tool_name: str, result: Any,
-                           arguments: Any = None) -> list[dict[str, str]]:
-    """从 web_search / web_fetch 结果提取可展示的引用链接。"""
-    name = (tool_name or "").lower()
-    if name == "web_fetch":
-        args: dict = {}
-        if isinstance(arguments, str):
-            try:
-                parsed = json.loads(arguments)
-                if isinstance(parsed, dict):
-                    args = parsed
-            except (TypeError, ValueError):
-                pass
-        elif isinstance(arguments, dict):
-            args = arguments
-        url = (args.get("url") or "").strip()
-        if url:
-            return [{"title": url, "url": url}]
-        return []
-    if name != "web_search":
-        return []
-    items = result
-    if isinstance(result, str):
-        try:
-            items = json.loads(result)
-        except (TypeError, ValueError):
-            return []
-    if not isinstance(items, list):
-        return []
-    cites: list[dict[str, str]] = []
-    for it in items[:5]:
-        if not isinstance(it, dict):
-            continue
-        url = (it.get("url") or "").strip()
-        if not url:
-            continue
-        title = (it.get("title") or "").strip() or url
-        cites.append({"title": title, "url": url})
-    return cites
-
-
-def _format_turn_time() -> str | None:
-    """本轮时间元信息文本，追加到 messages 末尾而不进 system prompt。
-
-    进 system prompt 的分钟级时间戳每分钟第一条消息就会击穿整个前缀 cache；
-    改到 messages 尾部，只影响尾部一小段 tokens，system + tools + history
-    保持字节稳定，DeepSeek 官方 prefix cache 命中率显著提升。
-
-    文本极简化 + 精度降为"天"（T1+T2）：去掉冗余说明，只保留 [北京时间] +
-    YYYY-MM-DD。同一天内所有 turn 的 context.time 字节完全相同，直接可命中
-    prefix cache；模型仍能通过日期计算星期几，聊天场景下"精确到天"足够，
-    真需要精确时刻可由 datetime_now 工具按需返回。
-    """
-    try:
-        now = now_cst()
-        return f"[北京时间] {now:%Y-%m-%d}"
-    except Exception:  # noqa: BLE001
-        return None
+_extract_web_citations = _tr_helpers.extract_web_citations
 
 logger = logging.getLogger("second_person.turn_runtime")
 
@@ -136,6 +46,8 @@ class TurnRuntime:
         # v7：token 度量 + 自动压缩（可 None，降级为原有行为）
         self.token_meter = token_meter
         self.compaction_engine = compaction_engine
+        self._tool_runner = TurnToolRunner(
+            registry=registry, executor=executor, events=self.events)
 
     async def run(self, *, session_id: str, message: str, reasoning_effort: str,
                   emit: Callable[[str, dict], Awaitable[None]],
@@ -174,6 +86,9 @@ class TurnRuntime:
         #       "arguments": "...", "status": "running|ok|fail",
         #       "result_preview": "..."}
         timeline: list[dict[str, Any]] = []
+        # call_id → timeline 下标：让 tool_result 更新在 O(1) 完成，替代反向线性扫描。
+        # tool_call 追加时写入；命中/迁移状态后条目仍留在 timeline 里，key 不用清理。
+        tool_call_index: dict[str, int] = {}
 
         def _tl_append_reasoning(text: str) -> None:
             if not text:
@@ -205,27 +120,43 @@ class TurnRuntime:
                     "arguments": evt.get("arguments") or "",
                     "status": "running",
                 })
+                if call_id:
+                    tool_call_index[call_id] = len(timeline) - 1
                 return
-            # tool_result：向后找同 call_id 的 tool_call 更新；找不到就作为 orphan 附加
+            # tool_result：优先 O(1) 命中同 call_id 的 tool_call；否则回退线性扫描
             preview = (evt.get("summary")
                        or _summarize_tool_result(evt.get("result"))
                        or "")
             if preview:
                 preview = preview[:400]
-            for item in reversed(timeline):
-                if (item.get("kind") == "tool_call"
-                        and (item.get("call_id") == call_id or not call_id)
-                        and item.get("name") == name
-                        and item.get("status") == "running"):
-                    item["status"] = "ok" if evt.get("ok") else "fail"
-                    if preview:
-                        item["result_preview"] = preview
-                    if evt.get("error"):
-                        item["error"] = str(evt["error"])[:400]
-                    cites = evt.get("citations")
-                    if cites:
-                        item["citations"] = cites
-                    return
+            item = None
+            if call_id:
+                idx = tool_call_index.get(call_id)
+                if idx is not None:
+                    candidate = timeline[idx]
+                    if (candidate.get("kind") == "tool_call"
+                            and candidate.get("name") == name
+                            and candidate.get("status") == "running"):
+                        item = candidate
+            if item is None:
+                # 无 call_id 或索引未命中：反向扫描兜底
+                for existing in reversed(timeline):
+                    if (existing.get("kind") == "tool_call"
+                            and (existing.get("call_id") == call_id or not call_id)
+                            and existing.get("name") == name
+                            and existing.get("status") == "running"):
+                        item = existing
+                        break
+            if item is not None:
+                item["status"] = "ok" if evt.get("ok") else "fail"
+                if preview:
+                    item["result_preview"] = preview
+                if evt.get("error"):
+                    item["error"] = str(evt["error"])[:400]
+                cites = evt.get("citations")
+                if cites:
+                    item["citations"] = cites
+                return
             orphan: dict[str, Any] = {
                 "kind": "tool_call", "call_id": call_id, "name": name,
                 "arguments": evt.get("arguments") or "",
@@ -294,6 +225,12 @@ class TurnRuntime:
             # tool 事件，无需再重跑 retriever（原实现每步重跑但结果被 if step==1
             # 挡掉，属于纯浪费；多步工具轮最坏 +7×2.6s）。
             turn_context: dict | None = None
+            # 增量缓存：避免每步全量重读 + 重解析 events，多步对话从 O(steps²) 降到 O(steps)。
+            # 压缩重载 context 时只重建 system_content，累计的 model_messages 不动
+            # （events 表未变，压缩只改 history 水位）。
+            cumulative_model_messages: list[dict[str, Any]] = []
+            last_model_seq: int = 0
+            cached_system_content: str | None = None
             for step in range(1, max_steps + 1):
                 # 与 deepseek-harness 契约对齐：ttft/llm/decode 只计量 LLM 调用本身，
                 # 检索/精筛/prompt 组装的耗时单独进 context_ms。这样 ttft 跨轮稳定
@@ -370,11 +307,18 @@ class TurnRuntime:
                         "requested_effort": reasoning_effort, "effective_effort": effective_effort,
                     }
                     await runtime_emit("decision_notice", notice)
-                system_content = self.system_prompt(
-                    onboarding, location, session_id, context.get("dynamic_blocks"),
-                    message)
+                system_content = cached_system_content
+                if system_content is None:
+                    system_content = self.system_prompt(
+                        onboarding, location, session_id, context.get("dynamic_blocks"),
+                        message)
+                    cached_system_content = system_content
+                # 增量拉取本步新增的 model-visible events，避免全量重读
+                new_msgs, last_model_seq = self.events.model_messages(
+                    turn_id, after_seq=last_model_seq)
+                cumulative_model_messages.extend(new_msgs)
                 prompt = [{"role": "system", "content": system_content}]
-                prompt += context["history"] + self.events.model_messages(turn_id)
+                prompt += context["history"] + cumulative_model_messages
                 tools = self._project_tools(session_id)
                 # v7：pre-step 自动压缩（step≥2 才检查，step 1 无累积压力）
                 if step >= 2 and self.compaction_engine is not None:
@@ -416,11 +360,15 @@ class TurnRuntime:
                         if memory_timeline:
                             timeline.extend(memory_timeline)
                         context = turn_context
+                        # 压缩后 dynamic_blocks 可能变，system_content 需重建；
+                        # model_messages 累计不受影响（events 表未变）
+                        cached_system_content = None
                         system_content = self.system_prompt(
                             onboarding, location, session_id,
                             context.get("dynamic_blocks"), message)
+                        cached_system_content = system_content
                         prompt = [{"role": "system", "content": system_content}]
-                        prompt += context["history"] + self.events.model_messages(turn_id)
+                        prompt += context["history"] + cumulative_model_messages
                 self.events.append(turn_id, "request.header", actor="host", step=step,
                                    payload={"model_id": snap.model_id,
                                             "reasoning_effort": effective_effort,
@@ -711,94 +659,11 @@ class TurnRuntime:
 
     async def _run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict],
                               emit, repeat_guard: RepeatToolGuard) -> list[dict]:
-        async def run_one(raw: dict, index: int) -> dict:
-            function = raw.get("function") or {}
-            name = function.get("name") or raw.get("name") or ""
-            call_id = raw.get("id") or f"call_{step}_{index}_{uuid.uuid4().hex[:8]}"
-            raw_args = function.get("arguments", raw.get("arguments", {}))
-            try:
-                params = json.loads(raw_args) if isinstance(raw_args, str) else dict(raw_args or {})
-            except (TypeError, ValueError):
-                params = {}
-            self.events.append(turn_id, "tool.call", actor="model", step=step, call_id=call_id,
-                               payload={"tool_name": name, "params": params})
-            tool = self.registry.get(name)
-            spec = tool.spec if tool is not None else None
-            notice = build_tool_decision_notice(
-                tool_name=name, description=spec.description if spec else "",
-                arguments=params, step=step, call_id=call_id)
-            if notice is not None:
-                self.events.append(turn_id, "decision.notice", actor="host", step=step,
-                                   call_id=call_id, payload=notice)
-                await emit("decision_notice", notice)
-            reminder = repeat_guard.observe(name, params)
-            if reminder is not None:
-                repeat_notice = build_tool_decision_notice(
-                    tool_name=name, description=spec.description if spec else "",
-                    arguments=params, step=step, call_id=call_id,
-                    repeated_count=reminder.count)
-                if repeat_notice is not None:
-                    self.events.append(turn_id, "decision.notice", actor="host", step=step,
-                                       call_id=call_id, payload=repeat_notice)
-                    await emit("decision_notice", repeat_notice)
-                self.events.append(turn_id, "context.notice", actor="host", step=step,
-                                   call_id=call_id, model_visible=True,
-                                   payload={"content": reminder.message,
-                                            "reason": "repeat_tool_call",
-                                            "tool_name": name, "count": reminder.count})
-            if tool is None:
-                return await self._record_result(turn_id, step, call_id, name, False,
-                                                 "工具不存在", emit)
-            # v7 timeline：把参数一起带出，前端卡片能显示"fs_read README.md"
-            try:
-                args_preview = json.dumps(params, ensure_ascii=False, default=str)[:200]
-            except Exception:  # noqa: BLE001
-                args_preview = ""
-            await emit("tool_executing", {"tool_name": name, "status": "running",
-                                            "turn_id": turn_id, "call_id": call_id,
-                                            "arguments": args_preview})
-            turn = self.events.get_turn(turn_id) or {}
-            tool_started_at = time.perf_counter()
-            result = await self.executor.execute_tool(name, params, emit=emit,
-                                                      session_id=turn.get("session_id", ""))
-            duration_ms = max(0, round((time.perf_counter() - tool_started_at) * 1000))
-            if result.get("ok"):
-                recorded = await self._record_result(
-                    turn_id, step, call_id, name, True,
-                    result.get("result"), emit, arguments=params)
-            else:
-                recorded = await self._record_result(
-                    turn_id, step, call_id, name, False,
-                    result.get("error") or "工具执行失败", emit,
-                    arguments=params)
-            recorded["_duration_ms"] = duration_ms
-            return recorded
-
-        # Only explicitly read-only tools can share a model step. A write,
-        # destructive, or external operation remains ordered and inspectable.
-        resolved = [self.registry.get((raw.get("function") or {}).get("name") or raw.get("name", ""))
-                    for raw in tool_calls]
-        if all(tool is not None and tool.spec.parallel_safe for tool in resolved):
-            return await asyncio.gather(*(run_one(raw, i) for i, raw in enumerate(tool_calls, 1)))
-        return [await run_one(raw, i) for i, raw in enumerate(tool_calls, 1)]
+        return await self._tool_runner.run_tool_calls(
+            turn_id, step, tool_calls, emit, repeat_guard)
 
     async def _record_result(self, turn_id: str, step: int, call_id: str, name: str,
                              ok: bool, result: Any, emit,
                              arguments: Any = None) -> dict:
-        content = json.dumps(result, ensure_ascii=False, default=str) if not isinstance(result, str) else result
-        content = content[:12000]
-        self.events.append(turn_id, "tool.result", actor="tool", step=step, call_id=call_id,
-                           model_visible=True, payload={"tool_name": name, "ok": ok,
-                                                        "model_content": content})
-        payload: dict[str, Any] = {
-            "turn_id": turn_id, "call_id": call_id,
-            "tool_name": name, "ok": ok,
-            "summary": content[:500],
-        }
-        if ok:
-            cites = _extract_web_citations(name, result, arguments)
-            if cites:
-                payload["citations"] = cites
-        await emit("tool_result", payload)
-        return {"tool": name, "ok": ok, "result": result if ok else None,
-                "error": None if ok else content}
+        return await self._tool_runner.record_result(
+            turn_id, step, call_id, name, ok, result, emit, arguments=arguments)

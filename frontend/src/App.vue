@@ -1,12 +1,9 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api/client'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
-import Onboarding from '@/components/Onboarding.vue'
-import SessionSidebar from '@/components/SessionSidebar.vue'
-import BaseModal from '@/components/BaseModal.vue'
+import { chatApi } from '@/api/chat'
 
 const router = useRouter()
 const toast = useToast()
@@ -17,32 +14,81 @@ const loading = ref(true)
 
 async function refreshHealth() {
   try {
-    const h = await api.get('/health')
+    const h = await chatApi.health()
     health.value = h.status
-  } catch { health.value = 'unhealthy' }
+  } catch {
+    health.value = 'unhealthy'
+  }
 }
 
 let healthTimer = null
+
+function startHealthTimer() {
+  if (healthTimer) return
+  healthTimer = setInterval(refreshHealth, 30000)
+}
+function stopHealthTimer() {
+  if (healthTimer) {
+    clearInterval(healthTimer)
+    healthTimer = null
+  }
+}
+
+// 页面隐藏时暂停健康轮询：省电、省流量；重新可见时立即刷新一次并恢复
+function onVisibilityChange() {
+  if (document.hidden) {
+    stopHealthTimer()
+  } else {
+    refreshHealth()
+    startHealthTimer()
+  }
+}
+
+// 路由 idle prefetch：首屏空闲时预取 MemoryView / SettingsView 的 chunk
+function prefetchRoutes() {
+  const load = () => {
+    import('./views/MemoryView.vue')
+    import('./views/SettingsView.vue')
+  }
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(load, { timeout: 3000 })
+  } else {
+    setTimeout(load, 2000)
+  }
+}
+
 onMounted(async () => {
   try {
-    const st = await api.get('/onboarding/status')
+    const st = await chatApi.onboardingStatus()
     onboarded.value = st.completed
-  } catch { }
+  } catch {
+    /* 服务未就绪时忽略，进入默认状态 */
+  }
   await refreshHealth()
-  healthTimer = setInterval(refreshHealth, 30000)
+  startHealthTimer()
+  document.addEventListener('visibilitychange', onVisibilityChange)
   loading.value = false
+  prefetchRoutes()
 })
-onUnmounted(() => { if (healthTimer) clearInterval(healthTimer) })
+onUnmounted(() => {
+  stopHealthTimer()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
 
-function onOnboarded() { onboarded.value = true; router.push('/chat') }
-function copyTraceId(tid) { navigator.clipboard.writeText(tid).catch(() => { }) }
+function onOnboarded() {
+  onboarded.value = true
+  router.push('/chat')
+}
+function copyTraceId(tid) {
+  navigator.clipboard.writeText(tid).catch(() => {})
+}
 </script>
 
 <template>
   <div v-if="!loading && !onboarded">
     <Onboarding @done="onOnboarded" />
   </div>
-  <div class="app" v-else-if="!loading">
+  <div v-else-if="!loading" class="app">
     <SessionSidebar :health="health" />
     <div class="main">
       <router-view v-slot="{ Component }">
@@ -56,14 +102,30 @@ function copyTraceId(tid) { navigator.clipboard.writeText(tid).catch(() => { }) 
   <div class="toast-wrap">
     <div v-for="t in toast.items" :key="t.id" class="toast" :class="'toast-' + t.type">
       <span class="toast-message">{{ t.message }}</span>
-      <button v-if="t.traceId && t.type === 'error'" type="button" class="toast-action" aria-label="复制 trace_id"
-        title="复制 trace_id" @click="copyTraceId(t.traceId); toast.remove(t.id)">复制ID</button>
-      <button type="button" class="toast-close" aria-label="关闭提示" @click="toast.remove(t.id)">×</button>
+      <button
+        v-if="t.traceId && t.type === 'error'"
+        type="button"
+        class="toast-action"
+        aria-label="复制 trace_id"
+        title="复制 trace_id"
+        @click="copyTraceId(t.traceId); toast.remove(t.id)"
+      >
+        复制ID
+      </button>
+      <button type="button" class="toast-close" aria-label="关闭提示" @click="toast.remove(t.id)">
+        ×
+      </button>
     </div>
   </div>
 
   <!-- 系统内置确认弹窗（替代原生 window.confirm） -->
-  <BaseModal v-if="confirm.item" :title="confirm.item.title" size="sm" confirm-layer @close="confirm.cancel()">
+  <BaseModal
+    v-if="confirm.item"
+    :title="confirm.item.title"
+    size="sm"
+    confirm-layer
+    @close="confirm.cancel()"
+  >
     <p class="confirm-message">{{ confirm.item.message }}</p>
     <label v-if="confirm.item.checkbox" class="confirm-check">
       <input v-model="confirm.checked" type="checkbox" />
@@ -71,8 +133,13 @@ function copyTraceId(tid) { navigator.clipboard.writeText(tid).catch(() => { }) 
     </label>
     <template #footer>
       <button type="button" @click="confirm.cancel()">{{ confirm.item.cancelText }}</button>
-      <button type="button" :class="confirm.item.danger ? 'dang' : 'btn-primary'" @click="confirm.confirm()">{{
-        confirm.item.confirmText }}</button>
+      <button
+        type="button"
+        :class="confirm.item.danger ? 'dang' : 'btn-primary'"
+        @click="confirm.confirm()"
+      >
+        {{ confirm.item.confirmText }}
+      </button>
     </template>
   </BaseModal>
 </template>

@@ -4,8 +4,8 @@ Handoff 摘要生成器（会话上下文管理方案 v2 §摘要生成）。
 跨会话 handoff 摘要：在用户点击"开启新会话"时异步生成，将旧会话的脉络浓缩为
 一份 10K token 以内的 Markdown 摘要附件，注入新会话首条消息的上下文。
 
-与现有 compression.py 的分工：
-- compression.py：会话内上下文窗口管理（轮次驱动，六段 JSON，注入 system context）
+与会话内压缩（compaction_engine.py）的分工：
+- compaction_engine.py：会话内上下文窗口管理（轮次驱动，自动压缩，注入 system context）
 - handoff_summary.py：跨会话衔接（按钮触发，五段 Markdown，作为附件随消息发送）
 
 两套系统并行，互不干扰。
@@ -24,31 +24,17 @@ from infrastructure.timeutil import now_cst
 logger = logging.getLogger("second_person.handoff")
 
 
-def _mark_internal_if_possible(path: Path) -> None:
-    """P4-F：写盘前通知 FileWriter watcher 该路径是内部写入，避免误判为
-    外部修改触发重扫（handoff 摘要被当成新记忆源蒸馏）。
-
-    获取 container 失败时静默跳过（测试/独立调用兼容）。
-    """
-    try:
-        from app.main import get_container
-        c = get_container()
-        if c and getattr(c, "fw", None):
-            c.fw.mark_internal(path)
-    except Exception:  # noqa: BLE001
-        pass
-
-
 class HandoffSummaryGenerator:
     """跨会话 handoff 摘要生成器。"""
 
-    def __init__(self, llm, db, data_dir, config, bus, tracer):
+    def __init__(self, llm, db, data_dir, config, bus, tracer, file_writer=None):
         self.llm = llm
         self.db = db
         self.data_dir = Path(data_dir)
         self.config = config
         self.bus = bus
         self.tracer = tracer
+        self.fw = file_writer
 
     async def generate(self, from_session_id: str, to_session_id: str,
                        timeout: float = 60.0) -> Path:
@@ -65,7 +51,7 @@ class HandoffSummaryGenerator:
         rel = f"artifacts/handoffs/{to_session_id}.md"
 
         # 先写入占位文件（status=generating），供前端即时感知
-        _write_placeholer(output_path, from_session_id, to_session_id)
+        await _write_placeholder(self.fw, rel, output_path, from_session_id, to_session_id)
 
         span = self.tracer.span_start("handoff.summary_generation", input={
             "from_session": from_session_id,
@@ -79,8 +65,8 @@ class HandoffSummaryGenerator:
                 "ORDER BY id",
                 (from_session_id,))
             if not rows:
-                return _write_failed(output_path, from_session_id, to_session_id,
-                                     span, rel)
+                return await _write_failed(self.fw, rel, output_path, from_session_id,
+                                           to_session_id, span, rel)
 
             # 2. 统计原始数据
             original_turns = len([r for r in rows if r["role"] == "user"])
@@ -110,9 +96,9 @@ class HandoffSummaryGenerator:
                     converge_span.end(level="ERROR")
 
             # 5. 写入最终文件
-            _write_ready(output_path, from_session_id, to_session_id,
-                         original_turns, original_tokens, summary_tokens,
-                         summary_text)
+            await _write_ready(self.fw, rel, output_path, from_session_id, to_session_id,
+                               original_turns, original_tokens, summary_tokens,
+                               summary_text)
 
             # 6. 更新 DB
             self.db.execute(
@@ -138,12 +124,12 @@ class HandoffSummaryGenerator:
         except asyncio.TimeoutError:
             logger.warning("handoff 摘要生成超时：from=%s to=%s",
                            from_session_id, to_session_id)
-            return _write_failed(output_path, from_session_id, to_session_id,
-                                 span, rel)
+            return await _write_failed(self.fw, rel, output_path, from_session_id,
+                                       to_session_id, span, rel)
         except Exception as e:  # noqa: BLE001
             logger.warning("handoff 摘要生成失败：%s", e)
-            return _write_failed(output_path, from_session_id, to_session_id,
-                                 span, rel)
+            return await _write_failed(self.fw, rel, output_path, from_session_id,
+                                       to_session_id, span, rel)
 
     async def _llm_generate(self, rows: list[dict],
                             from_session_id: str) -> str:
@@ -179,8 +165,28 @@ class HandoffSummaryGenerator:
             c.providers.snapshot_for("chat")
 
 
-def _write_placeholer(p: Path, from_sid: str, to_sid: str) -> None:
-    """写入手 off 占位文件（status=generating）。"""
+async def _submit_handoff(fw, rel: str, frontmatter: dict, body: str = "") -> None:
+    payload = {"rel_path": rel, "frontmatter": frontmatter, "body": body}
+    if fw is not None:
+        await fw.submit("handoff_summary", payload, wait=True)
+        return
+    path = _resolve_handoff_path(fw, rel)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dump_frontmatter_doc(frontmatter, body), encoding="utf-8")
+
+
+def _resolve_handoff_path(fw, rel: str) -> Path:
+    if fw is not None:
+        return fw.data_dir / rel
+    try:
+        from app.main import get_container
+        return Path(get_container().data_dir) / rel
+    except Exception:  # noqa: BLE001
+        raise RuntimeError("handoff 写盘需要 FileWriter 或 AppContainer") from None
+
+
+async def _write_placeholder(fw, rel: str, _path: Path,
+                             from_sid: str, to_sid: str) -> None:
     fm = {
         "type": "handoff_summary",
         "from_session": from_sid,
@@ -188,14 +194,12 @@ def _write_placeholer(p: Path, from_sid: str, to_sid: str) -> None:
         "created_at": now_cst().isoformat(timespec="seconds"),
         "status": "generating",
     }
-    _mark_internal_if_possible(p)
-    p.write_text(dump_frontmatter_doc(fm, ""), encoding="utf-8")
+    await _submit_handoff(fw, rel, fm, "")
 
 
-def _write_ready(p: Path, from_sid: str, to_sid: str,
-                 original_turns: int, original_tokens: int,
-                 summary_tokens: int, body: str) -> None:
-    """写入最终摘要文件（status=ready）。"""
+async def _write_ready(fw, rel: str, _path: Path, from_sid: str, to_sid: str,
+                       original_turns: int, original_tokens: int,
+                       summary_tokens: int, body: str) -> None:
     fm = {
         "type": "handoff_summary",
         "from_session": from_sid,
@@ -206,13 +210,11 @@ def _write_ready(p: Path, from_sid: str, to_sid: str,
         "summary_tokens": summary_tokens,
         "status": "ready",
     }
-    _mark_internal_if_possible(p)
-    p.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
+    await _submit_handoff(fw, rel, fm, body)
 
 
-def _write_failed(p: Path, from_sid: str, to_sid: str,
-                  span, rel: str) -> Path:
-    """写入降级文件（status=failed），不阻塞用户操作。"""
+async def _write_failed(fw, rel: str, _path: Path, from_sid: str, to_sid: str,
+                        span, rel_path: str) -> Path:
     fm = {
         "type": "handoff_summary",
         "from_session": from_sid,
@@ -220,9 +222,8 @@ def _write_failed(p: Path, from_sid: str, to_sid: str,
         "created_at": now_cst().isoformat(timespec="seconds"),
         "status": "failed",
     }
-    body = (f"摘要生成失败，可直接查看完整对话：{from_sid}")
-    _mark_internal_if_possible(p)
-    p.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
+    body = f"摘要生成失败，可直接查看完整对话：{from_sid}"
+    await _submit_handoff(fw, rel, fm, body)
 
     # 发布 failed 事件（前端据此切换附件状态）
     from infrastructure.event_bus import EVT_HANDOFF_READY
@@ -237,5 +238,5 @@ def _write_failed(p: Path, from_sid: str, to_sid: str,
         pass
 
     span.end(level="ERROR", output={
-        "status": "failed", "file_path": rel})
-    return p
+        "status": "failed", "file_path": rel_path})
+    return _resolve_handoff_path(fw, rel)

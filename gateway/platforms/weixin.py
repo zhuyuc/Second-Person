@@ -21,6 +21,7 @@ import mimetypes
 import os
 
 from .base import BasePlatformAdapter, MAX_MEDIA_MB
+from .media_parser import split_media_marker
 from .ilink_client import (ILinkClient, MSG_FILE, MSG_IMAGE, MSG_TEXT,
                            MSG_VOICE, extract_media, extract_text,
                            media_aes_key, media_filename, media_url)
@@ -73,12 +74,7 @@ class WeixinAdapter(BasePlatformAdapter):
             raise RuntimeError("微信主动推送不可用：24 小时会话窗口已过期，"
                                "请在微信中先给 Bot 发一条消息")
         # 提取 MEDIA: 附件标记（基类 _send_reply 生成的超长附件）
-        media_path = None
-        if "MEDIA:" in text:
-            lines = text.splitlines()
-            text = "\n".join(l for l in lines if not l.startswith("MEDIA:"))
-            media_path = next((l[6:]
-                              for l in lines if l.startswith("MEDIA:")), None)
+        text, media_path = split_media_marker(text)
         # 协议单条上限兜底分段（即使 im_max_chars 调大也不越界）
         if text:
             for i in range(0, len(text), _WEIXIN_SEG):

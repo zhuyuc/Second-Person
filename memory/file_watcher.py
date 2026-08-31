@@ -155,6 +155,9 @@ class FileWatcher:
             with self._lock:
                 prev = self._snapshots.get(rp)
                 self._snapshots[rp] = digest
+                if len(self._snapshots) > 5000:
+                    oldest = next(iter(self._snapshots))
+                    self._snapshots.pop(oldest, None)
             if prev == digest:
                 # 内容未变（读取/atime 类事件）：不触发“外部修改”
                 continue
@@ -189,6 +192,9 @@ class FileWatcher:
             with self._lock:
                 prev = self._snapshots.get(rp)
                 self._snapshots[rp] = digest
+                if len(self._snapshots) > 5000:
+                    oldest = next(iter(self._snapshots))
+                    self._snapshots.pop(oldest, None)
             if prev != digest:
                 # 内容真正变化（新建/修改）才触发；读取类事件直接过滤
                 changed.append(p)

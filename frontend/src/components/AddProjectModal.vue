@@ -4,12 +4,11 @@
 import { ref, onMounted, nextTick } from 'vue'
 import { projectsApi } from '@/api/projects'
 import { useToast } from '@/stores/toast'
-import BaseModal from '@/components/BaseModal.vue'
 
 const emit = defineEmits(['close', 'created'])
 const toast = useToast()
 
-const step = ref('picking')         // picking | confirming
+const step = ref('picking') // picking | confirming
 const pickedPath = ref('')
 const projectTitle = ref('')
 const creating = ref(false)
@@ -27,9 +26,12 @@ async function pickNative() {
     step.value = 'confirming'
     nextTick(() => {
       const el = document.getElementById('add-proj-title-input')
-      if (el) { el.focus(); el.select() }
+      if (el) {
+        el.focus()
+        el.select()
+      }
     })
-  } catch (e) {
+  } catch {
     // 后端拉起原生对话框失败（tkinter 不可用/服务器无显示器）
     toast.push('error', '无法拉起系统对话框，请更新程序或直接粘贴路径')
     emit('close')
@@ -45,18 +47,18 @@ async function submit() {
       title: projectTitle.value.trim() || undefined,
     })
     emit('created', proj)
-  } catch { /* toast 已弹 */ }
-  finally { creating.value = false }
+  } catch {
+    /* toast 已弹 */
+  } finally {
+    creating.value = false
+  }
 }
 
 onMounted(pickNative)
 </script>
 
 <template>
-  <BaseModal v-if="step === 'confirming'"
-             title="确认加入工作区"
-             size="md"
-             @close="emit('close')">
+  <BaseModal v-if="step === 'confirming'" title="确认加入工作区" size="md" @close="emit('close')">
     <div class="confirm-body">
       <div class="row-line">
         <label>目录路径</label>
@@ -64,11 +66,13 @@ onMounted(pickNative)
       </div>
       <div class="row-line">
         <label>项目名</label>
-        <input id="add-proj-title-input"
-               v-model="projectTitle"
-               maxlength="60"
-               placeholder="默认使用目录名"
-               @keydown.enter.prevent="submit" />
+        <input
+          id="add-proj-title-input"
+          v-model="projectTitle"
+          maxlength="60"
+          placeholder="默认使用目录名"
+          @keydown.enter.prevent="submit"
+        />
       </div>
       <div class="muted tip">
         项目加载后可在侧栏「工作区」快速切换。归档 / 永久删除随时可做，本地目录不会被动。
@@ -84,21 +88,43 @@ onMounted(pickNative)
 </template>
 
 <style scoped>
-.confirm-body { display: flex; flex-direction: column; gap: 14px; }
-.row-line { display: flex; align-items: center; gap: 12px; }
-.row-line label { width: 68px; color: var(--muted); font-size: var(--fs-sm, 13px); }
+.confirm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.row-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.row-line label {
+  width: 68px;
+  color: var(--muted);
+  font-size: var(--fs-sm, 13px);
+}
 .path-box {
-  flex: 1; min-width: 0;
+  flex: 1;
+  min-width: 0;
   padding: 8px 10px;
-  background: var(--bg-input, rgba(127,127,127,0.06));
-  border: 1px solid var(--stroke); border-radius: 4px;
-  font-family: monospace; font-size: 12px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--bg-input, rgba(127, 127, 127, 0.06));
+  border: 1px solid var(--stroke);
+  border-radius: 4px;
+  font-family: monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .row-line input {
-  flex: 1; padding: 6px 10px;
-  border: 1px solid var(--stroke); border-radius: 4px;
+  flex: 1;
+  padding: 6px 10px;
+  border: 1px solid var(--stroke);
+  border-radius: 4px;
   font-family: inherit;
 }
-.tip { font-size: 12px; line-height: 1.6; }
+.tip {
+  font-size: 12px;
+  line-height: 1.6;
+}
 </style>

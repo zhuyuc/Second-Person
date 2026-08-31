@@ -40,15 +40,19 @@ let loading = null
 
 export function loadDomainLabels(force = false) {
   if (loading && !force) return loading
-  loading = api.get('/memory/domain-labels')
-    .then(m => { remoteLabels.value = m || {} })
-    .catch(() => { loading = null /* 失败允许下次重试 */ })
+  loading = api
+    .get('/memory/domain-labels')
+    .then((m) => {
+      remoteLabels.value = m || {}
+    })
+    .catch(() => {
+      loading = null /* 失败允许下次重试 */
+    })
   return loading
 }
 
 export function domainLabel(domain) {
   if (!domain) return domain
   const key = String(domain).toLowerCase().replace(/-/g, '_')
-  return remoteLabels.value[domain] || remoteLabels.value[key]
-    || DOMAIN_LABELS[key] || domain
+  return remoteLabels.value[domain] || remoteLabels.value[key] || DOMAIN_LABELS[key] || domain
 }

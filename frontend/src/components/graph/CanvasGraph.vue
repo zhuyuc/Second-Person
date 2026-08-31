@@ -1,7 +1,7 @@
 <script setup>
 // Canvas 2D 统一渲染引擎：力仿真 + 惯性缩放平移 + 语义缩放 + 光晕微动效 + 进场动画
-import { ref, watch, onMounted, onBeforeUnmount, toRaw } from 'vue'
-import { THEME, edgeWidth, domainColor, nodeRadius } from './graphTheme'
+import { ref, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue'
+import { THEME, domainColor } from './graphTheme'
 import { useForceSimulation } from './composables/useForceSimulation'
 import { useCanvasInteraction } from './composables/useCanvasInteraction'
 
@@ -44,8 +44,16 @@ function resolvePalette() {
 
 // ---- 力仿真 ----
 const simulation = useForceSimulation(
-  { get value() { return props.nodes } },
-  { get value() { return props.edges } },
+  {
+    get value() {
+      return props.nodes
+    },
+  },
+  {
+    get value() {
+      return props.edges
+    },
+  }
 )
 
 // ---- 交互控制 ----
@@ -84,7 +92,9 @@ const interaction = useCanvasInteraction(canvasRef, {
 
 // ---- 脏标记渲染 ----
 let dirty = true
-function markDirty() { dirty = true }
+function markDirty() {
+  dirty = true
+}
 
 // ---- 进场动画状态 ----
 const nodeAlpha = new Map()
@@ -131,7 +141,8 @@ function draw(now) {
   const canvas = canvasRef.value
   if (!canvas || !ctx) return
 
-  const w = canvas.clientWidth, h = canvas.clientHeight
+  const w = canvas.clientWidth,
+    h = canvas.clientHeight
   if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
     canvas.width = w * dpr
     canvas.height = h * dpr
@@ -149,8 +160,7 @@ function draw(now) {
   ctx.scale(zoom, zoom)
   ctx.translate(cam.x, cam.y)
 
-  const edgeMaxWeight = Math.max(1, ...props.edges.map(e => e.weight || 1))
-  const nodeMap = Object.fromEntries(props.nodes.map(n => [n.entity_id, n]))
+  const nodeMap = Object.fromEntries(props.nodes.map((n) => [n.entity_id, n]))
   const focusedId = props.focus.focusedId.value
   const hasFocus = !!focusedId
 
@@ -165,21 +175,29 @@ function draw(now) {
   for (const [state, group] of Object.entries(edgeGroups)) {
     if (!group.length) continue
     ctx.beginPath()
-    ctx.strokeStyle = state === 'active' ? palette.accentAlpha
-      : state === 'neighbor' ? palette.muted
-        : state === 'dimmed' ? palette.bd
-          : palette.bdStrong
+    ctx.strokeStyle =
+      state === 'active'
+        ? palette.accentAlpha
+        : state === 'neighbor'
+          ? palette.muted
+          : state === 'dimmed'
+            ? palette.bd
+            : palette.bdStrong
     ctx.lineWidth = state === 'active' ? 2.5 / zoom : 1.2 / zoom
     ctx.globalAlpha = state === 'dimmed' && hasFocus ? 0.25 : 1
     if (state !== 'active') ctx.setLineDash([4 / zoom, 4 / zoom])
     else ctx.setLineDash([])
 
     for (const e of group) {
-      const s = nodeMap[e.source], t = nodeMap[e.target]
+      const s = nodeMap[e.source],
+        t = nodeMap[e.target]
       if (!s || !t) continue
-      const mx = (s.x + t.x) / 2, my = (s.y + t.y) / 2
-      const dx = t.x - s.x, dy = t.y - s.y
-      const cx = mx - dy * 0.12, cy = my + dx * 0.12
+      const mx = (s.x + t.x) / 2,
+        my = (s.y + t.y) / 2
+      const dx = t.x - s.x,
+        dy = t.y - s.y
+      const cx = mx - dy * 0.12,
+        cy = my + dx * 0.12
       ctx.moveTo(s.x, s.y)
       ctx.quadraticCurveTo(cx, cy, t.x, t.y)
     }
@@ -201,7 +219,9 @@ function draw(now) {
     const st = props.focus.nodeState(node.entity_id)
     const alpha = getNodeAlpha(node.entity_id, now)
     let r = getNodeAnimR(node.entity_id, now, node.r)
-    if (alpha < 1) { dirty = true }
+    if (alpha < 1) {
+      dirty = true
+    }
     if (st === 'focused') r *= THEME.size.focusedMultiplier
     if (props.focus.draggingId.value === node.entity_id) r *= THEME.size.draggingMultiplier
 
@@ -281,11 +301,15 @@ let pulseStart = 0
 function drawPulse(now) {
   if (!pulseNode || !ctx) return
   const elapsed = now - pulseStart
-  if (elapsed > 1500) { pulseNode = null; return }
+  if (elapsed > 1500) {
+    pulseNode = null
+    return
+  }
   const canvas = canvasRef.value
   if (!canvas) return
   const cam = interaction.camera
-  const w = canvas.clientWidth, h = canvas.clientHeight
+  const w = canvas.clientWidth,
+    h = canvas.clientHeight
 
   ctx.save()
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
@@ -309,7 +333,8 @@ function drawPulse(now) {
 }
 
 // ---- 主循环 ----
-let lastW = 0, lastH = 0
+let lastW = 0,
+  lastH = 0
 function loop(now) {
   if (!startTime) startTime = now
 
@@ -323,9 +348,11 @@ function loop(now) {
   // 容器尺寸变化检测（ResizeObserver 之外的兜底）
   const canvas = canvasRef.value
   if (canvas) {
-    const cw = canvas.clientWidth, ch = canvas.clientHeight
+    const cw = canvas.clientWidth,
+      ch = canvas.clientHeight
     if (cw !== lastW || ch !== lastH) {
-      lastW = cw; lastH = ch
+      lastW = cw
+      lastH = ch
       dirty = true
     }
   }
@@ -367,63 +394,91 @@ function cleanup() {
 }
 
 // 数据变化
-watch(() => props.nodes.length, (newLen, oldLen) => {
-  if (newLen > 0 && !initialized) {
-    initialized = true
-    initEntryAnimation()
-    interaction.fitAll(false)
-    simulation.coldStart()
-  } else if (newLen > (oldLen || 0)) {
-    // 新增节点（邻居扩展）
-    const now = performance.now()
-    for (const n of props.nodes) {
-      if (!nodeAlpha.has(n.entity_id)) {
-        nodeAlpha.set(n.entity_id, { start: now, duration: 400 })
-        nodeAnimR.set(n.entity_id, { start: now, duration: 500, from: 0, to: n.r })
+watch(
+  () => props.nodes.length,
+  (newLen, oldLen) => {
+    if (newLen > 0 && !initialized) {
+      initialized = true
+      initEntryAnimation()
+      interaction.fitAll(false)
+      simulation.coldStart()
+    } else if (newLen > (oldLen || 0)) {
+      // 新增节点（邻居扩展）
+      const now = performance.now()
+      for (const n of props.nodes) {
+        if (!nodeAlpha.has(n.entity_id)) {
+          nodeAlpha.set(n.entity_id, { start: now, duration: 400 })
+          nodeAnimR.set(n.entity_id, { start: now, duration: 500, from: 0, to: n.r })
+        }
       }
+      simulation.expand()
     }
-    simulation.expand()
-  }
-  interaction.rebuildGrid()
-  simulation.onDataChange()
-  markDirty()
-}, { flush: 'post' })
+    interaction.rebuildGrid()
+    simulation.onDataChange()
+    markDirty()
+  },
+  { flush: 'post' }
+)
 
-watch(() => props.edges.length, () => {
-  simulation.onDataChange()
-  markDirty()
-})
+watch(
+  () => props.edges.length,
+  () => {
+    simulation.onDataChange()
+    markDirty()
+  }
+)
 
 // 焦点变化
-watch(() => props.focus.focusedId.value, () => { markDirty() })
-watch(() => props.focus.draggingId.value, () => { markDirty() })
+watch(
+  () => props.focus.focusedId.value,
+  () => {
+    markDirty()
+  }
+)
+watch(
+  () => props.focus.draggingId.value,
+  () => {
+    markDirty()
+  }
+)
 
 // 搜索定位
-watch(() => props.searchTarget, (id) => {
-  if (!id) return
-  const node = props.nodes.find(n => n.entity_id === id)
-  if (!node) return
-  interaction.flyTo(node)
-  pulseNode = node
-  pulseStart = performance.now()
-  markDirty()
-})
+watch(
+  () => props.searchTarget,
+  (id) => {
+    if (!id) return
+    const node = props.nodes.find((n) => n.entity_id === id)
+    if (!node) return
+    interaction.flyTo(node)
+    pulseNode = node
+    pulseStart = performance.now()
+    markDirty()
+  }
+)
 
 // 主题切换监听
 let mql = null
 let resizeObs = null
 let mutObs = null
-function onThemeChange() { resolvePalette(); markDirty() }
+function onThemeChange() {
+  resolvePalette()
+  markDirty()
+}
 
 onMounted(() => {
   init()
   mql = window.matchMedia?.('(prefers-color-scheme: dark)')
   mql?.addEventListener?.('change', onThemeChange)
-  mutObs = new MutationObserver(() => { resolvePalette(); markDirty() })
+  mutObs = new MutationObserver(() => {
+    resolvePalette()
+    markDirty()
+  })
   mutObs.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
   // 容器尺寸变化 → 重绘 + 重新 fitAll
   if (canvasRef.value) {
-    resizeObs = new ResizeObserver(() => { markDirty() })
+    resizeObs = new ResizeObserver(() => {
+      markDirty()
+    })
     resizeObs.observe(canvasRef.value)
   }
 })
@@ -435,10 +490,30 @@ onBeforeUnmount(() => {
   mutObs?.disconnect()
 })
 
+// keep-alive 激活/停用：离开 MemoryView 时组件 deactivated 但不 unmount，
+// RAF 会持续空转 60fps 浪费 CPU/GPU。停用时清理，激活时重启。
+let deactivatedCleaned = false
+onDeactivated(() => {
+  if (animFrame) cancelAnimationFrame(animFrame)
+  animFrame = null
+  simulation.freeze()
+  deactivatedCleaned = true
+})
+onActivated(() => {
+  if (deactivatedCleaned && canvasRef.value) {
+    deactivatedCleaned = false
+    simulation.coldStart()
+    markDirty()
+    animFrame = requestAnimationFrame(loop)
+  }
+})
+
 // 暴露方法
-function resetView() { interaction.fitAll(true) }
+function resetView() {
+  interaction.fitAll(true)
+}
 function flyToNode(id) {
-  const node = props.nodes.find(n => n.entity_id === id)
+  const node = props.nodes.find((n) => n.entity_id === id)
   if (node) {
     interaction.flyTo(node)
     pulseNode = node

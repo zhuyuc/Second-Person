@@ -112,8 +112,10 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
                 "【工具】lookup已完成\n"
             )
             assert [name for name, _data in events] == [
-                "turn_started", "step_started", "tool_executing", "tool_result",
-                "step_metrics", "step_started", "content_delta", "turn_completed",
+                "turn_started", "step_started", "step_progress", "step_progress",
+                "tool_executing", "tool_result", "step_metrics",
+                "step_started", "step_progress", "step_progress",
+                "content_delta", "turn_completed",
             ]
             # The second model request receives the actual tool result, not a
             # host-side inferred intent label or a transient queue payload.
@@ -181,8 +183,8 @@ def test_provider_reasoning_is_separate_from_tool_progress_and_persisted(tmp_pat
             assert saved["analysis_metadata"]["reasoning_text"] == "先核对用户问题。"
             assert saved["analysis_metadata"]["reasoning_available"] is True
             assert [name for name, _data in events] == [
-                "turn_started", "step_started", "reasoning_delta",
-                "content_delta", "turn_completed",
+                "turn_started", "step_started", "step_progress", "step_progress",
+                "reasoning_delta", "content_delta", "turn_completed",
             ]
         finally:
             db.close()

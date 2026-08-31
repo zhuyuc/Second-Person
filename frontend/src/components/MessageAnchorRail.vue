@@ -23,22 +23,48 @@ function toggleMobile() {
 <template>
   <aside class="message-anchor-rail" aria-label="对话定位">
     <template v-if="anchors.length">
-      <button class="message-anchor-mobile-toggle" type="button" aria-label="打开对话定位" title="对话定位"
-        :aria-expanded="mobileOpen" @click="toggleMobile">
+      <button
+        class="message-anchor-mobile-toggle"
+        type="button"
+        aria-label="打开对话定位"
+        title="对话定位"
+        :aria-expanded="mobileOpen"
+        @click="toggleMobile"
+      >
         <i class="ti ti-list"></i>
       </button>
 
       <div class="message-anchor-track" role="list">
-        <button v-for="anchor in anchors" :key="anchor.key" type="button" role="listitem" class="message-anchor-mark"
-          :aria-label="anchor.title" @click="select(anchor)">
+        <button
+          v-for="anchor in anchors"
+          :key="anchor.key"
+          type="button"
+          role="listitem"
+          class="message-anchor-mark"
+          :aria-label="anchor.title"
+          @click="select(anchor)"
+        >
           <span class="message-anchor-line"></span>
-          <span class="message-anchor-tooltip" role="tooltip" tabindex="-1">{{ anchor.title }}</span>
+          <span class="message-anchor-tooltip" role="tooltip" tabindex="-1">{{
+            anchor.title
+          }}</span>
         </button>
       </div>
 
-      <div v-if="mobileOpen" class="message-anchor-mobile-list" role="list" @keydown.esc="mobileOpen = false">
-        <button v-for="anchor in anchors" :key="anchor.key" type="button" role="listitem"
-          class="message-anchor-mobile-item" @click="select(anchor)">
+      <div
+        v-if="mobileOpen"
+        class="message-anchor-mobile-list"
+        role="list"
+        @keydown.esc="mobileOpen = false"
+      >
+        <button
+          v-for="anchor in anchors"
+          :key="anchor.key"
+          type="button"
+          role="listitem"
+          class="message-anchor-mobile-item"
+          @click="select(anchor)"
+        >
           <span class="message-anchor-mobile-index">{{ anchor.index }}</span>
           <span>{{ anchor.title }}</span>
         </button>
@@ -93,7 +119,11 @@ function toggleMobile() {
   border-radius: 2px;
   background: var(--muted);
   opacity: 0.32;
-  transition: width var(--dur-fast), height var(--dur-fast), background var(--dur-fast), opacity var(--dur-fast);
+  transition:
+    width var(--dur-fast),
+    height var(--dur-fast),
+    background var(--dur-fast),
+    opacity var(--dur-fast);
 }
 
 /* 唯一的高亮触发条件：鼠标悬停或键盘聚焦 */
@@ -128,7 +158,9 @@ function toggleMobile() {
   pointer-events: none;
   transform: translate(0, -50%) scale(0.96);
   transform-origin: left center;
-  transition: opacity var(--dur-fast), transform var(--dur-fast);
+  transition:
+    opacity var(--dur-fast),
+    transform var(--dur-fast);
 }
 
 .message-anchor-mark:hover .message-anchor-tooltip,
@@ -158,7 +190,9 @@ function toggleMobile() {
     align-items: flex-start;
   }
 
-  .message-anchor-track { display: none; }
+  .message-anchor-track {
+    display: none;
+  }
 
   .message-anchor-mobile-toggle {
     display: inline-flex;

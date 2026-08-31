@@ -22,7 +22,14 @@ class ContractValidationError(ValueError):
 
 
 async def read_json_object(request: Request) -> dict[str, Any]:
-    """Read one JSON object and preserve the application's 400 error contract."""
+    """Read one JSON object and preserve the application's 400 error contract.
+
+    请求体大小上限：防止超大 JSON 拖垮内存。chat/send 的图片走 multipart
+    上传（有独立大小限制），JSON 体本身不应超过 2MB。
+    """
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 2_000_000:
+        raise HTTPException(status_code=413, detail="请求体过大")
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -95,7 +102,7 @@ class ChatSendRequest(BaseModel):
     @field_validator("message", mode="before")
     @classmethod
     def _validate_message(cls, value: Any) -> str:
-        return _required_string(value, "message")
+        return _required_string(value, "message", limit=64_000)
 
     @field_validator("client_request_id", mode="before")
     @classmethod

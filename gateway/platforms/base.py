@@ -135,7 +135,7 @@ class BasePlatformAdapter:
         # 超长转附件
         if len(reply) > self.im_max_chars and self.data_dir:
             from pathlib import Path
-            from memory.naming import im_attachment_name
+            from infrastructure.naming import im_attachment_name
             from infrastructure.observability import get_trace_id
             fname = im_attachment_name(get_trace_id() or "im")
             fpath = Path(self.data_dir) / "temp" / "attachments" / fname

@@ -33,6 +33,7 @@ class SessionStore:
     def __init__(self, db, data_dir):
         self.db = db
         self.data_dir = Path(data_dir)
+        self.fw = None  # 装配后注入 FileWriter
 
     # ---- 会话 CRUD --------------------------------------------------------
     def create_session(self, channel: str = None, from_session: str = None,
@@ -103,31 +104,37 @@ class SessionStore:
             where.append("project_id=?")
             params.append(project_id)
         base_where = (" WHERE " + " AND ".join(where)) if where else ""
+        # SQL 层分页：避免拉全表再内存切片（会话量大时读放大 + 内存峰值）
+        offset = (page - 1) * page_size
         if keyword:
             match_expr = fts_escape(keyword)
             if not match_expr:
                 return {"total": 0, "list": []}
-            ids = [r["session_id"] for r in self.db.query_all(
+            # 子查询在 SQL 层完成 FTS 匹配 + 分页，避免拉全量 session_id
+            # 到 Python 再 IN（热门词命中量大时内存 + SQL 双重放大）
+            fts_subquery = (
                 "SELECT DISTINCT c.session_id FROM conversations c "
-                "JOIN conversations_fts f ON c.id=f.rowid WHERE conversations_fts MATCH ?",
-                (match_expr,))]
-            if not ids:
-                return {"total": 0, "list": []}
-            ph = ",".join("?" * len(ids))
-            id_cond = f"session_id IN ({ph})"
+                "JOIN conversations_fts f ON c.id=f.rowid "
+                "WHERE conversations_fts MATCH ?"
+            )
+            id_cond = f"session_id IN ({fts_subquery})"
             full_where = f" WHERE {id_cond}" + (
                 " AND " + " AND ".join(where) if where else "")
-            rows = self.db.query_all(
+            full_params = [match_expr] + params
+            total = self.db.query_one(
+                f"SELECT COUNT(*) cnt FROM sessions{full_where}",
+                full_params)["cnt"]
+            page_rows = self.db.query_all(
                 f"SELECT * FROM sessions{full_where} "
-                f"ORDER BY pinned DESC, last_active DESC",
-                list(ids) + params)
+                f"ORDER BY pinned DESC, last_active DESC LIMIT ? OFFSET ?",
+                full_params + [page_size, offset])
         else:
-            rows = self.db.query_all(
+            total = self.db.query_one(
+                f"SELECT COUNT(*) cnt FROM sessions{base_where}", params)["cnt"]
+            page_rows = self.db.query_all(
                 f"SELECT * FROM sessions{base_where} "
-                f"ORDER BY pinned DESC, last_active DESC", params)
-        total = len(rows)
-        start = (page - 1) * page_size
-        page_rows = rows[start:start + page_size]
+                f"ORDER BY pinned DESC, last_active DESC LIMIT ? OFFSET ?",
+                params + [page_size, offset])
         return {"total": total, "list": [{
             "session_id": r["session_id"], "title": r["title"],
             "last_active": r["last_active"], "message_count": r["message_count"],
@@ -252,24 +259,60 @@ class SessionStore:
                 "ORDER BY id DESC LIMIT ?",
                 (sid, limit))
         rows = list(reversed(rows))
-        out = []
+        if not rows:
+            return []
+
+        # --- 批量拉 citation titles：单次 IN 查询代替 O(N * cites) 次 SELECT ---
+        parsed_citations: list[list[dict]] = []
+        missing_ids: set = set()
         for r in rows:
             cites = json.loads(r["citations"]) if r["citations"] else []
+            parsed_citations.append(cites)
             for cit in cites:
                 if cit.get("id") and not cit.get("title"):
-                    mrow = self.db.query_one(
-                        "SELECT title FROM memories WHERE id=?", (cit["id"],))
-                    if mrow:
-                        cit["title"] = mrow["title"]
-            # 版本信息：同组兄弟数量和当前索引
-            vgroup = r["version_group_id"] or r["id"]
-            siblings = self.db.query_all(
-                "SELECT id FROM conversations WHERE version_group_id=? ORDER BY id",
-                (vgroup,))
-            sibling_ids = [s["id"] for s in siblings]
+                    missing_ids.add(cit["id"])
+        title_map: dict = {}
+        if missing_ids:
+            placeholders = ",".join(["?"] * len(missing_ids))
+            id_list = list(missing_ids)
+            title_rows = self.db.query_all(
+                f"SELECT id,title FROM memories WHERE id IN ({placeholders})",
+                tuple(id_list))
+            title_map = {tr["id"]: tr["title"] for tr in title_rows}
+        for cites in parsed_citations:
+            for cit in cites:
+                if cit.get("id") and not cit.get("title"):
+                    t = title_map.get(cit["id"])
+                    if t:
+                        cit["title"] = t
+
+        # --- 批量拉版本兄弟：按 vgroup 一次查齐 ---
+        vgroups: set = set()
+        row_vgroups: list = []
+        for r in rows:
+            vg = r["version_group_id"] or r["id"]
+            vgroups.add(vg)
+            row_vgroups.append(vg)
+        siblings_by_group: dict[int, list[int]] = {}
+        if vgroups:
+            placeholders = ",".join(["?"] * len(vgroups))
+            sib_rows = self.db.query_all(
+                f"SELECT id,version_group_id FROM conversations "
+                f"WHERE version_group_id IN ({placeholders}) ORDER BY id",
+                tuple(vgroups))
+            for sr in sib_rows:
+                siblings_by_group.setdefault(sr["version_group_id"], []).append(sr["id"])
+            # 兼容 vgroup 落在 id 本身、且不属于 version_group_id 列的历史行
+            for vg in vgroups:
+                if vg not in siblings_by_group:
+                    # 唯一版本：只有它自己
+                    siblings_by_group[vg] = [vg]
+
+        out = []
+        for r, cites, vgroup in zip(rows, parsed_citations, row_vgroups):
+            sibling_ids = siblings_by_group.get(vgroup, [r["id"]])
             sibling_count = len(sibling_ids)
-            sibling_index = sibling_ids.index(
-                r["id"]) if r["id"] in sibling_ids else 0
+            sibling_index = sibling_ids.index(r["id"]) if r["id"] in sibling_ids else 0
             out.append({"id": r["id"], "role": r["role"],
                         "message_type": r["message_type"],
                         "notification_type": r["notification_type"],
@@ -312,13 +355,25 @@ class SessionStore:
         self._activate_downstream(target_message_id, sid)
 
     def _deactivate_downstream(self, parent_id: int) -> None:
-        """递归停用某节点的所有子孙。"""
-        children = self.db.query_all(
-            "SELECT id FROM conversations WHERE parent_id=?", (parent_id,))
-        for c in children:
-            self.db.execute(
-                "UPDATE conversations SET is_active=0 WHERE id=?", (c["id"],))
-            self._deactivate_downstream(c["id"])
+        """递归停用某节点的所有子孙。
+
+        用递归 CTE 一次收集全部后代 id，再单次 UPDATE，避免逐层
+        SELECT+UPDATE 的 O(N×depth) DB 往返（深消息树时显著）。
+        """
+        rows = self.db.query_all(
+            "WITH RECURSIVE descendants(id) AS ("
+            "  SELECT id FROM conversations WHERE parent_id=?"
+            "  UNION ALL"
+            "  SELECT c.id FROM conversations c"
+            "  JOIN descendants d ON c.parent_id=d.id"
+            ") SELECT id FROM descendants",
+            (parent_id,))
+        if not rows:
+            return
+        ids = [r["id"] for r in rows]
+        ph = ",".join("?" * len(ids))
+        self.db.execute(
+            f"UPDATE conversations SET is_active=0 WHERE id IN ({ph})", ids)
 
     def _activate_downstream(self, parent_id: int, sid: str) -> None:
         """递归激活下游链：每个分叉点选择 id 最大（最新）的子节点。"""
@@ -522,11 +577,8 @@ class SessionStore:
                              "id": r["id"]})
         return msgs
 
-    def save_summary(self, sid: str, summary_body: str, last_msg_id: int) -> None:
+    async def save_summary(self, sid: str, summary_body: str, last_msg_id: int) -> None:
         """压缩摘要落盘：frontmatter（含水位，供索引丢失时从 md 重建）+ 五段正文。"""
-        sdir = self.data_dir / "sessions"
-        sdir.mkdir(parents=True, exist_ok=True)
-        rel = f"sessions/{sid}.md"
         srow = self.db.query_one(
             "SELECT title, message_count, last_active FROM sessions WHERE session_id=?",
             (sid,))
@@ -535,14 +587,32 @@ class SessionStore:
               "compressed": True, "compressed_at": _now(),
               "last_compressed_message_id": last_msg_id,
               "compression_failed": False}
+        if self.fw is not None:
+            await self.fw.submit("session_summary", {
+                "op": "save", "session_id": sid, "frontmatter": fm,
+                "summary_body": summary_body, "last_msg_id": last_msg_id,
+            }, wait=True)
+            return
+        self._save_summary_direct(sid, fm, summary_body, last_msg_id)
+
+    def _save_summary_direct(self, sid: str, fm: dict, summary_body: str,
+                             last_msg_id: int) -> None:
+        rel = f"sessions/{sid}.md"
+        sdir = self.data_dir / "sessions"
+        sdir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / rel).write_text(
             dump_frontmatter_doc(fm, summary_body), encoding="utf-8")
         self.db.execute(
             "UPDATE sessions SET compressed_summary_path=?, last_compressed_message_id=? "
             "WHERE session_id=?", (rel, last_msg_id, sid))
 
-    def mark_compression_failed(self, sid: str) -> None:
+    async def mark_compression_failed(self, sid: str) -> None:
         """压缩失败：摘要 md 的 frontmatter 记 compression_failed: true，下次触发重试。"""
+        if self.fw is not None:
+            await self.fw.submit("session_summary", {
+                "op": "mark_failed", "session_id": sid,
+            }, wait=True)
+            return
         sdir = self.data_dir / "sessions"
         sdir.mkdir(parents=True, exist_ok=True)
         p = sdir / f"{sid}.md"

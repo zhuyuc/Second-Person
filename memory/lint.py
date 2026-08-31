@@ -28,9 +28,17 @@ class LintEngine:
         self.palace = palace
         self.vs = vector_store
         self.config = config
+        # counts() 跑 7 次全表 COUNT（含 orphan 的 EXISTS 子查询），
+        # /memory/list 每次都调会拖慢列表接口。加 60s TTL 缓存：
+        # 记忆写入由 FileWriter 单写线程串行落盘，60s 延迟可接受。
+        self._counts_cache: tuple[float, dict] | None = None
+        self._counts_ttl = 60.0
 
-    # ---- 统计各扣分项 -----------------------------------------------------
     def counts(self) -> dict[str, int]:
+        import time
+        now = time.time()
+        if self._counts_cache and (now - self._counts_cache[0]) < self._counts_ttl:
+            return self._counts_cache[1]
         db = self.db
         disputed = db.query_one(
             "SELECT count(*) c FROM memories WHERE confidence='disputed'")["c"]
@@ -59,9 +67,13 @@ class LintEngine:
             "AND (created_at < ? OR created_at IS NULL)", (cutoff,))["c"]
         failed_writes = db.query_one(
             "SELECT count(*) c FROM pending_writes WHERE status='failed'")["c"]
-        return {"disputed": disputed, "stale": stale, "missing": missing,
-                "orphan": orphan, "duplicate": duplicate,
-                "low_unconfirmed": low_unconfirmed, "failed_writes": failed_writes}
+        result = {"disputed": disputed, "stale": stale, "missing": missing,
+                  "orphan": orphan, "duplicate": duplicate,
+                  "low_unconfirmed": low_unconfirmed,
+                  "failed_writes": failed_writes}
+        import time
+        self._counts_cache = (time.time(), result)
+        return result
 
     def health_score(self, counts: dict | None = None) -> tuple[int, list[dict]]:
         c = counts or self.counts()

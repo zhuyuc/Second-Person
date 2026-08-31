@@ -7,6 +7,7 @@ import hashlib
 import re
 import unicodedata
 import uuid
+from infrastructure.naming import im_attachment_name, pending_id  # noqa: F401 — re-export
 from infrastructure.timeutil import now_cst
 
 # md 文件名与 domain 目录中需要替换为下划线的非法字符
@@ -158,20 +159,12 @@ def backup_filename(label: str | None = None) -> str:
     return f"sp_backup_{_ts()}{suffix}.zip"
 
 
-def im_attachment_name(trace_id: str) -> str:
-    return f"reply_{_ts()}_{trace_id[:8]}.md"
-
-
 def suggestion_id() -> str:
     return f"sug_{uuid.uuid4().hex[:8]}"
 
 
 def task_id(task_type: str) -> str:
     return f"{task_type}_{_ts()}_{uuid.uuid4().hex[:8]}"
-
-
-def pending_id() -> str:
-    return f"pending_{uuid.uuid4().hex[:8]}"
 
 
 def provider_id(seq: int) -> str:

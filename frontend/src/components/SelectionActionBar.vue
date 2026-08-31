@@ -5,8 +5,8 @@
 import { computed } from 'vue'
 
 const props = defineProps({
-    visible: { type: Boolean, default: false },
-    rect: { type: Object, default: null },
+  visible: { type: Boolean, default: false },
+  rect: { type: Object, default: null },
 })
 const emit = defineEmits(['copy', 'quote'])
 
@@ -17,29 +17,38 @@ const GAP = 8
 const EDGE = 8
 
 const pos = computed(() => {
-    const r = props.rect
-    if (!r) return { top: 0, left: 0 }
-    const canPlaceAbove = r.top - TOOLBAR_HEIGHT - GAP >= EDGE
-    const top = canPlaceAbove ? r.top - TOOLBAR_HEIGHT - GAP : r.bottom + GAP
-    const centerX = r.left + r.width / 2 - TOOLBAR_WIDTH / 2
-    const left = Math.max(EDGE,
-        Math.min(centerX, window.innerWidth - TOOLBAR_WIDTH - EDGE))
-    return { top, left }
+  const r = props.rect
+  if (!r) return { top: 0, left: 0 }
+  const canPlaceAbove = r.top - TOOLBAR_HEIGHT - GAP >= EDGE
+  const top = canPlaceAbove ? r.top - TOOLBAR_HEIGHT - GAP : r.bottom + GAP
+  const centerX = r.left + r.width / 2 - TOOLBAR_WIDTH / 2
+  const left = Math.max(EDGE, Math.min(centerX, window.innerWidth - TOOLBAR_WIDTH - EDGE))
+  return { top, left }
 })
 </script>
 
 <template>
-    <transition name="fade">
-        <div v-if="visible" class="selection-actionbar" data-selection-actionbar
-            :style="{ top: pos.top + 'px', left: pos.left + 'px' }"
-            @mousedown.prevent @click.stop>
-            <button type="button" class="sab-btn" @click="emit('copy')" title="复制选中文字">
-                <i class="ti ti-copy"></i><span>复制</span>
-            </button>
-            <span class="sab-sep"></span>
-            <button type="button" class="sab-btn" @click="emit('quote')" title="把选中文字作为引用添加到输入框">
-                <i class="ti ti-quote"></i><span>引用</span>
-            </button>
-        </div>
-    </transition>
+  <transition name="fade">
+    <div
+      v-if="visible"
+      class="selection-actionbar"
+      data-selection-actionbar
+      :style="{ top: pos.top + 'px', left: pos.left + 'px' }"
+      @mousedown.prevent
+      @click.stop
+    >
+      <button type="button" class="sab-btn" title="复制选中文字" @click="emit('copy')">
+        <i class="ti ti-copy"></i><span>复制</span>
+      </button>
+      <span class="sab-sep"></span>
+      <button
+        type="button"
+        class="sab-btn"
+        title="把选中文字作为引用添加到输入框"
+        @click="emit('quote')"
+      >
+        <i class="ti ti-quote"></i><span>引用</span>
+      </button>
+    </div>
+  </transition>
 </template>

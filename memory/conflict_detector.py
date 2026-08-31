@@ -20,7 +20,7 @@ from infrastructure.timeutil import now_cst
 from pathlib import Path
 
 
-from .md_file import dump_frontmatter_doc, parse_memory_md, split_frontmatter
+from .md_file import parse_memory_md, split_frontmatter
 
 
 class ConflictDetector:
@@ -55,8 +55,11 @@ class ConflictDetector:
         body = (f"## 来源 A\n- 记忆：[[{mid_a}]]\n- 内容：{doc_a.summary if doc_a else ''}\n\n"
                 f"## 来源 B\n- 记忆：[[{mid_b}]]\n- 内容：{doc_b.summary if doc_b else ''}\n\n"
                 f"## 处理结果\n")
-        (self.conflicts_dir / f"{conflict_id}.md").write_text(
-            dump_frontmatter_doc(fm, body), encoding="utf-8")
+        await self.fw.submit("conflict", {
+            "conflict_id": conflict_id,
+            "frontmatter": fm,
+            "body": body,
+        }, wait=True)
 
         for mid in (mid_a, mid_b):
             row, doc = self._load_doc(mid)
@@ -147,7 +150,11 @@ class ConflictDetector:
         fm["status"] = "resolved"
         fm["resolved_at"] = now_cst().strftime("%Y-%m-%d")
         body += f"\n- 裁决：{resolution} @ {fm['resolved_at']}\n"
-        f.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
+        await self.fw.submit("conflict", {
+            "conflict_id": fm.get("conflict_id") or f.stem,
+            "frontmatter": fm,
+            "body": body,
+        }, wait=True)
 
     async def _restore_confidence(self, mid: str | None) -> None:
         if not mid:

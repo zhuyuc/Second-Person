@@ -11,13 +11,15 @@ const STAGE_RE = /^阶段\s*([0-9]+|[一二三四五六七八九十百]+)\s*[|�
 const FIELD_RE = /^(目标|产出|验收|依赖|风险|步骤|结果)\s*[:：]\s*/
 
 function directFirstBlock(element) {
-  return [...element.children].find(child => /^(P|UL|OL|PRE|TABLE|DIV|SECTION)$/i.test(child.tagName))
+  return [...element.children].find((child) =>
+    /^(P|UL|OL|PRE|TABLE|DIV|SECTION)$/i.test(child.tagName)
+  )
 }
 
 function firstLine(element) {
   let value = ''
   let completed = false
-  const visit = node => {
+  const visit = (node) => {
     if (completed) return
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
       completed = true
@@ -41,7 +43,7 @@ function firstLine(element) {
 
 function removeFirstLine(element) {
   let completed = false
-  const visit = node => {
+  const visit = (node) => {
     if (completed) return
     if (node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR') {
       node.remove()
@@ -64,8 +66,9 @@ function removeFirstLine(element) {
 }
 
 function enhanceCallouts(root) {
-  const blocks = [...root.querySelectorAll('blockquote')]
-    .filter(block => !block.parentElement?.closest('blockquote'))
+  const blocks = [...root.querySelectorAll('blockquote')].filter(
+    (block) => !block.parentElement?.closest('blockquote')
+  )
 
   for (const block of blocks) {
     const first = directFirstBlock(block)
@@ -92,7 +95,8 @@ function enhanceCallouts(root) {
     body.className = 'md-callout-body'
     removeFirstLine(first)
     for (const child of [...block.childNodes]) body.appendChild(child)
-    if (!body.textContent.trim() && !body.querySelector('img,table,pre,ul,ol')) body.textContent = ''
+    if (!body.textContent.trim() && !body.querySelector('img,table,pre,ul,ol'))
+      {body.textContent = ''}
 
     aside.append(head, body)
     block.replaceWith(aside)
@@ -167,7 +171,10 @@ function enhanceStages(root) {
     main.appendChild(header)
 
     const content = heading.nextElementSibling
-    if (content && (content.classList.contains('md-sec') || /^(P|UL|OL|DIV|SECTION)$/i.test(content.tagName))) {
+    if (
+      content &&
+      (content.classList.contains('md-sec') || /^(P|UL|OL|DIV|SECTION)$/i.test(content.tagName))
+    ) {
       content.classList.add('md-stage-content')
       main.appendChild(content)
     }

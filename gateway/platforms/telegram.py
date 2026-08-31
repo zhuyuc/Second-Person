@@ -11,6 +11,7 @@ import logging
 import httpx
 
 from .base import BasePlatformAdapter, MAX_MEDIA_MB
+from .media_parser import split_media_marker
 
 logger = logging.getLogger("second_person.telegram")
 
@@ -49,12 +50,7 @@ class TelegramAdapter(BasePlatformAdapter):
         return self._http
 
     async def send_message(self, chat_id: str, text: str) -> None:
-        media_path = None
-        if "MEDIA:" in text:
-            lines = text.splitlines()
-            text = "\n".join(l for l in lines if not l.startswith("MEDIA:"))
-            media_path = next((l[6:]
-                              for l in lines if l.startswith("MEDIA:")), None)
+        text, media_path = split_media_marker(text)
         c = self._client()
         await c.post(f"{self._api}/sendMessage",
                      json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})

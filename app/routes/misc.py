@@ -1,7 +1,7 @@
 """引导 / 文档导入 / 健康检查 / 一次性任务状态接口（开发文档 §三点五/§四/§五/§2.14）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, UploadFile, File
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from app.contracts import read_json_object
 from infrastructure.timeutil import now_cst
 
@@ -110,18 +110,17 @@ async def import_document(file: UploadFile = File(...)):
     c = _c()
     content = await file.read()
     if len(content) > _DOC_IMPORT_MAX_BYTES:
-        return {"code": 400, "message": f"文件过大（上限 {_DOC_IMPORT_MAX_BYTES // 1024 // 1024}MB）",
-                "trace_id": None, "details": None}
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件过大（上限 {_DOC_IMPORT_MAX_BYTES // 1024 // 1024}MB）")
     try:
         result = await c.ingest.ingest_file(file.filename, content, source="web_ui")
     except ValueError as e:
-        return {"code": 400, "message": str(e), "trace_id": None, "details": None}
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:  # noqa: BLE001
         # 单个文档解析/提炼失败（已回滚落盘）：返回带文件名的友好错误，
         # 不抛 500，以免前端批量导入时难以定位是哪个文件出错。
-        return {"code": 400,
-                "message": f"「{file.filename}」导入失败：{e}",
-                "trace_id": None, "details": None}
+        raise HTTPException(status_code=400, detail=f"「{file.filename}」导入失败：{e}")
     return {"code": 200, "data": result}
 
 
@@ -184,8 +183,7 @@ async def confirm_import(doc_id: str, request: Request):
     try:
         result = await _c().ingest.confirm_import(doc_id, body.get("selected", []))
     except KeyError:
-        return {"code": 404, "message": "无待确认的导入记录", "trace_id": None,
-                "details": None}
+        raise HTTPException(status_code=404, detail="无待确认的导入记录")
     return {"code": 200, "data": result}
 
 
@@ -193,7 +191,7 @@ async def confirm_import(doc_id: str, request: Request):
 async def document_detail(doc_id: str):
     detail = _c().ingest.get_document_detail(doc_id)
     if detail is None:
-        return {"code": 404, "message": "文档不存在", "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="文档不存在")
     return {"code": 200, "data": detail}
 
 
@@ -246,8 +244,7 @@ async def add_local_dir(request: Request):
         item = c.folder_scanner.add_dir(
             body.get("path", ""), bool(body.get("recursive", True)))
     except ValueError as e:
-        return {"code": 400, "message": str(e), "trace_id": None,
-                "details": None}
+        raise HTTPException(status_code=400, detail=str(e))
     c.oplog.log("local_dir_add", item["path"])
     return {"code": 200, "data": item}
 
@@ -298,13 +295,11 @@ async def download_generated_file(stored_name: str):
     if ("/" in stored_name or "\\" in stored_name
             or Path(stored_name).name != stored_name
             or stored_name.startswith(".")):
-        return {"code": 404, "message": "文件不存在", "trace_id": None,
-                "details": None}
+        raise HTTPException(status_code=404, detail="文件不存在")
     exports_dir = Path(_c().data_dir) / "temp" / "exports"
     path = (exports_dir / stored_name).resolve()
     if not path.is_relative_to(exports_dir.resolve()) or not path.is_file():
-        return {"code": 404, "message": "文件不存在或已过期清理，请重新生成",
-                "trace_id": None, "details": None}
+        raise HTTPException(status_code=404, detail="文件不存在或已过期清理，请重新生成")
     # 对外文件名去掉 uuid 前缀，还原标题原名
     display = stored_name.split(
         "_", 1)[-1] if "_" in stored_name else stored_name
@@ -336,17 +331,17 @@ async def oauth_callback(state: str = "", code: str = ""):
     row = c.db.query_one("SELECT connector_id,created_at FROM oauth_states WHERE state=?",
                          (state,))
     if not row:
-        return {"code": 400, "message": "state 无效或已过期", "trace_id": None, "details": None}
+        raise HTTPException(status_code=400, detail="state 无效或已过期")
     # 校验 5 分钟有效期（created_at 与 now_cst 同为 naive CST，直接相减安全）
     from datetime import datetime as _dt
     try:
         issued = _dt.fromisoformat(row["created_at"])
         if (now_cst() - issued).total_seconds() > 300:
             c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
-            return {"code": 400, "message": "授权已过期，请重试", "trace_id": None, "details": None}
+            raise HTTPException(status_code=400, detail="授权已过期，请重试")
     except (TypeError, ValueError):
         c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))
-        return {"code": 400, "message": "授权记录异常，请重新发起", "trace_id": None, "details": None}
+        raise HTTPException(status_code=400, detail="授权记录异常，请重新发起")
     # code 换 token 由具体连接器完成；此处标记已回调，加密存 credentials
     c.creds.store(f"oauth:{row['connector_id']}", "connector", code)
     c.db.execute("DELETE FROM oauth_states WHERE state=?", (state,))

@@ -240,6 +240,19 @@ class LLMClient:
     def __init__(self, token_recorder: TokenRecorder | None = None):
         self.recorder = token_recorder
         self._breakers: dict[str, CircuitBreaker] = {}
+        # 共享 httpx 连接池：避免每次调用新建 AsyncClient 重复 TLS 握手。
+        # 长对话多轮工具调用显著降低延迟与 CPU。lazy 初始化，shutdown 时 aclose。
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=timeout_for("default"))
+        return self._client
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
 
     def breaker(self, model: str) -> CircuitBreaker:
         return self._breakers.setdefault(model, CircuitBreaker(model))
@@ -616,12 +629,13 @@ class LLMClient:
         # extra_body：通用开关经 _normalize_extra_body 翻译成厂商原生参数
         # （如 DeepSeek 的 thinking.type；thinking_enabled 原样透传会被忽略）
         body.update(_normalize_extra_body(snap, kw.get("extra_body")))
-        async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
-            r = await c.post(f"{snap.base_url.rstrip('/')}/chat/completions",
-                             json=body,
-                             headers={"Authorization": f"Bearer {snap.api_key}"})
-            r.raise_for_status()
-            data = r.json()
+        c = self._get_client()
+        r = await c.post(f"{snap.base_url.rstrip('/')}/chat/completions",
+                         json=body,
+                         headers={"Authorization": f"Bearer {snap.api_key}"},
+                         timeout=timeout_for("default"))
+        r.raise_for_status()
+        data = r.json()
         choices = data.get("choices") or [{}]
         choice = choices[0].get("message", {}) if choices else {}
         usage = data.get("usage", {})
@@ -653,12 +667,13 @@ class LLMClient:
         if tools:
             body["tools"] = tools
         body.update(_normalize_extra_body(snap, kw.get("extra_body")))
-        async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
-            r = await c.post(f"{snap.base_url.rstrip('/')}/messages", json=body,
-                             headers={"x-api-key": snap.api_key,
-                                      "anthropic-version": "2023-06-01"})
-            r.raise_for_status()
-            data = r.json()
+        c = self._get_client()
+        r = await c.post(f"{snap.base_url.rstrip('/')}/messages", json=body,
+                         headers={"x-api-key": snap.api_key,
+                                  "anthropic-version": "2023-06-01"},
+                         timeout=timeout_for("default"))
+        r.raise_for_status()
+        data = r.json()
         text = "".join(b.get("text", "") for b in data.get("content", [])
                        if b.get("type") == "text")
         usage = data.get("usage", {})
@@ -674,10 +689,11 @@ class LLMClient:
         # 与归一化剔除 thinking_enabled 的语义一致）
         url = (f"{snap.base_url.rstrip('/')}/models/{snap.model_id}:generateContent"
                f"?key={snap.api_key}")
-        async with httpx.AsyncClient(timeout=timeout_for("default")) as c:
-            r = await c.post(url, json={"contents": contents})
-            r.raise_for_status()
-            data = r.json()
+        c = self._get_client()
+        r = await c.post(url, json={"contents": contents},
+                         timeout=timeout_for("default"))
+        r.raise_for_status()
+        data = r.json()
         text = "".join(
             p.get("text", "") for p in
             data.get("candidates", [{}])[0].get("content", {}).get("parts", []))
@@ -689,12 +705,13 @@ class LLMClient:
 
     async def _do_embed(self, snap, texts) -> list[list[float]]:
         # 本地 Embedding 微服务毫秒级返回，用短读超时快速失败（不再傻等 120s）
-        async with httpx.AsyncClient(timeout=timeout_for("embedding")) as c:
-            r = await c.post(f"{snap.base_url.rstrip('/')}/embeddings",
-                             json={"model": snap.model_id, "input": texts},
-                             headers={"Authorization": f"Bearer {snap.api_key}"})
-            r.raise_for_status()
-            data = r.json()
+        c = self._get_client()
+        r = await c.post(f"{snap.base_url.rstrip('/')}/embeddings",
+                         json={"model": snap.model_id, "input": texts},
+                         headers={"Authorization": f"Bearer {snap.api_key}"},
+                         timeout=timeout_for("embedding"))
+        r.raise_for_status()
+        data = r.json()
         return [item["embedding"] for item in data["data"]]
 
     async def _do_stream(self, snap, messages, usage, images=None,
@@ -742,10 +759,11 @@ class LLMClient:
                     if k in ("temperature", "max_tokens")})
         body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         # 流式回复可持续数分钟：读超时按 chunk 间隔计时，用 stream 长超时
-        async with httpx.AsyncClient(timeout=timeout_for("stream")) as c:
-            async with c.stream("POST", f"{snap.base_url.rstrip('/')}/chat/completions",
-                                json=body,
-                                headers={"Authorization": f"Bearer {snap.api_key}"}) as r:
+        c = self._get_client()
+        async with c.stream("POST", f"{snap.base_url.rstrip('/')}/chat/completions",
+                            json=body,
+                            headers={"Authorization": f"Bearer {snap.api_key}"},
+                            timeout=timeout_for("stream")) as r:
                 r.raise_for_status()
                 async for line in r.aiter_lines():
                     if not line.startswith("data:"):

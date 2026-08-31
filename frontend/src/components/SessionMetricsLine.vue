@@ -52,7 +52,7 @@ const items = computed(() => {
   if (currentSpeed) speeds.push(currentSpeed)
   if (speeds.length) out.push(speeds.join(' · '))
   if (num(m.input_tokens) || num(m.output_tokens)) {
-    if (m.cache_hit_percent != null) {
+    if (m.cache_hit_percent !== null && m.cache_hit_percent !== undefined) {
       const cache = Number(m.cache_hit_percent)
       if (Number.isFinite(cache)) out.push(`缓存命中 ${cache >= 99.95 ? 100 : Math.round(cache)}%`)
     }
@@ -75,4 +75,3 @@ const title = computed(() => items.value.join(' | '))
     </template>
   </div>
 </template>
-

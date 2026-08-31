@@ -35,6 +35,7 @@ def build_progress_payload(
     elapsed_ms: int | None = None,
     vector_hits: int | None = None,
     fts_hits: int | None = None,
+    hits: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "stage": stage,
@@ -55,7 +56,25 @@ def build_progress_payload(
         payload["vector_hits"] = vector_hits
     if fts_hits is not None:
         payload["fts_hits"] = fts_hits
+    if hits:
+        # 面板展开时用；只保留 UI 需要的最小字段，避免 SSE 载荷膨胀 / 泄漏正文
+        payload["hits"] = [_compact_hit(h) for h in hits]
     return payload
+
+
+def _compact_hit(item: dict[str, Any]) -> dict[str, Any]:
+    """Compact hit for UI: id/title/summary + relation/seed 供前端点击定位。"""
+    out: dict[str, Any] = {
+        "id": item.get("id") or item.get("memory_id") or "",
+        "title": item.get("title") or "",
+        "summary": item.get("summary") or "",
+    }
+    for key in ("relation", "from_seed",
+                "verification_state", "freshness_state", "confidence"):
+        val = item.get(key)
+        if val:
+            out[key] = val
+    return out
 
 
 def skip_summary(gate: str, query: str) -> str:

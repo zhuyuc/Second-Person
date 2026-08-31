@@ -10,6 +10,7 @@ import logging
 import httpx
 
 from .base import BasePlatformAdapter
+from .media_parser import WEBHOOK_MEDIA_FALLBACK_SUFFIX, split_media_marker
 
 logger = logging.getLogger("second_person.adapter")
 
@@ -31,16 +32,9 @@ class WecomAdapter(BasePlatformAdapter):
         pass  # webhook 被动接入
 
     async def send_message(self, chat_id: str, text: str) -> None:
-        # 提取 MEDIA: 附件标记（企微 webhook 不支持文件上传，改为提示兜底）
-        media_path = None
-        if "MEDIA:" in text:
-            lines = text.splitlines()
-            text = "\n".join(l for l in lines if not l.startswith("MEDIA:"))
-            media_path = next((l[6:]
-                              for l in lines if l.startswith("MEDIA:")), None)
+        text, media_path = split_media_marker(text)
         if media_path:
-            text += ("\n\n（回复内容较长，部分以附件形式生成，但因平台限制无法直接发送文件，"
-                     "请通过 Web 端查看完整回复）")
+            text += WEBHOOK_MEDIA_FALLBACK_SUFFIX
         if not self.webhook:
             return
         # 超长消息分段发送（企微 markdown.content 上限 4096 字节）

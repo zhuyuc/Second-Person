@@ -22,29 +22,41 @@ async function load() {
     if (q) {
       const d = await projectsApi.search(props.projectId, {
         q: q.includes('*') ? q : `**/*${q}*`,
-        mode: 'glob', limit: 50,
+        mode: 'glob',
+        limit: 50,
       })
-      files.value = (d.matches || []).map(p => ({ path: p, name: _basename(p) }))
+      files.value = (d.matches || []).map((p) => ({ path: p, name: _basename(p) }))
     } else {
       // 空查询 → 项目根一级目录
       const d = await projectsApi.tree(props.projectId, '', 1)
-      files.value = (d.entries || []).map(e => ({ path: e.path, name: e.name, type: e.type }))
+      files.value = (d.entries || []).map((e) => ({ path: e.path, name: e.name, type: e.type }))
     }
     highlight.value = 0
-  } catch { files.value = [] }
-  finally { loading.value = false }
+  } catch {
+    files.value = []
+  } finally {
+    loading.value = false
+  }
 }
 
 function _basename(p) {
   return String(p).split(/[\\/]/).pop() || p
 }
 
-watch(() => [props.query, props.projectId, props.visible], () => {
+watch(
+  () => [props.query, props.projectId, props.visible],
+  () => {
+    if (props.visible) load()
+  }
+)
+onMounted(() => {
   if (props.visible) load()
 })
-onMounted(() => { if (props.visible) load() })
 
-function pick(f) { emit('pick', f); emit('close') }
+function pick(f) {
+  emit('pick', f)
+  emit('close')
+}
 
 function onKey(e) {
   if (!props.visible) return
@@ -69,15 +81,21 @@ defineExpose({ onKey })
     <div class="hd">
       <i class="ti ti-file-search"></i>
       <span>{{ query ? `文件搜索：${query}` : '项目根目录' }}</span>
-      <span class="muted" style="margin-left:auto;font-size:11px">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
+      <span class="muted" style="margin-left: auto; font-size: 11px"
+        >↑↓ 选择 · Enter 确认 · Esc 关闭</span
+      >
     </div>
     <div v-if="loading" class="empty">加载中…</div>
     <div v-else-if="!files.length" class="empty">没有匹配文件</div>
     <div v-else class="list">
-      <div v-for="(f, i) in files" :key="f.path" class="item"
-           :class="{ hi: i === highlight }"
-           @click="pick(f)"
-           @mouseenter="highlight = i">
+      <div
+        v-for="(f, i) in files"
+        :key="f.path"
+        class="item"
+        :class="{ hi: i === highlight }"
+        @click="pick(f)"
+        @mouseenter="highlight = i"
+      >
         <i class="ti" :class="f.type === 'dir' ? 'ti-folder' : 'ti-file'"></i>
         <span class="name">{{ f.name }}</span>
         <span class="path muted">{{ f.path }}</span>
@@ -88,37 +106,63 @@ defineExpose({ onKey })
 
 <style scoped>
 .file-picker {
-  position: absolute; bottom: 100%; left: 0; right: 0;
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
   margin-bottom: 4px;
   background: var(--bg-elev, var(--bg));
   border: 1px solid var(--stroke);
   border-radius: 6px;
-  box-shadow: 0 -2px 12px rgba(0,0,0,0.1);
-  max-height: 280px; overflow: hidden;
-  display: flex; flex-direction: column;
-  z-index: 20;
+  box-shadow: 0 -2px 12px rgba(0, 0, 0, 0.1);
+  max-height: 280px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  z-index: var(--z-sticky);
 }
 .hd {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 12px; font-size: 12px; color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
   border-bottom: 1px solid var(--stroke);
 }
-.list { flex: 1; overflow-y: auto; }
+.list {
+  flex: 1;
+  overflow-y: auto;
+}
 .item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 12px; cursor: pointer; font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
 }
-.item.hi, .item:hover {
-  background: var(--acctx-bg, rgba(60,120,220,0.15));
+.item.hi,
+.item:hover {
+  background: var(--acctx-bg, rgba(60, 120, 220, 0.15));
 }
-.item .name { font-weight: 500; flex-shrink: 0; }
+.item .name {
+  font-weight: 500;
+  flex-shrink: 0;
+}
 .item .path {
-  flex: 1; min-width: 0;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font-size: 11px; font-family: monospace;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-family: monospace;
 }
 .empty {
-  padding: 20px; text-align: center;
-  color: var(--muted); font-size: 12px;
+  padding: 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
 }
 </style>

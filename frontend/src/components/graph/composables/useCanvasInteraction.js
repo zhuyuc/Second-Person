@@ -7,7 +7,9 @@ class SpatialGrid {
     this.cellSize = cellSize
     this.grid = new Map()
   }
-  _key(cx, cy) { return `${cx},${cy}` }
+  _key(cx, cy) {
+    return `${cx},${cy}`
+  }
   _cell(x, y) {
     return [Math.floor(x / this.cellSize), Math.floor(y / this.cellSize)]
   }
@@ -45,7 +47,6 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
     zoomMin = 0.05,
     zoomMax = 8,
     zoomStep = 1.08,
-    lerpFactor = 0.18,
     inertiaDamping = 0.92,
     inertiaMinSpeed = 0.5,
     onNodeHover = null,
@@ -72,12 +73,13 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
   let moved = false
 
   // 惯性
-  let inertiaVx = 0, inertiaVy = 0
+  let inertiaVx = 0,
+    inertiaVy = 0
   let inertiaRaf = 0
   const velocityBuffer = []
 
   // 双指缩放
-  let pointers = new Map()
+  const pointers = new Map()
   let pinchStartDist = 0
   let pinchStartZoom = 1
 
@@ -163,7 +165,10 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
       const pts = [...pointers.values()]
       const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
       if (pinchStartDist > 0) {
-        const newZoom = Math.max(zoomMin, Math.min(zoomMax, pinchStartZoom * (dist / pinchStartDist)))
+        const newZoom = Math.max(
+          zoomMin,
+          Math.min(zoomMax, pinchStartZoom * (dist / pinchStartDist))
+        )
         camera.zoom = newZoom
         targetZoom.value = newZoom
         if (onCameraChange) onCameraChange()
@@ -176,7 +181,10 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
       const world = screenToWorld(e.clientX, e.clientY)
       dragNode.x = world.x + dragOffset.x
       dragNode.y = world.y + dragOffset.y
-      if (dragNode.fx != null) { dragNode.fx = dragNode.x; dragNode.fy = dragNode.y }
+      if (dragNode.fx !== null && dragNode.fx !== undefined) {
+        dragNode.fx = dragNode.x
+        dragNode.fy = dragNode.y
+      }
       if (onNodeDrag) onNodeDrag(dragNode)
     } else if (isPanning) {
       const dx = e.clientX - panStart.x
@@ -203,10 +211,16 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
     pointers.delete(e.pointerId)
     const el = canvasRef.value
     if (el) {
-      try { el.releasePointerCapture(e.pointerId) } catch {}
+      try {
+        el.releasePointerCapture(e.pointerId)
+      } catch {
+        /* 指针已释放时忽略 */
+      }
     }
 
-    if (pointers.size < 2) { pinchStartDist = 0 }
+    if (pointers.size < 2) {
+      pinchStartDist = 0
+    }
 
     if (isDraggingNode) {
       isDraggingNode = false
@@ -217,7 +231,10 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
     }
     if (isPanning) {
       isPanning = false
-      if (!moved && onBgClick) { onBgClick(); return }
+      if (!moved && onBgClick) {
+        onBgClick()
+        return
+      }
       // 启动惯性
       startInertia()
     }
@@ -235,9 +252,9 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
     if (velocityBuffer.length < 2) return
     const last = velocityBuffer[velocityBuffer.length - 1]
     const prev = velocityBuffer[Math.max(0, velocityBuffer.length - 3)]
-    const dt = (last.t - prev.t) || 16
-    inertiaVx = (last.x - prev.x) / dt * 16 / camera.zoom
-    inertiaVy = (last.y - prev.y) / dt * 16 / camera.zoom
+    const dt = last.t - prev.t || 16
+    inertiaVx = (((last.x - prev.x) / dt) * 16) / camera.zoom
+    inertiaVy = (((last.y - prev.y) / dt) * 16) / camera.zoom
     if (Math.hypot(inertiaVx, inertiaVy) < inertiaMinSpeed) return
     function step() {
       camera.x += inertiaVx
@@ -253,8 +270,12 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
   }
 
   function cancelInertia() {
-    if (inertiaRaf) { cancelAnimationFrame(inertiaRaf); inertiaRaf = 0 }
-    inertiaVx = 0; inertiaVy = 0
+    if (inertiaRaf) {
+      cancelAnimationFrame(inertiaRaf)
+      inertiaRaf = 0
+    }
+    inertiaVx = 0
+    inertiaVy = 0
   }
 
   // 双击复位
@@ -271,7 +292,10 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
     if (!nodes.length) return
     const el = canvasRef.value
     if (!el) return
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+    let x0 = Infinity,
+      y0 = Infinity,
+      x1 = -Infinity,
+      y1 = -Infinity
     for (const n of nodes) {
       x0 = Math.min(x0, n.x - (n.r || 12))
       y0 = Math.min(y0, n.y - (n.r || 12))
@@ -279,16 +303,20 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
       y1 = Math.max(y1, n.y + (n.r || 12))
     }
     const pad = 40
-    const cw = el.clientWidth, ch = el.clientHeight
-    const contentW = (x1 - x0) + pad * 2
-    const contentH = (y1 - y0) + pad * 2
+    const cw = el.clientWidth,
+      ch = el.clientHeight
+    const contentW = x1 - x0 + pad * 2
+    const contentH = y1 - y0 + pad * 2
     const zoom = Math.max(0.1, Math.min(2, Math.min(cw / contentW, ch / contentH)))
-    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2
+    const cx = (x0 + x1) / 2,
+      cy = (y0 + y1) / 2
 
     if (animate) {
       animateTo(-cx, -cy, zoom)
     } else {
-      camera.x = -cx; camera.y = -cy; camera.zoom = zoom
+      camera.x = -cx
+      camera.y = -cy
+      camera.zoom = zoom
       targetZoom.value = zoom
     }
   }
@@ -301,7 +329,9 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
   let animRaf = 0
   function animateTo(tx, ty, tz, duration = 400) {
     if (animRaf) cancelAnimationFrame(animRaf)
-    const sx = camera.x, sy = camera.y, sz = camera.zoom
+    const sx = camera.x,
+      sy = camera.y,
+      sz = camera.zoom
     const start = performance.now()
     function step(now) {
       let t = Math.min(1, (now - start) / duration)
@@ -345,9 +375,14 @@ export function useCanvasInteraction(canvasRef, opts = {}) {
   }
 
   return {
-    camera, hoveredNode,
-    rebuildGrid, screenToWorld, hitTest,
-    fitAll, flyTo,
-    bindEvents, unbindEvents,
+    camera,
+    hoveredNode,
+    rebuildGrid,
+    screenToWorld,
+    hitTest,
+    fitAll,
+    flyTo,
+    bindEvents,
+    unbindEvents,
   }
 }

@@ -5,8 +5,13 @@ import { ref } from 'vue'
 // ---- QuadTree (Barnes-Hut) ----
 class QTNode {
   constructor(x, y, w, h) {
-    this.x = x; this.y = y; this.w = w; this.h = h
-    this.cx = 0; this.cy = 0; this.mass = 0
+    this.x = x
+    this.y = y
+    this.w = w
+    this.h = h
+    this.cx = 0
+    this.cy = 0
+    this.mass = 0
     this.body = null
     this.children = null // [NW, NE, SW, SE]
   }
@@ -14,7 +19,8 @@ class QTNode {
     return px >= this.x && px < this.x + this.w && py >= this.y && py < this.y + this.h
   }
   subdivide() {
-    const hw = this.w / 2, hh = this.h / 2
+    const hw = this.w / 2,
+      hh = this.h / 2
     this.children = [
       new QTNode(this.x, this.y, hw, hh),
       new QTNode(this.x + hw, this.y, hw, hh),
@@ -25,14 +31,17 @@ class QTNode {
   insert(node) {
     if (!this.contains(node.x, node.y)) return
     if (this.mass === 0 && !this.children) {
-      this.body = node; this.mass = 1
-      this.cx = node.x; this.cy = node.y
+      this.body = node
+      this.mass = 1
+      this.cx = node.x
+      this.cy = node.y
       return
     }
     if (!this.children) {
       this.subdivide()
       if (this.body) {
-        const b = this.body; this.body = null
+        const b = this.body
+        this.body = null
         for (const c of this.children) c.insert(b)
       }
     }
@@ -45,13 +54,23 @@ class QTNode {
 
 function buildQuadTree(nodes) {
   if (!nodes.length) return null
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  let x0 = Infinity,
+    y0 = Infinity,
+    x1 = -Infinity,
+    y1 = -Infinity
   for (const n of nodes) {
-    x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y)
-    x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y)
+    x0 = Math.min(x0, n.x)
+    y0 = Math.min(y0, n.y)
+    x1 = Math.max(x1, n.x)
+    y1 = Math.max(y1, n.y)
   }
   const pad = 50
-  const root = new QTNode(x0 - pad, y0 - pad, Math.max(1, x1 - x0 + pad * 2), Math.max(1, y1 - y0 + pad * 2))
+  const root = new QTNode(
+    x0 - pad,
+    y0 - pad,
+    Math.max(1, x1 - x0 + pad * 2),
+    Math.max(1, y1 - y0 + pad * 2)
+  )
   for (const n of nodes) root.insert(n)
   return root
 }
@@ -59,7 +78,8 @@ function buildQuadTree(nodes) {
 // Barnes-Hut 斥力遍历
 function repulsiveForce(node, qtNode, theta, repulse) {
   if (!qtNode || qtNode.mass === 0) return { fx: 0, fy: 0 }
-  const dx = node.x - qtNode.cx, dy = node.y - qtNode.cy
+  const dx = node.x - qtNode.cx,
+    dy = node.y - qtNode.cy
   const distSq = dx * dx + dy * dy + 1
   if (!qtNode.children && qtNode.mass === 1) {
     if (qtNode.body === node) return { fx: 0, fy: 0 }
@@ -69,15 +89,17 @@ function repulsiveForce(node, qtNode, theta, repulse) {
   }
   const s = qtNode.w
   if ((s * s) / distSq < theta * theta) {
-    const f = repulse * qtNode.mass / distSq
+    const f = (repulse * qtNode.mass) / distSq
     const dist = Math.sqrt(distSq)
     return { fx: (dx / dist) * f, fy: (dy / dist) * f }
   }
   if (qtNode.children) {
-    let fx = 0, fy = 0
+    let fx = 0,
+      fy = 0
     for (const c of qtNode.children) {
       const r = repulsiveForce(node, c, theta, repulse)
-      fx += r.fx; fy += r.fy
+      fx += r.fx
+      fy += r.fy
     }
     return { fx, fy }
   }
@@ -119,14 +141,22 @@ export function useForceSimulation(nodesRef, edgesRef, opts = {}) {
   }
 
   function tick() {
-    if (alpha.value < 0.001) { running.value = false; return false }
+    if (alpha.value < 0.001) {
+      running.value = false
+      return false
+    }
     const nodes = nodesRef.value
     if (!nodes.length) return false
 
     // 中心
-    let sumX = 0, sumY = 0
-    for (const n of nodes) { sumX += n.x; sumY += n.y }
-    const centerX = sumX / nodes.length, centerY = sumY / nodes.length
+    let sumX = 0,
+      sumY = 0
+    for (const n of nodes) {
+      sumX += n.x
+      sumY += n.y
+    }
+    const centerX = sumX / nodes.length,
+      centerY = sumY / nodes.length
 
     // 构建四叉树
     const qt = buildQuadTree(nodes)
@@ -136,13 +166,19 @@ export function useForceSimulation(nodesRef, edgesRef, opts = {}) {
     for (const n of nodes) nodeMap.set(n.entity_id, n)
 
     for (const n of nodes) {
-      if (n.fx != null) { n.x = n.fx; n.y = n.fy; continue }
+      if (n.fx !== null && n.fx !== undefined) {
+        n.x = n.fx
+        n.y = n.fy
+        continue
+      }
 
-      let fx = 0, fy = 0
+      let fx = 0,
+        fy = 0
 
       // Barnes-Hut 斥力
       const rep = repulsiveForce(n, qt, cfg.theta, cfg.repulse)
-      fx += rep.fx; fy += rep.fy
+      fx += rep.fx
+      fy += rep.fy
 
       // 弹簧力
       const adj = adjMap.get(n.entity_id)
@@ -151,7 +187,8 @@ export function useForceSimulation(nodesRef, edgesRef, opts = {}) {
           const otherId = e.source === n.entity_id ? e.target : e.source
           const other = nodeMap.get(otherId)
           if (!other) continue
-          const dx = other.x - n.x, dy = other.y - n.y
+          const dx = other.x - n.x,
+            dy = other.y - n.y
           const dist = Math.sqrt(dx * dx + dy * dy) || 1
           const displacement = dist - cfg.springLen
           const force = cfg.springK * displacement * (e.weight || 1)
@@ -180,7 +217,7 @@ export function useForceSimulation(nodesRef, edgesRef, opts = {}) {
       n.y += vel.vy
     }
 
-    alpha.value *= (1 - cfg.alphaDecay)
+    alpha.value *= 1 - cfg.alphaDecay
     return true
   }
 
@@ -213,28 +250,46 @@ export function useForceSimulation(nodesRef, edgesRef, opts = {}) {
 
   // 固定/释放节点
   function fixNode(id, x, y) {
-    const n = nodesRef.value.find(n => n.entity_id === id)
-    if (n) { n.fx = x; n.fy = y; n.x = x; n.y = y }
+    const n = nodesRef.value.find((n) => n.entity_id === id)
+    if (n) {
+      n.fx = x
+      n.fy = y
+      n.x = x
+      n.y = y
+    }
   }
   function releaseNode(id) {
-    const n = nodesRef.value.find(n => n.entity_id === id)
-    if (n) { delete n.fx; delete n.fy }
+    const n = nodesRef.value.find((n) => n.entity_id === id)
+    if (n) {
+      delete n.fx
+      delete n.fy
+    }
     const vel = velocities.get(id)
-    if (vel) { vel.vx = 0; vel.vy = 0 }
+    if (vel) {
+      vel.vx = 0
+      vel.vy = 0
+    }
   }
 
   function onDataChange() {
     rebuildAdj()
     // 清理已不存在节点的速度缓存
-    const ids = new Set(nodesRef.value.map(n => n.entity_id))
+    const ids = new Set(nodesRef.value.map((n) => n.entity_id))
     for (const k of velocities.keys()) {
       if (!ids.has(k)) velocities.delete(k)
     }
   }
 
   return {
-    alpha, running,
-    tick, coldStart, reheat, expand, freeze,
-    fixNode, releaseNode, onDataChange,
+    alpha,
+    running,
+    tick,
+    coldStart,
+    reheat,
+    expand,
+    freeze,
+    fixNode,
+    releaseNode,
+    onDataChange,
   }
 }

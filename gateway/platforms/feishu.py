@@ -19,6 +19,7 @@ import threading
 import httpx
 
 from .base import (BasePlatformAdapter, MAX_IMAGES_PER_MSG, MAX_MEDIA_MB)
+from .media_parser import split_media_marker
 
 # 顶层预导入 SDK（进程启动阶段完成）：大包首次导入是 CPU 密集操作，
 # 若留在 ws 线程运行期执行会长时间占用 GIL，饿死主事件循环（实测阻塞 21s+）
@@ -280,13 +281,7 @@ class FeishuAdapter(BasePlatformAdapter):
             return {"code": -1, "msg": f"HTTP {r.status_code}"}
 
     async def send_message(self, chat_id: str, text: str) -> None:
-        # 提取 MEDIA: 附件标记 → 上传飞书文件
-        media_path = None
-        if "MEDIA:" in text:
-            lines = text.splitlines()
-            text = "\n".join(l for l in lines if not l.startswith("MEDIA:"))
-            media_path = next((l[6:]
-                              for l in lines if l.startswith("MEDIA:")), None)
+        text, media_path = split_media_marker(text)
         if not self._token:
             await self._refresh_token()
         async with httpx.AsyncClient(timeout=30) as c:
@@ -425,7 +420,7 @@ class FeishuAdapter(BasePlatformAdapter):
             reply = "".join(content)
             if len(reply) > self.im_max_chars and self.data_dir:
                 from pathlib import Path
-                from memory.naming import im_attachment_name
+                from infrastructure.naming import im_attachment_name
                 from infrastructure.observability import get_trace_id
                 fname = im_attachment_name(get_trace_id() or "im")
                 fpath = Path(self.data_dir) / "temp" / "attachments" / fname

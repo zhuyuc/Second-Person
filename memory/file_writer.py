@@ -25,7 +25,7 @@ from typing import Any, Callable
 from infrastructure.event_bus import (EVT_MEMORY_CREATED, EVT_MEMORY_UPDATED,
                                       EVT_PROFILE_REBUILT, EVT_SOUL_STYLE_UPDATED)
 
-from .md_file import MemoryDoc, parse_memory_md, serialize_memory_md
+from .md_file import MemoryDoc, dump_frontmatter_doc, parse_memory_md, serialize_memory_md
 from .naming import memory_filename, normalize_domain
 from infrastructure.timeutil import now_cst
 
@@ -34,7 +34,8 @@ logger = logging.getLogger("second_person.file_writer")
 PERSISTENT_TYPES = {"memory", "profile",
                     "soul_style", "skill", "response_strategy"}
 MEMORY_TYPES = {"memory", "profile", "soul_style",
-                "context_entry", "skill", "index", "response_strategy"}
+                "context_entry", "skill", "index", "response_strategy",
+                "conflict", "session_summary", "handoff_summary"}
 QUEUE_MAX = 10000
 MAX_RETRY = 3
 
@@ -247,6 +248,9 @@ class FileWriter:
             "skill": self._h_skill,
             "index": self._h_index,
             "response_strategy": self._h_response_strategy,
+            "conflict": self._h_conflict,
+            "session_summary": self._h_session_summary,
+            "handoff_summary": self._h_handoff_summary,
         }[req.write_type]
         if req.batch:
             for item in req.payload.get("items", []):
@@ -646,6 +650,49 @@ class FileWriter:
         if self.bus:
             self.bus.publish_nowait(EVT_SOUL_STYLE_UPDATED, {
                                     "section": p.get("section")})
+
+    # ---- conflict 处理器（矛盾文件 md） -----------------------------------
+    def _h_conflict(self, p: dict[str, Any]) -> None:
+        conflict_id = p["conflict_id"]
+        path = self.data_dir / "memories" / "_conflicts" / f"{conflict_id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._mark_internal(path)
+        path.write_text(
+            dump_frontmatter_doc(p["frontmatter"], p["body"]), encoding="utf-8")
+
+    # ---- session_summary 处理器（会话压缩摘要 md） -------------------------
+    def _h_session_summary(self, p: dict[str, Any]) -> None:
+        from memory.md_file import split_frontmatter
+
+        sid = p["session_id"]
+        rel = f"sessions/{sid}.md"
+        path = self.data_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._mark_internal(path)
+        op = p.get("op", "save")
+        if op == "save":
+            path.write_text(
+                dump_frontmatter_doc(p["frontmatter"], p["summary_body"]),
+                encoding="utf-8")
+            self.db.execute(
+                "UPDATE sessions SET compressed_summary_path=?, "
+                "last_compressed_message_id=? WHERE session_id=?",
+                (rel, p["last_msg_id"], sid))
+        elif op == "mark_failed":
+            if path.exists():
+                fm, body = split_frontmatter(path.read_text(encoding="utf-8"))
+            else:
+                fm, body = {"session_id": sid, "compressed": False}, ""
+            fm["compression_failed"] = True
+            path.write_text(dump_frontmatter_doc(fm, body), encoding="utf-8")
+
+    def _h_handoff_summary(self, p: dict[str, Any]) -> None:
+        path = self.data_dir / p["rel_path"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._mark_internal(path)
+        path.write_text(
+            dump_frontmatter_doc(p["frontmatter"], p.get("body", "")),
+            encoding="utf-8")
 
     # ---- context_entry 处理器 --------------------------------------------
     def _h_context_entry(self, p: dict[str, Any]) -> None:

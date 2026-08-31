@@ -107,8 +107,10 @@ def test_generated_title_replaces_new_chat_placeholder():
     sessions = _Sessions()
     container = SimpleNamespace(
         providers=_Providers(), llm=_Llm(), sessions=sessions)
+    from app.services.chat_service import ChatService
 
-    asyncio.run(chat._gen_title(container, "sess_title_test", "用户的原始提问"))
+    asyncio.run(ChatService(container).generate_title(
+        "sess_title_test", "用户的原始提问"))
 
     assert sessions.titles == [("sess_title_test", "模型生成标题")]
 
@@ -165,7 +167,7 @@ def test_active_buffer_is_not_cancelled_by_fixed_wall_clock_limit(monkeypatch: p
     chat._BUFFERS["active-long-task"] = {
         "done": False, "started": 0, "task": _Task(), "events": [], "size": 0,
     }
-    chat._gc_buffers()
+    asyncio.run(chat._gc_buffers())
     assert not cancelled
     assert "active-long-task" in chat._BUFFERS
     chat._BUFFERS.pop("active-long-task", None)

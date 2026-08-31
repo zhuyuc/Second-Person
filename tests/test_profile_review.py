@@ -468,8 +468,8 @@ class TestContainerIntegration:
 
     def test_feedback_fn_uses_scanner_not_ctx_entry(self):
         """确认 soul_feedback_fn 不再调用 ctx_entry.add_pending。"""
-        container_path = Path(__file__).parent.parent / "app" / "container.py"
-        content = container_path.read_text(encoding="utf-8")
+        wiring_path = Path(__file__).parent.parent / "app" / "container" / "wiring.py"
+        content = wiring_path.read_text(encoding="utf-8")
 
         # soul_feedback_fn 内部不应再调用 ctx_entry.add_pending
         # 而是调用 conflict_scanner 的方法

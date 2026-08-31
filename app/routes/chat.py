@@ -23,7 +23,6 @@ from app.contracts import (
     parse_chat_send,
     read_json_object,
 )
-from infrastructure.prompt_loader import PROMPTS
 from infrastructure.session_metrics import session_metrics
 from infrastructure.sse_contract import SSEContractError, validate_sse_event
 
@@ -55,15 +54,26 @@ class SessionPinRequest(BaseModel):
 
 
 def _load_images_as_data_uri(data_dir, filenames: list[str]) -> list[str]:
-    """将已持久化的图片文件名加载为 dataURI，用于编辑消息时继承原图。"""
+    """将已持久化的图片文件名加载为 dataURI，用于编辑消息时继承原图。
+
+    安全：filenames 来自 DB JSON，可能被污染。这里校验每个 fname 必须是
+    纯文件名（无路径分隔、无 ..），且 resolve 后仍在 img_dir 内，避免越界读。
+    本函数同步读盘 + base64，调用方应放 asyncio.to_thread 避免阻塞事件循环。
+    """
     import base64
     from pathlib import Path
     out = []
-    img_dir = Path(data_dir) / "chat_images"
+    img_dir = (Path(data_dir) / "chat_images").resolve()
     ext_mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                 ".webp": "image/webp", ".gif": "image/gif", ".bmp": "image/bmp"}
     for fname in filenames:
-        p = img_dir / fname
+        if not fname or "/" in fname or "\\" in fname or ".." in fname:
+            continue
+        p = (img_dir / fname).resolve()
+        try:
+            p.relative_to(img_dir)
+        except ValueError:
+            continue
         if not p.exists():
             continue
         mime = ext_mime.get(p.suffix.lower(), "image/png")
@@ -74,6 +84,12 @@ def _load_images_as_data_uri(data_dir, filenames: list[str]) -> list[str]:
 
 # client_request_id -> {events, dropped, done, started, finished, size, sid, task}
 _BUFFERS: dict[str, dict] = {}
+# 保护 _BUFFERS dict 本身的结构变更（增删/遍历/命中判断），不覆盖 buf 内部字段。
+# 只包裹**纯 dict 操作**的短临界区，绝不在持锁时 await 长耗时协程（如 _follow 的 nudge
+# 等待），因此不会造成生产者/读者互相阻塞或死锁。
+# 单进程 asyncio.Lock 已足够：全部访问点都在同一事件循环内。
+_BUFFERS_LOCK: asyncio.Lock | None = None
+_BUFFERS_LOOP: asyncio.AbstractEventLoop | None = None
 BUFFER_TTL = 300        # 生成完成后缓冲保留 5 分钟供断线重连
 BUFFER_MAX = 1024 * 1024
 
@@ -86,20 +102,36 @@ def _c():
 _BUFFERS_MAX_COUNT = 200
 
 
-def _gc_buffers():
+def _buffers_lock() -> asyncio.Lock:
+    """惰性创建锁；若当前 event loop 与上次不同（测试常见：多 asyncio.run），
+    重建以避免 asyncio.Lock 绑定失效 loop 时的运行时错误。"""
+    global _BUFFERS_LOCK, _BUFFERS_LOOP
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if _BUFFERS_LOCK is None or _BUFFERS_LOOP is not loop:
+        _BUFFERS_LOCK = asyncio.Lock()
+        _BUFFERS_LOOP = loop
+    return _BUFFERS_LOCK
+
+
+async def _gc_buffers():
+    """按 TTL 与总量上限回收已完成的缓冲项。整段持锁 —— 内部只做纯 dict 操作。"""
     now = time.time()
-    for k, v in list(_BUFFERS.items()):
-        if v["done"]:
-            if now - (v.get("finished") or v["started"]) > BUFFER_TTL:
+    async with _buffers_lock():
+        for k, v in list(_BUFFERS.items()):
+            if v["done"]:
+                if now - (v.get("finished") or v["started"]) > BUFFER_TTL:
+                    _BUFFERS.pop(k, None)
+            # 活跃请求不按固定时长取消：深度/长文的完成时间由任务合同决定。
+            # 模型、工具和用户主动停止仍各自有超时/取消语义。
+        if len(_BUFFERS) > _BUFFERS_MAX_COUNT:
+            completed = sorted(
+                ((k, v) for k, v in _BUFFERS.items() if v["done"]),
+                key=lambda kv: kv[1]["started"])
+            for k, _ in completed[:max(0, len(_BUFFERS) - _BUFFERS_MAX_COUNT)]:
                 _BUFFERS.pop(k, None)
-        # 活跃请求不按固定时长取消：深度/长文的完成时间由任务合同决定。
-        # 模型、工具和用户主动停止仍各自有超时/取消语义。
-    if len(_BUFFERS) > _BUFFERS_MAX_COUNT:
-        completed = sorted(
-            ((k, v) for k, v in _BUFFERS.items() if v["done"]),
-            key=lambda kv: kv[1]["started"])
-        for k, _ in completed[:max(0, len(_BUFFERS) - _BUFFERS_MAX_COUNT)]:
-            _BUFFERS.pop(k, None)
 
 
 async def _follow(buf: dict):
@@ -151,10 +183,15 @@ async def chat_send(request: Request):
     reasoning_effort = payload.reasoning_effort
     c = _c()
 
-    _gc_buffers()
-    # 断线重连/刷新重挂：已有缓冲则从头回放并续跟（生成在后台继续，不重复计费）
-    if crid and crid in _BUFFERS:
-        return EventSourceResponse(_follow(_BUFFERS[crid]), ping=5)
+    await _gc_buffers()
+    # 断线重连/刷新重挂：已有缓冲则从头回放并续跟（生成在后台继续，不重复计费）。
+    # 只在临界区做 dict 查询，拿到 buf 引用后立即释放锁再返回 SSE 流 —— 不能持锁
+    # 进入 _follow，否则读者阻塞在 nudge 等待会锁死所有其他 buffer 操作。
+    if crid:
+        async with _buffers_lock():
+            existing = _BUFFERS.get(crid)
+        if existing is not None:
+            return EventSourceResponse(_follow(existing), ping=5)
 
     if not sid:
         # M5.1：project_id 从请求带入，实现「新建项目会话」延迟创建
@@ -171,7 +208,8 @@ async def chat_send(request: Request):
            "finished": None, "size": 0, "sid": sid, "task": None,
            "nudge": asyncio.Event(), "reasoning_effort": reasoning_effort}
     if crid:
-        _BUFFERS[crid] = buf
+        async with _buffers_lock():
+            _BUFFERS[crid] = buf
 
     # 编辑消息分支化：创建新版本节点，旧版本停用但保留
     edit_parent_id = None
@@ -192,7 +230,8 @@ async def chat_send(request: Request):
                     "ORDER BY id LIMIT 1",
                     (edit_version_group_id,))
                 if img_row and img_row["images"]:
-                    images = _load_images_as_data_uri(
+                    images = await asyncio.to_thread(
+                        _load_images_as_data_uri,
                         c.sessions.data_dir, json.loads(img_row["images"]))
             # 编辑时继承文档附件上下文（【附件：...】前缀）
             att_content = orig["content"] or ""
@@ -249,7 +288,9 @@ async def chat_send(request: Request):
         "SELECT message_count FROM sessions WHERE session_id=?", (sid,))
     is_first = row and row["message_count"] == 0
     if is_first:
-        asyncio.create_task(_gen_title(c, sid, message))
+        from infrastructure.background_tasks import track_task
+        track_task(c.chat_svc.generate_title(sid, message),
+                   name=f"generate_title:{sid}")
 
     # P1-D：用户否认信号 → 即时抑制该会话最近入池的候选，避免下轮回顾复原
     try:
@@ -382,82 +423,23 @@ async def version_siblings(version_group_id: int):
 async def chat_cancel(body: ChatCancelRequest):
     """用户手动停止生成：取消后台生成任务（已产出部分由中断补救落库）。
     除此接口外，任何连接层动作（刷新/断网/关页）都不中断生成。"""
-    buf = _BUFFERS.get(body.client_request_id or "")
-    task = buf.get("task") if buf else None
+    async with _buffers_lock():
+        buf = _BUFFERS.get(body.client_request_id or "")
+        task = buf.get("task") if buf else None
     if task and not task.done():
         task.cancel()
         return {"code": 200, "data": {"cancelled": True}}
     return {"code": 200, "data": {"cancelled": False}}
 
 
-async def _generate_handoff(c, from_sid: str, to_sid: str) -> None:
-    """后台异步生成 handoff 摘要（会话上下文管理方案 v2）。
-
-    不阻塞路由返回，失败静默降级为 status=failed 的占位文件。
-    """
-    from memory.handoff_summary import HandoffSummaryGenerator
-    from langfuse.integration import get_tracer
-    tracer = get_tracer()
-    trace = tracer.trace_start(
-        "handoff.summary", session_id=to_sid,
-        input={"from_session_id": from_sid, "to_session_id": to_sid})
-    try:
-        gen = HandoffSummaryGenerator(
-            llm=c.llm, db=c.db, data_dir=c.data_dir,
-            config=c.config, bus=c.bus, tracer=tracer)
-        await gen.generate(from_sid, to_sid)
-        trace.end(output={"status": "completed"})
-    except Exception as e:  # noqa: BLE001
-        trace.end(level="ERROR", status_message=str(e))
-        logging.getLogger("second_person.chat").warning(
-            "handoff 摘要生成失败 from=%s to=%s: %s", from_sid, to_sid, e)
-        c.db.execute(
-            "UPDATE sessions SET handoff_summary_path='__failed__' "
-            "WHERE session_id=?", (to_sid,))
-
-
-async def _gen_title(c, sid: str, message: str):
-    """首条消息异步生成标题。
-
-    会话创建时已持久化为“新对话”。只有模型返回有效标题时才回填，
-    因此用户的原始输入不会短暂地成为侧边栏标题。标题生成不纳入
-    Langfuse 可观测性上报。
-    """
-    try:
-        snap = c.providers.snapshot_for("agent")
-        q = message.split(
-            "\n---\n")[-1].strip() if "\n---\n" in message else message
-        q = q[:500]
-        if snap:
-            async def _call_llm():
-                try:
-                    from infrastructure.json_repair import repair_json
-                    resp = await c.llm.chat(snap, [
-                        {"role": "system", "content": PROMPTS.load_raw(
-                            "app/prompts/title_gen")},
-                        {"role": "user", "content": q}], source="title_gen",
-                        session_id=sid, json_mode=True)
-                    raw = resp["content"].strip()
-                    try:
-                        obj = repair_json(raw)
-                        return (obj.get("title") or "")[:15]
-                    except (ValueError, AttributeError):
-                        return raw[:15]
-                except Exception:  # noqa: BLE001
-                    return None
-
-            result = await _call_llm()
-            if result:
-                c.sessions.set_auto_title(sid, result)
-    except Exception:  # noqa: BLE001
-        logger = logging.getLogger("second_person.chat")
-        logger.warning("会话标题生成失败 session=%s", sid, exc_info=True)
-
-
 @router.get("/chat/session/{session_id}/active-request")
 async def active_request(session_id: str):
-    # 仅返回本会话的进行中请求，避免多会话并发时跨会话误命中
-    for crid, buf in _BUFFERS.items():
+    # 仅返回本会话的进行中请求，避免多会话并发时跨会话误命中。
+    # 持锁快照后再遍历，避免 chat_send 并发写入 _BUFFERS 触发
+    # "dictionary changed size during iteration"。
+    async with _buffers_lock():
+        snapshot = list(_BUFFERS.items())
+    for crid, buf in snapshot:
         if not buf["done"] and buf.get("sid") == session_id:
             return {"code": 200, "data": {"client_request_id": crid,
                                           "status": "generating"}}
@@ -511,65 +493,12 @@ async def feedback(body: ChatFeedbackRequest):
         "message_id": mid, "feedback": fb, "reason": reason,
         "session_id": msg_row["session_id"] if msg_row else None})
     try:
-        c.sessions.set_feedback(mid, fb)
-        if fb == 2:
-            # 无 reason 的点踩同样记录显式负反馈信号（画像/风格学习依赖完整采集）
-            c.signals.set_explicit_reaction(mid, 2)
-            if reason:
-                await _handle_downvote(c, mid, reason)
-        elif fb == 1:
-            c.signals.set_explicit_reaction(mid, 1)
-            await _handle_upvote(c, mid)
+        await c.chat_svc.handle_feedback(mid, fb, reason)
         tr.end()
     except Exception:
         tr.end(level="ERROR")
         raise
     return {"code": 200, "data": {}}
-
-
-async def _handle_upvote(c, message_id: int):
-    """点赞：对该回复引用的每条记忆执行 confidence 升级（medium→strong）。"""
-    row = c.db.query_one(
-        "SELECT session_id, citations FROM conversations WHERE id=?", (message_id,))
-    cites = json.loads(row["citations"]) if row and row["citations"] else []
-    for cit in cites:
-        if cit.get("id"):
-            await c.lifecycle.upvote_upgrade(cit["id"])
-
-    # v2 情绪触发：点赞 → AI pleased
-    if hasattr(c, "mood_trigger") and c.mood_trigger and row:
-        c.mood_trigger.record(
-            session_id=row["session_id"], message_id=message_id,
-            scope="ai", source_type="evaluation", event_key="user_thumbs_up",
-            attribution="other", mood_hint="pleased", intensity_hint=0.4,
-            note="用户点赞")
-
-
-async def _handle_downvote(c, message_id: int, reason: str):
-    row = c.db.query_one(
-        "SELECT session_id, content, citations FROM conversations WHERE id=?", (message_id,))
-    cites = json.loads(row["citations"]) if row and row["citations"] else []
-    if reason == "memory_stale":
-        for cit in cites:
-            await c.lifecycle.downvote_stale(cit.get("id"))
-    elif reason == "tone_wrong":
-        # 改走画像审核队列，不再通过 ctx_entry.add_pending 直接注入对话
-        if hasattr(c, "conflict_scanner") and c.conflict_scanner:
-            context_snippet = (row["content"] or "")[:300] if row else ""
-            c.conflict_scanner.enqueue_tone_review(
-                message_id,
-                row["session_id"] if row else "",
-                context_snippet,
-            )
-    # output_format_wrong 已在 signal 负反馈记录
-
-    # v2 情绪触发：点踩 → AI concerned
-    if hasattr(c, "mood_trigger") and c.mood_trigger and row:
-        c.mood_trigger.record(
-            session_id=row["session_id"], message_id=message_id,
-            scope="ai", source_type="evaluation", event_key="user_thumbs_down",
-            mood_hint="concerned", intensity_hint=0.4,
-            note=f"用户点踩：{reason or '无原因'}")
 
 
 @router.post("/chat/session/rename")
@@ -641,7 +570,9 @@ async def session_handoff(body: SessionHandoffRequest):
         " WHERE session_id=?", (now, new_sid, from_sid))
     # 异步生成摘要
     if c.config.get("handoff_summary_enabled", True):
-        asyncio.create_task(_generate_handoff(c, from_sid, new_sid))
+        from infrastructure.background_tasks import track_task
+        track_task(c.chat_svc.generate_handoff(from_sid, new_sid),
+                   name=f"generate_handoff:{from_sid}")
     return {"code": 200, "data": {
         "new_session_id": new_sid,
         "from_session_id": from_sid,
@@ -687,8 +618,7 @@ async def upload_attachment(file: UploadFile = File(...)):
     content = await file.read()
     if len(content) > ATTACH_MAX_MB * 1024 * 1024:
         tr.end(level="ERROR", output={"ok": False, "error": "超过 20MB 上限"})
-        return {"code": 400, "message": f"文件超过 {ATTACH_MAX_MB} MB 上限",
-                "trace_id": None, "details": None}
+        raise HTTPException(status_code=400, detail=f"文件超过 {ATTACH_MAX_MB} MB 上限")
     suffix = Path(file.filename or "file").suffix
     tmp = Path(tempfile.gettempdir()) / \
         f"sp_attach_{os.getpid()}_{int(time.time()*1000)}{suffix}"
@@ -722,5 +652,8 @@ async def upload_attachment(file: UploadFile = File(...)):
 
 @router.delete("/chat/session/{session_id}")
 async def delete(session_id: str):
-    _c().sessions.delete_session(session_id)
+    c = _c()
+    c.sessions.delete_session(session_id)
+    # 清理 AgentCore 的会话级 lock/queue 计数，避免长跑进程内存泄漏
+    c.core.cleanup_session(session_id)
     return {"code": 200, "data": {}}

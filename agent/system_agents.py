@@ -1,7 +1,7 @@
 """
 系统 Agent（产品文档 §系统 Agent / 开发文档 §6.9）。
 
-5 个系统 Agent（压缩 Agent 见 compression.py）：
+5 个系统 Agent（会话压缩见 compaction_engine.py）：
 - 回顾 Agent（reviewer）：每 3 天读对话+文档 → Distiller 提炼
 - Lint Agent（lint-worker）：六项检查 + lifecycle 流转 + 第七项技能提炼归档 → lint.completed
 - 画像 Agent（profile-builder）：lint.completed 触发重建 user_profile.md；引导模式生成初始 SOUL

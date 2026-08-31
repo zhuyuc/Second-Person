@@ -68,12 +68,17 @@ function bindWrapper(wrapper) {
     listeners: [],
   }
 
-  const onWheel = event => {
+  const onWheel = (event) => {
     event.preventDefault()
     const rect = viewport.getBoundingClientRect()
-    zoomAt(state, event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP)
+    zoomAt(
+      state,
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      event.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP
+    )
   }
-  const onPointerDown = event => {
+  const onPointerDown = (event) => {
     if (event.button !== 0) return
     event.preventDefault()
     state.dragging = true
@@ -83,7 +88,7 @@ function bindWrapper(wrapper) {
     viewport.classList.add('mermaid-panning')
     viewport.setPointerCapture?.(event.pointerId)
   }
-  const onPointerMove = event => {
+  const onPointerMove = (event) => {
     if (!state.dragging || event.pointerId !== state.pointerId) return
     state.x += event.clientX - state.lastX
     state.y += event.clientY - state.lastY
@@ -91,14 +96,14 @@ function bindWrapper(wrapper) {
     state.lastY = event.clientY
     applyTransform(state)
   }
-  const stopDragging = event => {
+  const stopDragging = (event) => {
     if (!state.dragging || event.pointerId !== state.pointerId) return
     state.dragging = false
     state.pointerId = null
     viewport.classList.remove('mermaid-panning')
     viewport.releasePointerCapture?.(event.pointerId)
   }
-  const onDoubleClick = event => {
+  const onDoubleClick = (event) => {
     event.preventDefault()
     reset(state)
   }

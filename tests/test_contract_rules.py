@@ -109,6 +109,16 @@ def test_routes_use_the_shared_json_object_reader():
         assert "read_json_object" in source, filename
 
 
+def test_infrastructure_does_not_import_memory_domain():
+    """infrastructure 层不得依赖 memory 业务包。"""
+    infra = ROOT / "infrastructure"
+    for py in infra.rglob("*.py"):
+        if "__pycache__" in py.parts:
+            continue
+        text = py.read_text(encoding="utf-8")
+        assert "from memory." not in text and "import memory" not in text, py.relative_to(ROOT)
+
+
 def test_product_document_does_not_reference_removed_tool_approval():
     product_doc = (ROOT / "docs/SecondPerson-全系统产品方案.md").read_text(encoding="utf-8")
     assert "POST /chat/tool-confirm" not in product_doc

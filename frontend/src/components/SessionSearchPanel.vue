@@ -3,11 +3,10 @@
 // 打开时替换 SessionSidebar 的历史会话区域；关闭由父级控制
 import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { api } from '@/api/client'
 import { useSessions } from '@/stores/sessions'
-import { withQuery } from '@/utils/query'
+import { chatApi } from '@/api/chat'
 import { sanitizeHtml } from '@/utils/sanitize'
-import ChannelIcon from '@/components/ChannelIcon.vue'
+import { formatCompactTime } from '@/utils/format'
 
 const emit = defineEmits(['close'])
 
@@ -18,7 +17,7 @@ const sess = useSessions()
 const q = ref('')
 const scope = ref('all')
 const loading = ref(false)
-const results = ref([])          // [{session_id, title, title_html, hits, ...}]
+const results = ref([]) // [{session_id, title, title_html, hits, ...}]
 const totalSessions = ref(0)
 const hasQueried = ref(false)
 const inputRef = ref(null)
@@ -48,9 +47,7 @@ async function fetchSearch() {
   }
   loading.value = true
   try {
-    const d = await api.get(withQuery('/chat/search', {
-      q: query, scope: scope.value, limit: 50,
-    }))
+    const d = await chatApi.search({ q: query, scope: scope.value, limit: 50 })
     results.value = d?.sessions || []
     totalSessions.value = d?.total_sessions || 0
     hasQueried.value = true
@@ -85,9 +82,11 @@ function onKeyDown(e) {
 function openSession(sid, messageId = null) {
   sess.setCurrent(sid)
   if (route.path !== '/chat') router.push('/chat')
-  window.dispatchEvent(new CustomEvent('sp-open-session', {
-    detail: messageId ? { sid, messageId } : sid,
-  }))
+  window.dispatchEvent(
+    new CustomEvent('sp-open-session', {
+      detail: messageId ? { sid, messageId } : sid,
+    })
+  )
 }
 
 function renderHtml(html) {
@@ -96,17 +95,6 @@ function renderHtml(html) {
 
 function roleLabel(role) {
   return role === 'user' ? '我' : role === 'assistant' ? 'AI' : role
-}
-
-function fmtTime(iso) {
-  if (!iso) return ''
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return ''
-  const now = new Date()
-  const sameDay = d.toDateString() === now.toDateString()
-  const pad = (n) => String(n).padStart(2, '0')
-  if (sameDay) return `${pad(d.getHours())}:${pad(d.getMinutes())}`
-  return `${d.getMonth() + 1}/${d.getDate()}`
 }
 
 onMounted(() => {
@@ -120,21 +108,34 @@ defineExpose({ focus: () => inputRef.value?.focus() })
 <template>
   <div class="sess-search" @keydown="onKeyDown">
     <div class="sess-search-hd">
-      <i class="ti ti-arrow-left sess-search-back" title="返回会话列表 (Esc)"
-        @click="$emit('close')"></i>
+      <i
+        class="ti ti-arrow-left sess-search-back"
+        title="返回会话列表 (Esc)"
+        @click="$emit('close')"
+      ></i>
       <span class="sess-search-hd-title">搜索对话</span>
     </div>
     <div class="sess-search-input-wrap">
       <i class="ti ti-search"></i>
-      <input ref="inputRef" v-model="q" class="sess-search-input"
-        placeholder="搜索标题、我的提问、AI 回复…" />
-      <i v-if="q" class="ti ti-x sess-search-clear" title="清空 (Esc)"
-        @click="clearQuery"></i>
+      <input
+        ref="inputRef"
+        v-model="q"
+        class="sess-search-input"
+        placeholder="搜索标题、我的提问、AI 回复…"
+      />
+      <i v-if="q" class="ti ti-x sess-search-clear" title="清空 (Esc)" @click="clearQuery"></i>
     </div>
     <div class="sess-search-scopes">
-      <button v-for="s in SCOPES" :key="s.key" type="button"
-        class="sess-search-chip" :class="{ active: scope === s.key }"
-        @click="scope = s.key">{{ s.label }}</button>
+      <button
+        v-for="s in SCOPES"
+        :key="s.key"
+        type="button"
+        class="sess-search-chip"
+        :class="{ active: scope === s.key }"
+        @click="scope = s.key"
+      >
+        {{ s.label }}
+      </button>
     </div>
 
     <div class="sess-search-body">
@@ -148,27 +149,39 @@ defineExpose({ focus: () => inputRef.value?.focus() })
         没有找到匹配"{{ q.trim() }}"的会话
       </div>
       <div v-else>
-        <div class="sess-search-summary" v-if="totalSessions">
-          {{ totalSessions }} 个会话命中
-        </div>
-        <div v-for="r in results" :key="r.session_id" class="sess-search-card"
-          :class="{ active: r.session_id === sess.currentSid && route.path === '/chat' }">
+        <div v-if="totalSessions" class="sess-search-summary">{{ totalSessions }} 个会话命中</div>
+        <div
+          v-for="r in results"
+          :key="r.session_id"
+          class="sess-search-card"
+          :class="{ active: r.session_id === sess.currentSid && route.path === '/chat' }"
+        >
           <div class="sess-search-card-hd" @click="openSession(r.session_id)">
-            <i v-if="r.pinned || !r.channel" class="ti sess-icon"
-              :class="r.pinned ? 'ti-pin' : 'ti-message'"></i>
+            <i
+              v-if="r.pinned || !r.channel"
+              class="ti sess-icon"
+              :class="r.pinned ? 'ti-pin' : 'ti-message'"
+            ></i>
             <ChannelIcon v-else :platform="r.channel" :size="16" class="sess-icon" />
             <div class="sess-search-title" v-html="renderHtml(r.title_html)"></div>
             <span v-if="r.readonly" class="sess-readonly-badge">已结束</span>
-            <span class="sess-search-count" v-if="r.hit_count">{{ r.hit_count }} 处</span>
+            <span v-if="r.hit_count" class="sess-search-count">{{ r.hit_count }} 处</span>
           </div>
-          <div v-for="h in r.hits" :key="h.message_id" class="sess-search-hit"
-            @click="openSession(r.session_id, h.message_id)">
+          <div
+            v-for="h in r.hits"
+            :key="h.message_id"
+            class="sess-search-hit"
+            @click="openSession(r.session_id, h.message_id)"
+          >
             <span class="sess-search-role" :class="'role-' + h.role">{{ roleLabel(h.role) }}</span>
-            <span class="sess-search-time">{{ fmtTime(h.created_at) }}</span>
+            <span class="sess-search-time">{{ formatCompactTime(h.created_at) }}</span>
             <span class="sess-search-snip" v-html="renderHtml(h.snippet_html)"></span>
           </div>
-          <div v-if="r.hit_count > r.hits.length" class="sess-search-more"
-            @click="openSession(r.session_id)">
+          <div
+            v-if="r.hit_count > r.hits.length"
+            class="sess-search-more"
+            @click="openSession(r.session_id)"
+          >
             还有 {{ r.hit_count - r.hits.length }} 处命中，打开会话查看
           </div>
         </div>

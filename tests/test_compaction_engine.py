@@ -31,10 +31,10 @@ class _FakeSessions:
         self.saved: list[dict] = []
         self.failed: list[str] = []
 
-    def save_summary(self, sid, body, last_msg_id):
+    async def save_summary(self, sid, body, last_msg_id):
         self.saved.append({"sid": sid, "body": body, "last": last_msg_id})
 
-    def mark_compression_failed(self, sid):
+    async def mark_compression_failed(self, sid):
         self.failed.append(sid)
 
 

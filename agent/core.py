@@ -126,8 +126,9 @@ class AgentCore:
 
         async def worker() -> None:
             async with lock:
+                outcome = None
                 try:
-                    await self.turn_runtime.run(
+                    outcome = await self.turn_runtime.run(
                         session_id=session_id, message=message,
                         reasoning_effort=effort, emit=emit,
                         client_request_id=client_request_id, images=images,
@@ -139,6 +140,12 @@ class AgentCore:
                         assistant_parent_id=edit_parent_id if regenerate else None,
                         assistant_version_group_id=edit_version_group_id if regenerate else None,
                         handoff_path=handoff_path)
+                    if outcome:
+                        from infrastructure.background_tasks import track_task
+                        track_task(
+                            self._apply_mood_after_turn(
+                                session_id, message, outcome),
+                            name=f"mood_after_turn:{session_id}")
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("TurnRuntime failed")
                     error_text = str(exc)
@@ -161,8 +168,41 @@ class AgentCore:
                 task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                # 仅捕获 worker 任务异常，不吞掉 - 记日志方便排查（例如 stream 底层协议错误）
+                logger.exception("[core] chat_response worker terminated with exception")
+
+    async def _apply_mood_after_turn(self, session_id: str, user_message: str,
+                                     outcome: dict) -> None:
+        """Turn 结束后异步判定双源情绪并 apply_v2 落库。"""
+        if not self.mood or not self.config.get("mood_enabled", True):
+            return
+        if float(self.config.get("mood_influence_strength", 0.5)) <= 0:
+            return
+        try:
+            trigger_summary = ""
+            msg_id = outcome.get("message_id")
+            if self.mood_trigger and msg_id:
+                trigger_summary = self.mood_trigger.summarize_for_turn(
+                    session_id, int(msg_id))
+            from soul.mood_judge import judge_turn_moods
+            user_res, ai_res = await judge_turn_moods(
+                self.llm, self.providers,
+                user_message=user_message,
+                assistant_content=outcome.get("content") or "",
+                trigger_summary=trigger_summary,
+                session_id=session_id)
+            result = self.mood.apply_v2(user_res=user_res, ai_res=ai_res)
+            if (result.get("user_changed") or result.get("ai_changed")) and self.bus:
+                from infrastructure.event_bus import EVT_MOOD_UPDATED
+                self.bus.publish_nowait(EVT_MOOD_UPDATED, {
+                    "ai_mood": result.get("ai_mood", "neutral"),
+                    "user_mood": result.get("user_mood", "neutral"),
+                })
+        except Exception:  # noqa: BLE001
+            logger.warning("turn 后情绪更新失败", exc_info=True)
 
     async def _runtime_context(self, *, session_id: str, turn_id: str,
                                message: str, onboarding: bool,
@@ -419,6 +459,17 @@ class AgentCore:
 
     def get_turn_events(self, turn_id: str, after_seq: int = 0) -> list[dict]:
         return self.turn_events.events(turn_id, after_seq=after_seq)
+
+    def cleanup_session(self, session_id: str) -> None:
+        """删除会话后清理会话级 lock/queue 计数，避免长跑进程内存泄漏。
+
+        _session_locks / _session_queue 用 defaultdict 按会话增长，删除会话
+        不清理则永久残留。仅在无 running turn 时清理（queue 归零）。
+        """
+        if self._session_queue.get(session_id, 0) <= 0:
+            self._session_queue.pop(session_id, None)
+            self._session_locks.pop(session_id, None)
+            self._low_confirm_asked_sessions.discard(session_id)
 
     def _build_system_prompt(self, onboarding: bool, location: str | None = None,
                              sid: str = "",

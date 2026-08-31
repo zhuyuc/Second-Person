@@ -7,11 +7,14 @@
         "dev": "vite",
         "build": "vite build",
         "preview": "vite preview",
+        "subset-icons": "python scripts/subset-icons.py",
         "test:response-presentation": "node scripts/verify-response-presentation.mjs",
-        "test:inline-mermaid": "node scripts/verify-inline-mermaid-interactions.mjs"
+        "test:inline-mermaid": "node scripts/verify-inline-mermaid-interactions.mjs",
+        "lint": "eslint src --ext .js,.vue --max-warnings 0",
+        "lint:fix": "eslint src --ext .js,.vue --fix",
+        "format": "prettier --write \"src/**/*.{js,css}\""
     },
     "dependencies": {
-        "@tabler/icons-webfont": "^3.6.0",
         "dagre": "^0.8.5",
         "marked": "^12.0.0",
         "mermaid": "^11.16.0",
@@ -20,7 +23,14 @@
         "vue-router": "^4.3.0"
     },
     "devDependencies": {
+        "@eslint/js": "^9.39.5",
+        "@tabler/icons-webfont": "^3.6.0",
         "@vitejs/plugin-vue": "^5.0.0",
+        "eslint": "^9.14.0",
+        "eslint-config-prettier": "^9.1.0",
+        "eslint-plugin-vue": "^9.31.0",
+        "prettier": "^3.5.3",
+        "unplugin-vue-components": "^32.1.0",
         "vite": "^5.2.0"
     }
 }

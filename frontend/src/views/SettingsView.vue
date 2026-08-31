@@ -1,13 +1,12 @@
 <script setup>
 import { ref, onMounted, onActivated, onUnmounted, computed } from 'vue'
-import { api } from '@/api/client'
+import { settingsApi } from '@/api/settings'
+import { projectsApi } from '@/api/projects'
+import { useSettingsUsage } from '@/composables/useSettingsUsage'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useBusy } from '@/composables/useBusy'
-import BaseModal from '@/components/BaseModal.vue'
-import ChannelIcon from '@/components/ChannelIcon.vue'
-import { formatTime, friendlyError } from '@/utils/format'
-import { withQuery } from '@/utils/query'
+import { formatTime, fmtDuration, friendlyError } from '@/utils/format'
 import { PLATFORM_MAP, usageSourceLabel } from '@/utils/enumLabel'
 
 const toast = useToast()
@@ -15,13 +14,15 @@ const confirm = useConfirm()
 const { busy, run } = useBusy()
 const tab = ref(0)
 const tabs = ['模型配置', '连接器', '接入渠道', '参数', '用量统计', '备份', '状态', '已归档项目']
-import { projectsApi } from '@/api/projects'
 const archivedProjects = ref([])
 const archivedLoading = ref(false)
 async function loadArchivedProjects() {
   archivedLoading.value = true
-  try { archivedProjects.value = await projectsApi.list('archived') }
-  finally { archivedLoading.value = false }
+  try {
+    archivedProjects.value = await projectsApi.list('archived')
+  } finally {
+    archivedLoading.value = false
+  }
 }
 async function unarchiveProject(p) {
   try {
@@ -29,23 +30,33 @@ async function unarchiveProject(p) {
     toast.push('success', `已恢复项目「${p.title}」，同步恢复 ${r.restored_sessions} 个会话`)
     await loadArchivedProjects()
     window.dispatchEvent(new CustomEvent('sp-projects-changed'))
-  } catch { /* toast 已弹 */ }
+  } catch {
+    /* toast 已弹 */
+  }
 }
 const purgeCheckbox = ref(false)
 const purgeTarget = ref(null)
-function openPurge(p) { purgeTarget.value = p; purgeCheckbox.value = false }
+function openPurge(p) {
+  purgeTarget.value = p
+  purgeCheckbox.value = false
+}
 async function confirmPurge() {
   if (!purgeCheckbox.value || !purgeTarget.value) return
   const p = purgeTarget.value
   purgeTarget.value = null
   try {
     const r = await projectsApi.purge(p.id)
-    toast.push('success', `项目「${p.title}」已永久删除：` +
-      `${r.deleted_sessions} 会话/${r.deleted_messages} 消息/` +
-      `${r.deleted_memories} 记忆/${r.deleted_docs} 文档`)
+    toast.push(
+      'success',
+      `项目「${p.title}」已永久删除：` +
+        `${r.deleted_sessions} 会话/${r.deleted_messages} 消息/` +
+        `${r.deleted_memories} 记忆/${r.deleted_docs} 文档`
+    )
     await loadArchivedProjects()
     window.dispatchEvent(new CustomEvent('sp-projects-changed'))
-  } catch { /* toast 已弹 */ }
+  } catch {
+    /* toast 已弹 */
+  }
 }
 
 const providers = ref([])
@@ -54,9 +65,8 @@ const connectors = ref([])
 const platforms = ref([])
 const params = ref({})
 const schema = ref([])
-const usage = ref({})
-const distribution = ref({})
-const trend = ref([])
+const usageBundle = useSettingsUsage()
+const { usage, distribution, trend, monthCost } = usageBundle
 const trendPeriod = ref('30d')
 // 用量筛选（空串=全部）；选项列表取自首次无筛选的分布数据，筛选后不再收缩
 const usageSource = ref('')
@@ -64,7 +74,6 @@ const usageModel = ref('')
 const sourceOptions = ref([])
 const modelOptions = ref([])
 const hoveredIdx = ref(null)
-const monthCost = ref(null)
 const usageLoadError = ref(false)
 
 // 趋势图 SVG 计算 (bar chart)
@@ -79,38 +88,57 @@ const BAR_W = computed(() => {
 const trendMax = computed(() => trend.value.reduce((m, t) => Math.max(m, t.tokens || 0), 0))
 // 模型配色：按全区间总消耗降序给模型分配稳定颜色，同一模型跨柱色一致
 const MODEL_PALETTE = [
-  '#4f9df7', '#34c759', '#ff9f0a', '#af52de', '#ff6482',
-  '#5ac8fa', '#ffd60a', '#30d158', '#bf5af2', '#8e8e93',
+  '#4f9df7',
+  '#34c759',
+  '#ff9f0a',
+  '#af52de',
+  '#ff6482',
+  '#5ac8fa',
+  '#ffd60a',
+  '#30d158',
+  '#bf5af2',
+  '#8e8e93',
 ]
 const modelColorMap = computed(() => {
   const totals = {}
   for (const t of trend.value)
-    for (const m of (t.models || [])) totals[m.name] = (totals[m.name] || 0) + m.tokens
+    {for (const m of t.models || []) totals[m.name] = (totals[m.name] || 0) + m.tokens}
   const names = Object.keys(totals).sort((a, b) => totals[b] - totals[a])
   const map = {}
-  names.forEach((n, i) => { map[n] = MODEL_PALETTE[i % MODEL_PALETTE.length] })
+  names.forEach((n, i) => {
+    map[n] = MODEL_PALETTE[i % MODEL_PALETTE.length]
+  })
   return map
 })
 // 图例：只展示当前区间有消耗的模型
 const trendLegend = computed(() =>
-  Object.keys(modelColorMap.value).map(name => ({ name, color: modelColorMap.value[name] })))
+  Object.keys(modelColorMap.value).map((name) => ({ name, color: modelColorMap.value[name] }))
+)
 const trendBars = computed(() => {
   const mx = trendMax.value || 1
-  const y0 = TREND_H - 20  // bottom baseline (above labels)
+  const y0 = TREND_H - 20 // bottom baseline (above labels)
   const usable = y0 - 10
   return trend.value.map((t, i) => {
     const x = PLOT_X + i * (BAR_W.value + 8)
     // 堆叠段：自底向上按模型依次堆叠，段高按 token 占总高比例
-    const models = t.models && t.models.length
-      ? t.models
-      : (t.tokens > 0 ? [{ name: '未知', tokens: t.tokens }] : [])
+    const models =
+      t.models && t.models.length
+        ? t.models
+        : t.tokens > 0
+          ? [{ name: '未知', tokens: t.tokens }]
+          : []
     let cursor = y0
-    const segs = models.map(m => {
+    const segs = models.map((m) => {
       const h = (m.tokens / mx) * usable
       cursor -= h
       return {
-        name: m.name, tokens: m.tokens, x, y: cursor, height: h,
-        width: BAR_W.value, color: modelColorMap.value[m.name] || 'var(--succtx)'
+        name: m.name,
+        tokens: m.tokens,
+        x,
+        y: cursor,
+        height: h,
+        width: BAR_W.value,
+        color: modelColorMap.value[m.name] || 'var(--succtx)',
       }
     })
     const totalH = Math.max(0, (t.tokens / mx) * usable)
@@ -128,8 +156,10 @@ function dateLabel(t) {
 function segPath(s) {
   const r = Math.min(2, s.width / 2, s.height)
   const { x, y, width: w, height: h } = s
-  return `M${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} `
-    + `Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} L${x},${y + h} Z`
+  return (
+    `M${x},${y + r} Q${x},${y} ${x + r},${y} L${x + w - r},${y} ` +
+    `Q${x + w},${y} ${x + w},${y + r} L${x + w},${y + h} L${x},${y + h} Z`
+  )
 }
 
 // 横轴标签稀疏化：年视图（12个月）全部显示，日粒度每 3 个显示一个
@@ -143,39 +173,64 @@ const hoverTip = computed(() => {
   if (hoveredIdx.value === null) return null
   const b = trendBars.value[hoveredIdx.value]
   if (!b) return null
-  const rows = (b.models || []).map(m => ({
-    name: m.name, value: formatNum(m.tokens), color: modelColorMap.value[m.name] || 'var(--succtx)'
+  const rows = (b.models || []).map((m) => ({
+    name: m.name,
+    value: formatNum(m.tokens),
+    color: modelColorMap.value[m.name] || 'var(--succtx)',
   }))
   const w = 168
   const lineH = 15
-  const h = 22 + rows.length * lineH  // 标题行 + 逐模型行
+  const h = 22 + rows.length * lineH // 标题行 + 逐模型行
   const x = Math.min(Math.max(b.x + b.width / 2 - w / 2, 2), TREND_W - w - 2)
   const y = Math.max(2, b.y - h - 6)
   return { x, y, w, h, lineH, title: `${dateLabel(b)}·共 ${formatNum(b.tokens)}`, rows }
 })
 const status = ref(null)
 const showAddProvider = ref(false)
-const newProvider = ref({ provider_type: 'openai_compatible', display_name: '', base_url: '', api_key: '', model_id: '', input_price: null, output_price: null, context_window: 128000 })
+const newProvider = ref({
+  provider_type: 'openai_compatible',
+  display_name: '',
+  base_url: '',
+  api_key: '',
+  model_id: '',
+  input_price: null,
+  output_price: null,
+  context_window: 128000,
+})
 
 // 任务-模型分配：槽位清单由后端 /settings/task-slots 返回（单一事实来源），
 // 包含中文名、职责描述、回退链与轻量任务标记，前端不再硬编码
 const slots = ref([])
 function fallbackLabels(slot) {
-  return (slot.fallback || []).map(f => slots.value.find(s => s.key === f)?.label || f).join(' → ')
+  return (slot.fallback || [])
+    .map((f) => slots.value.find((s) => s.key === f)?.label || f)
+    .join(' → ')
 }
 
 async function loadProviders() {
-  providers.value = await api.get('/settings/providers')
-  assignment.value = await api.get('/settings/model-assignment')
-  slots.value = await api.get('/settings/task-slots')
+  providers.value = await settingsApi.providers()
+  assignment.value = await settingsApi.modelAssignment()
+  slots.value = await settingsApi.taskSlots()
 }
 async function addProvider() {
-  await api.post('/settings/providers', newProvider.value)
+  await settingsApi.createProvider(newProvider.value)
   showAddProvider.value = false
-  await loadProviders(); toast.push('success', '已添加')
+  await loadProviders()
+  toast.push('success', '已添加')
 }
-async function delProvider(id) { return run('delP' + id, async () => { if (!await confirm.ask({ message: '删除该模型？', danger: true })) return; await api.del('/settings/providers/' + id); await loadProviders() }) }
-async function setAssign(task, pid) { return run('assign' + task, async () => { await api.put('/settings/model-assignment', { [task + '_model']: pid }); toast.push('success', '已保存') }) }
+async function delProvider(id) {
+  return run('delP' + id, async () => {
+    if (!(await confirm.ask({ message: '删除该模型？', danger: true }))) return
+    await settingsApi.deleteProvider(id)
+    await loadProviders()
+  })
+}
+async function setAssign(task, pid) {
+  return run('assign' + task, async () => {
+    await settingsApi.setModelAssignment({ [task + '_model']: pid })
+    toast.push('success', '已保存')
+  })
+}
 
 // 编辑 Provider
 const showEdit = ref(false)
@@ -184,60 +239,124 @@ const showEditKey = ref(false)
 const showAddKey = ref(false)
 async function openEdit(p) {
   editData.value = {
-    id: p.id, display_name: p.display_name, provider_type: p.provider_type,
-    base_url: p.base_url, model_id: p.model_id, input_price: p.input_price,
-    output_price: p.output_price, context_window: p.context_window || 128000, api_key: '',
+    id: p.id,
+    display_name: p.display_name,
+    provider_type: p.provider_type,
+    base_url: p.base_url,
+    model_id: p.model_id,
+    input_price: p.input_price,
+    output_price: p.output_price,
+    context_window: p.context_window || 128000,
+    api_key: '',
   }
   showEditKey.value = false
   try {
-    const d = await api.get('/settings/providers/' + p.id + '/key')
+    const d = await settingsApi.providerKey(p.id)
     editData.value.api_key = d.api_key || ''
-  } catch { /* 取不到就留空 */ }
+  } catch {
+    /* 取不到就留空 */
+  }
   showEdit.value = true
 }
 async function saveEdit() {
   const body = { ...editData.value }
-  if (!body.api_key) delete body.api_key   // 留空则不修改密钥
-  await api.put('/settings/providers/' + editData.value.id, body)
+  if (!body.api_key) delete body.api_key // 留空则不修改密钥
+  await settingsApi.updateProvider(editData.value.id, body)
   showEdit.value = false
-  await loadProviders(); toast.push('success', '已保存')
+  await loadProviders()
+  toast.push('success', '已保存')
 }
 async function testConn(cfg) {
-  const r = await api.post('/settings/providers/test-connection', cfg)
-  toast.push(r.ok ? 'success' : 'error', r.ok ? '连接成功' : ('连接失败：' + (r.error || '未知错误')))
+  const r = await settingsApi.testConnection(cfg)
+  toast.push(r.ok ? 'success' : 'error', r.ok ? '连接成功' : '连接失败：' + (r.error || '未知错误'))
 }
 
-async function loadConnectors() { connectors.value = await api.get('/settings/connectors') }
-async function toggleConn(c) { return run('togC' + c.id, async () => { await api.post(`/settings/connectors/${c.id}/toggle`, { enabled: c.status !== 'connected' }); await loadConnectors() }) }
-async function delConn(id) { return run('delC' + id, async () => { if (!await confirm.ask({ message: '删除连接器？', danger: true })) return; await api.del('/settings/connectors/' + id); await loadConnectors() }) }
-async function refreshConn(id) { return run('refC' + id, async () => { await api.post(`/settings/connectors/${id}/refresh-tools`, {}); await loadConnectors(); toast.push('success', '工具已刷新') }) }
+async function loadConnectors() {
+  connectors.value = await settingsApi.connectors()
+}
+async function toggleConn(c) {
+  return run('togC' + c.id, async () => {
+    await settingsApi.toggleConnector(c.id, c.status !== 'connected')
+    await loadConnectors()
+  })
+}
+async function delConn(id) {
+  return run('delC' + id, async () => {
+    if (!(await confirm.ask({ message: '删除连接器？', danger: true }))) return
+    await settingsApi.deleteConnector(id)
+    await loadConnectors()
+  })
+}
+async function refreshConn(id) {
+  return run('refC' + id, async () => {
+    await settingsApi.refreshConnectorTools(id)
+    await loadConnectors()
+    toast.push('success', '工具已刷新')
+  })
+}
 
-async function loadPlatforms() { platforms.value = await api.get('/settings/platforms') }
-async function enablePlatform(id) { return run('enP' + id, async () => { await api.post(`/settings/platforms/${id}/enable`, {}); await loadPlatforms() }) }
-async function disablePlatform(id) { return run('disP' + id, async () => { await api.post(`/settings/platforms/${id}/disable`, {}); await loadPlatforms() }) }
-async function resumePlatform(id) { return run('resP' + id, async () => { await api.post(`/settings/platforms/${id}/resume`, {}); await loadPlatforms(); toast.push('success', '已恢复') }) }
+async function loadPlatforms() {
+  platforms.value = await settingsApi.platforms()
+}
+async function enablePlatform(id) {
+  return run('enP' + id, async () => {
+    await settingsApi.enablePlatform(id)
+    await loadPlatforms()
+  })
+}
+async function disablePlatform(id) {
+  return run('disP' + id, async () => {
+    await settingsApi.disablePlatform(id)
+    await loadPlatforms()
+  })
+}
+async function resumePlatform(id) {
+  return run('resP' + id, async () => {
+    await settingsApi.resumePlatform(id)
+    await loadPlatforms()
+    toast.push('success', '已恢复')
+  })
+}
 
-async function loadParams() { const d = await api.get('/settings/params'); params.value = d.params; schema.value = d.schema }
-async function saveParams() { await api.put('/settings/params', params.value); toast.push('success', '设置已保存，部分参数将在下一轮对话生效') }
-async function resetParams() { if (!await confirm.ask('恢复全部参数默认值？')) return; params.value = await api.post('/settings/params/reset', {}); toast.push('success', '已恢复默认') }
+async function loadParams() {
+  const d = await settingsApi.params()
+  params.value = d.params
+  schema.value = d.schema
+}
+async function saveParams() {
+  await settingsApi.saveParams(params.value)
+  toast.push('success', '设置已保存，部分参数将在下一轮对话生效')
+}
+async function resetParams() {
+  if (!(await confirm.ask('恢复全部参数默认值？'))) return
+  params.value = await settingsApi.resetParams()
+  toast.push('success', '已恢复默认')
+}
 
 async function loadUsage() {
   try {
-    const filters = { source: usageSource.value || undefined, model: usageModel.value || undefined }
-    usage.value = await api.get(withQuery('/settings/usage/summary', filters));
-    distribution.value = await api.get(withQuery('/settings/usage/distribution', filters));
-    trend.value = await api.get(withQuery('/settings/usage/trend', { period: trendPeriod.value, ...filters }));
-    monthCost.value = await api.get('/settings/usage/month-cost');
-    // 无筛选时刷新下拉选项，避免筛选后选项被过滤到只剩当前项
+    const result = await usageBundle.load({
+      source: usageSource.value,
+      model: usageModel.value,
+      period: trendPeriod.value,
+    })
     if (!usageSource.value && !usageModel.value) {
-      sourceOptions.value = (distribution.value.by_source || []).map(s => s.name)
-      modelOptions.value = (distribution.value.by_model || []).map(m => m.name)
+      sourceOptions.value = (result.distribution.by_source || []).map((s) => s.name)
+      modelOptions.value = (result.distribution.by_model || []).map((m) => m.name)
     }
     usageLoadError.value = false
-  } catch { usageLoadError.value = true }
+  } catch {
+    usageLoadError.value = true
+  }
 }
-async function switchTrend(p) { trendPeriod.value = p; hoveredIdx.value = null; await loadUsage() }
-async function loadBackups() { backups.value = await api.get('/settings/backups') }
+async function switchTrend(p) {
+  trendPeriod.value = p
+  hoveredIdx.value = null
+  await loadUsage()
+}
+async function loadBackups() {
+  backups.value = await settingsApi.backups()
+}
 // 备份自定义标签
 const backupLabel = ref('')
 const showBackupLabel = ref(false)
@@ -247,14 +366,15 @@ async function createBackup() {
 }
 async function doCreateBackup() {
   return run('createBackup', async () => {
-    await api.post('/settings/backups/create', { label: backupLabel.value || undefined })
+    await settingsApi.createBackup(backupLabel.value || undefined)
     showBackupLabel.value = false
-    await loadBackups(); toast.push('success', '备份完成')
+    await loadBackups()
+    toast.push('success', '备份完成')
   })
 }
 async function exportData() {
   return run('exportData', async () => {
-    const r = await api.post('/settings/backups/export', {})
+    const r = await settingsApi.exportBackup()
     toast.push('success', '已导出：' + (r.path || ''))
   })
 }
@@ -263,46 +383,95 @@ async function importData(e) {
   const f = e.target.files?.[0]
   if (!f) return
   try {
-    const form = new FormData(); form.append('file', f)
-    await api.upload('/settings/backups/import', form)
+    const form = new FormData()
+    form.append('file', f)
+    await settingsApi.importBackup(form)
     toast.push('success', '导入完成，索引已重建')
     await loadBackups()
-  } catch { } finally { e.target.value = '' }
+  } catch {
+    /* 导入失败时保留用户选择的文件，便于重试 */
+  } finally {
+    e.target.value = ''
+  }
 }
-async function restoreBackup(id) { return run('restoreB' + id, async () => { if (!await confirm.ask('恢复该备份？将先自动保护性备份当前数据。')) return; await api.post('/settings/backups/restore', { backup_id: id }); toast.push('success', '恢复完成') }) }
-async function loadStatus() { status.value = await api.get('/settings/status'); tasks.value = await api.get('/settings/tasks') }
+async function restoreBackup(id) {
+  return run('restoreB' + id, async () => {
+    if (!(await confirm.ask('恢复该备份？将先自动保护性备份当前数据。'))) return
+    await settingsApi.restoreBackup(id)
+    toast.push('success', '恢复完成')
+  })
+}
+async function loadStatus() {
+  status.value = await settingsApi.status()
+  tasks.value = await settingsApi.tasks()
+}
 
 // 定时任务 + 日志
 const tasks = ref([])
 const taskLogs = ref(null)
-async function runTask(tid) { return run('task' + tid, async () => { await api.post(`/settings/tasks/${tid}/run`, {}); toast.push('success', '已执行'); await loadStatus() }) }
-async function showTaskLogs(tid) { return run('logs' + tid, async () => { taskLogs.value = { id: tid, logs: await api.get(`/settings/tasks/${tid}/logs`) } }) }
+async function runTask(tid) {
+  return run('task' + tid, async () => {
+    await settingsApi.runTask(tid)
+    toast.push('success', '已执行')
+    await loadStatus()
+  })
+}
+async function showTaskLogs(tid) {
+  return run('logs' + tid, async () => {
+    taskLogs.value = { id: tid, logs: await settingsApi.taskLogs(tid) }
+  })
+}
 
 // Embedding 切换预估
 const embEstimate = ref(null)
 const pendingEmbPid = ref('')
 async function onEmbeddingChange(pid) {
   pendingEmbPid.value = pid
-  embEstimate.value = await api.post('/settings/embedding/estimate', { target_provider_id: pid })
+  embEstimate.value = await settingsApi.embeddingEstimate(pid)
 }
 async function confirmMigrate() {
-  await api.post('/settings/embedding/migrate', { target_provider_id: pendingEmbPid.value, confirm: true })
+  await settingsApi.embeddingMigrate(pendingEmbPid.value)
   embEstimate.value = null
   toast.push('success', '迁移已开始，可在状态页查看进度')
 }
 
 // 连接器添加
 const showAddConn = ref(false)
-const newConn = ref({ name: '', transport: 'stdio', command: 'npx', args: '', env: '', url: '', timeout: 120 })
+const newConn = ref({
+  name: '',
+  transport: 'stdio',
+  command: 'npx',
+  args: '',
+  env: '',
+  url: '',
+  timeout: 120,
+})
 async function addConnector() {
-  await api.post('/settings/connectors', { name: newConn.value.name, transport: newConn.value.transport, config: connCfgPayload(newConn.value), timeout: newConn.value.timeout })
-  showAddConn.value = false; await loadConnectors(); toast.push('success', '已添加')
+  await settingsApi.createConnector({
+    name: newConn.value.name,
+    transport: newConn.value.transport,
+    config: connCfgPayload(newConn.value),
+    timeout: newConn.value.timeout,
+  })
+  showAddConn.value = false
+  await loadConnectors()
+  toast.push('success', '已添加')
 }
-function parseJson(s, def) { try { return s ? JSON.parse(s) : def } catch { return def } }
+function parseJson(s, def) {
+  try {
+    return s ? JSON.parse(s) : def
+  } catch {
+    return def
+  }
+}
 
 // 连接器：测试连接（仅验证）——后端失败时返回 code:200+ok:false，必须检查 r.ok 而非靠异常
 async function testConnector() {
-  const r = await api.post('/settings/connectors/test', { name: newConn.value.name, transport: newConn.value.transport, config: connCfgPayload(newConn.value) })
+  const r = await settingsApi.testConnector({
+    name: newConn.value.name,
+    transport: newConn.value.transport,
+    config: connCfgPayload(newConn.value),
+  })
   if (r.ok) toast.push('success', `连接测试成功，发现 ${r.tool_count ?? 0} 个工具`)
   else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
@@ -311,11 +480,24 @@ async function testConnector() {
 
 // 连接器编辑：回显现有配置（敏感值为 •••••• 占位，不改动时后端保留原值）
 const showEditConn = ref(false)
-const editConn = ref({ id: '', name: '', transport: 'stdio', command: '', args: '', env: '', url: '', timeout: 120, tools_filter: null })
+const editConn = ref({
+  id: '',
+  name: '',
+  transport: 'stdio',
+  command: '',
+  args: '',
+  env: '',
+  url: '',
+  timeout: 120,
+  tools_filter: null,
+})
 function openConnEdit(c) {
   const cfg = c.config || {}
   editConn.value = {
-    id: c.id, name: c.name, transport: c.transport, timeout: c.timeout ?? 120,
+    id: c.id,
+    name: c.name,
+    transport: c.transport,
+    timeout: c.timeout ?? 120,
     command: cfg.command || '',
     args: (cfg.args || []).length ? JSON.stringify(cfg.args) : '',
     env: cfg.env && Object.keys(cfg.env).length ? JSON.stringify(cfg.env) : '',
@@ -331,18 +513,24 @@ function connCfgPayload(f) {
     : { url: f.url }
 }
 async function saveConnEdit() {
-  await api.put('/settings/connectors/' + editConn.value.id, {
-    name: editConn.value.name, transport: editConn.value.transport,
-    config: connCfgPayload(editConn.value), timeout: editConn.value.timeout,
+  await settingsApi.updateConnector(editConn.value.id, {
+    name: editConn.value.name,
+    transport: editConn.value.transport,
+    config: connCfgPayload(editConn.value),
+    timeout: editConn.value.timeout,
     tools_filter: editConn.value.tools_filter,
   })
-  showEditConn.value = false; await loadConnectors(); toast.push('success', '已保存')
+  showEditConn.value = false
+  await loadConnectors()
+  toast.push('success', '已保存')
 }
 // 编辑态测试连接：env 仍含占位密钥时禁用（拿占位值测试必然失败，避免误导）
 const editConnMasked = computed(() => (editConn.value.env || '').includes('••••••'))
 async function testEditConn() {
-  const r = await api.post('/settings/connectors/test', {
-    name: editConn.value.name, transport: editConn.value.transport, config: connCfgPayload(editConn.value),
+  const r = await settingsApi.testConnector({
+    name: editConn.value.name,
+    transport: editConn.value.transport,
+    config: connCfgPayload(editConn.value),
   })
   if (r.ok) toast.push('success', `连接测试成功，发现 ${r.tool_count ?? 0} 个工具`)
   else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
@@ -351,15 +539,22 @@ async function testEditConn() {
 // 连接器工具清单：数据直接取列表接口已返回的 c.tools，不发额外请求
 const viewTools = ref(null)
 const expandedTool = ref('')
-function openToolList(c) { expandedTool.value = ''; viewTools.value = c }
-function toggleTool(t) { expandedTool.value = expandedTool.value === t.name ? '' : t.name }
+function openToolList(c) {
+  expandedTool.value = ''
+  viewTools.value = c
+}
+function toggleTool(t) {
+  expandedTool.value = expandedTool.value === t.name ? '' : t.name
+}
 // 工具语义中文标注：优先取 MCP annotations，缺失时按名称启发式兜底（与后端 _guess_destructive 同口径）
 function toolBadge(t) {
   const ann = t.annotations || {}
   if (ann.destructiveHint) return { label: '破坏性', cls: 'badge-r' }
   if (ann.readOnlyHint === true) return { label: '只读', cls: 'badge-g' }
   if (ann.readOnlyHint === false) return { label: '写入', cls: '' }
-  const writable = /create|delete|update|write|remove|merge|push|add|fork/.test(t.name.toLowerCase())
+  const writable = /create|delete|update|write|remove|merge|push|add|fork/.test(
+    t.name.toLowerCase()
+  )
   return writable ? { label: '写入', cls: '' } : { label: '只读', cls: 'badge-g' }
 }
 // 描述只保留开篇摘要：截断 Python docstring 的 Args/Returns 段（参数明细已在展开区结构化呈现，避免重复）
@@ -371,7 +566,7 @@ function toolSummary(t) {
 // inputSchema 展平成参数行：类型兼容 anyOf/数组写法，兼容缺省
 function schemaType(v) {
   if (v.anyOf) {
-    const ts = v.anyOf.map(x => x.type).filter(t => t && t !== 'null')
+    const ts = v.anyOf.map((x) => x.type).filter((t) => t && t !== 'null')
     return ts.length ? ts.join('|') : 'any'
   }
   if (Array.isArray(v.type)) return v.type.join('|')
@@ -381,7 +576,9 @@ function toolParams(t) {
   const schema = t.inputSchema || {}
   const req = schema.required || []
   return Object.entries(schema.properties || {}).map(([name, v]) => ({
-    name, type: schemaType(v), required: req.includes(name),
+    name,
+    type: schemaType(v),
+    required: req.includes(name),
     def: v.default !== undefined ? JSON.stringify(v.default) : '',
     desc: v.description || '',
   }))
@@ -389,19 +586,31 @@ function toolParams(t) {
 
 // 接入渠道配置
 const showChannelCfg = ref(false)
-const newChannel = ref({ platform_type: 'feishu', bot_token: '', app_secret: '', whitelist_user_id: '', callback_url: '' })
+const newChannel = ref({
+  platform_type: 'feishu',
+  bot_token: '',
+  app_secret: '',
+  whitelist_user_id: '',
+  callback_url: '',
+})
 async function addChannel() {
   // 必填校验：未填凭证直接拦截，不发请求
   if (!newChannel.value.bot_token.trim()) {
-    toast.push('error', '请先填写 Bot Token'); return
+    toast.push('error', '请先填写 Bot Token')
+    return
   }
-  if (['feishu', 'dingtalk', 'wecom'].includes(newChannel.value.platform_type) && !newChannel.value.app_secret.trim()) {
-    toast.push('error', '请先填写 App Secret'); return
+  if (
+    ['feishu', 'dingtalk', 'wecom'].includes(newChannel.value.platform_type) &&
+    !newChannel.value.app_secret.trim()
+  ) {
+    toast.push('error', '请先填写 App Secret')
+    return
   }
-  const r = await api.post('/settings/platforms', newChannel.value)
+  const r = await settingsApi.createPlatform(newChannel.value)
   showChannelCfg.value = false
-  await api.post(`/settings/platforms/${r.id}/enable`, {})
-  await loadPlatforms(); toast.push('success', '已配置并启用（已自动禁用其他 IM）')
+  await settingsApi.enablePlatform(r.id)
+  await loadPlatforms()
+  toast.push('success', '已配置并启用（已自动禁用其他 IM）')
 }
 
 // 微信渠道扫码绑定（iLink 直连：二维码 → 轮询确认 → 自动启用）
@@ -416,23 +625,30 @@ function wxImgSrc() {
   return 'data:image/png;base64,' + img
 }
 function stopWxPoll() {
-  if (wxPollTimer) { clearInterval(wxPollTimer); wxPollTimer = null }
+  if (wxPollTimer) {
+    clearInterval(wxPollTimer)
+    wxPollTimer = null
+  }
 }
 async function refreshWeixinQrcode() {
   wxScan.value.busy = true
   try {
-    const r = await api.post('/settings/platforms/weixin/qrcode', {})
+    const r = await settingsApi.weixinQrcode()
     wxScan.value.qrcode = r.qrcode || ''
     wxScan.value.img = r.qrcode_img || ''
     wxScan.value.url = r.qrcode_url || ''
     startWxPoll()
-  } finally { wxScan.value.busy = false }
+  } finally {
+    wxScan.value.busy = false
+  }
 }
 async function copyWxUrl() {
   try {
     await navigator.clipboard.writeText(wxScan.value.url)
     toast.push('success', '扫码链接已复制，请在微信中打开')
-  } catch { toast.push('error', '复制失败，请手动复制链接') }
+  } catch {
+    toast.push('error', '复制失败，请手动复制链接')
+  }
 }
 function startWxPoll() {
   stopWxPoll()
@@ -443,14 +659,14 @@ function startWxPoll() {
     if (polling) return
     polling = true
     try {
-      const r = await api.get(withQuery('/settings/platforms/weixin/qrcode/status', { qrcode: wxScan.value.qrcode }))
+      const r = await settingsApi.weixinQrcodeStatus(wxScan.value.qrcode)
       wxScan.value.status = r.status || 'pending'
       if (r.status === 'confirmed') {
         stopWxPoll()
         // 从平台列表取真实 ID（不硬编码 weixin_1）；列表未加载时先拉取
         if (!platforms.value.length) await loadPlatforms()
-        const wx = platforms.value.find(p => p.platform_type === 'weixin')
-        if (wx) await api.post(`/settings/platforms/${wx.id}/enable`, {})
+        const wx = platforms.value.find((p) => p.platform_type === 'weixin')
+        if (wx) await settingsApi.enablePlatform(wx.id)
         showWeixinScan.value = false
         await loadPlatforms()
         toast.push('success', '微信渠道已绑定并启用（已自动禁用其他 IM）')
@@ -458,7 +674,11 @@ function startWxPoll() {
         stopWxPoll()
         toast.push('warning', '二维码已过期，请重新获取')
       }
-    } catch (e) { /* client.js 已统一 toast */ } finally { polling = false }
+    } catch {
+      /* client.js 已统一 toast */
+    } finally {
+      polling = false
+    }
   }, 2000)
 }
 async function openWeixinScan() {
@@ -470,13 +690,17 @@ onUnmounted(stopWxPoll)
 
 // 添加渠道卡片点击：微信走扫码绑定，其余走配置表单
 function clickAddChannel(pt) {
-  if (pt === 'weixin') { openWeixinScan() }
-  else { newChannel.value.platform_type = pt; showChannelCfg.value = true }
+  if (pt === 'weixin') {
+    openWeixinScan()
+  } else {
+    newChannel.value.platform_type = pt
+    showChannelCfg.value = true
+  }
 }
 
 async function testChannel() {
   // 同上：后端失败不抛异常，需检查 r.ok
-  const r = await api.post('/settings/platforms/test', newChannel.value)
+  const r = await settingsApi.testPlatform(newChannel.value)
   if (r.ok) toast.push('success', '连接测试成功')
   else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
@@ -484,38 +708,71 @@ async function testChannel() {
 // 编辑已录入渠道：回显现有配置（含解密凭证），平台类型不可改
 const showChannelEdit = ref(false)
 const showEditSecret = ref(false)
-const editChannel = ref({ id: '', platform_type: '', bot_token: '', app_secret: '', whitelist_user_id: '', callback_url: '' })
+const editChannel = ref({
+  id: '',
+  platform_type: '',
+  bot_token: '',
+  app_secret: '',
+  whitelist_user_id: '',
+  callback_url: '',
+})
 async function openChannelEdit(p) {
-  const d = await api.get(`/settings/platforms/${p.id}/detail`)
+  const d = await settingsApi.platformDetail(p.id)
   editChannel.value = {
-    id: d.id, platform_type: d.platform_type, bot_token: d.bot_token || '',
-    app_secret: d.app_secret || '', whitelist_user_id: d.whitelist_user_id || '',
+    id: d.id,
+    platform_type: d.platform_type,
+    bot_token: d.bot_token || '',
+    app_secret: d.app_secret || '',
+    whitelist_user_id: d.whitelist_user_id || '',
     callback_url: d.callback_url || '',
   }
   showEditSecret.value = false
   showChannelEdit.value = true
 }
 async function saveChannelEdit() {
-  if (editChannel.value.platform_type !== 'weixin' && !editChannel.value.bot_token.trim()) { toast.push('error', '请先填写 Bot Token'); return }
-  if (editChannel.value.platform_type !== 'weixin' && ['feishu', 'dingtalk', 'wecom'].includes(editChannel.value.platform_type) && !editChannel.value.app_secret.trim()) {
-    toast.push('error', '请先填写 App Secret'); return
+  if (editChannel.value.platform_type !== 'weixin' && !editChannel.value.bot_token.trim()) {
+    toast.push('error', '请先填写 Bot Token')
+    return
   }
-  await api.put(`/settings/platforms/${editChannel.value.id}`, editChannel.value)
+  if (
+    editChannel.value.platform_type !== 'weixin' &&
+    ['feishu', 'dingtalk', 'wecom'].includes(editChannel.value.platform_type) &&
+    !editChannel.value.app_secret.trim()
+  ) {
+    toast.push('error', '请先填写 App Secret')
+    return
+  }
+  await settingsApi.updatePlatform(editChannel.value.id, editChannel.value)
   showChannelEdit.value = false
-  await loadPlatforms(); toast.push('success', '已保存')
+  await loadPlatforms()
+  toast.push('success', '已保存')
 }
 async function testEditChannel() {
-  const r = await api.post('/settings/platforms/test', editChannel.value)
+  const r = await settingsApi.testPlatform(editChannel.value)
   if (r.ok) toast.push('success', '连接测试成功')
   else toast.push('error', '连接测试失败：' + friendlyError(r.error, '未知错误'))
 }
 
 const groups = ['memory', 'conversation', 'cost', 'retrieval', 'other']
-const groupNames = { memory: '记忆参数', conversation: '对话参数', cost: '成本控制', retrieval: '检索与去重', other: '其他' }
-const effectNames = { immediate: '立即生效', next_turn: '下一轮对话生效', next_session: '下次会话生效' }
+const groupNames = {
+  memory: '记忆参数',
+  conversation: '对话参数',
+  cost: '成本控制',
+  retrieval: '检索与去重',
+  other: '其他',
+}
+const effectNames = {
+  immediate: '立即生效',
+  next_turn: '下一轮对话生效',
+  next_session: '下次会话生效',
+}
 const enumLabels = { remind_only: '仅提醒（不阻断）' }
-function enumLabel(o) { return enumLabels[o] || o }
-function schemaByGroup(g) { return schema.value.filter(s => s.group === g).sort((a, b) => a.order - b.order) }
+function enumLabel(o) {
+  return enumLabels[o] || o
+}
+function schemaByGroup(g) {
+  return schema.value.filter((s) => s.group === g).sort((a, b) => a.order - b.order)
+}
 function formatNum(n) {
   if (!n) return '0'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -524,26 +781,22 @@ function formatNum(n) {
 }
 const backups = ref([])
 
-// 耗时按时分秒可读展示：不足 1 秒显示毫秒，其余省略为 0 的高位单位（如 15分23秒、4秒）
+// 耗时按时分秒可读展示：复用 utils/format 的 fmtDuration，null/未定义显示 "-"
 function formatDuration(ms) {
-  if (ms == null || isNaN(ms)) return '-'
-  if (ms === 0) return '<1毫秒'
-  if (ms < 1000) return `${ms}毫秒`
-  let s = Math.floor(ms / 1000)
-  const h = Math.floor(s / 3600); s %= 3600
-  const m = Math.floor(s / 60); s %= 60
-  let out = ''
-  if (h) out += `${h}时`
-  if (m) out += `${m}分`
-  if (s || !out) out += `${s}秒`
-  return out
+  if (ms === null || ms === undefined || isNaN(ms)) return '-'
+  return fmtDuration(ms) || '-'
 }
 
 function taskLabel(s) {
-  return {
-    completed: '已完成', success: '已完成', running: '运行中',
-    failed: '失败', skipped: '已跳过'
-  }[s] || '待运行'
+  return (
+    {
+      completed: '已完成',
+      success: '已完成',
+      running: '运行中',
+      failed: '失败',
+      skipped: '已跳过',
+    }[s] || '待运行'
+  )
 }
 function taskBadge(s) {
   if (s === 'completed' || s === 'success') return 'badge-g'
@@ -554,7 +807,9 @@ function taskBadge(s) {
 
 // 系统整体状态中文化 + 横幅配色（后端现为真实检测，可能返回 degraded/unhealthy）
 const OVERALL_NAMES = { healthy: '正常', degraded: '部分降级', unhealthy: '异常' }
-function overallLabel(s) { return OVERALL_NAMES[s] || s }
+function overallLabel(s) {
+  return OVERALL_NAMES[s] || s
+}
 function overallStyle(s) {
   if (s === 'unhealthy') return { background: 'var(--dangbg)', color: 'var(--dangtx)' }
   if (s === 'degraded') return { background: 'var(--warnbg)', color: 'var(--warntx)' }
@@ -564,7 +819,15 @@ function overallStyle(s) {
 function selectTab(i) {
   tab.value = i
   if (i === 7) loadArchivedProjects()
-  const loaders = [loadProviders, loadConnectors, loadPlatforms, loadParams, loadUsage, loadBackups, loadStatus]
+  const loaders = [
+    loadProviders,
+    loadConnectors,
+    loadPlatforms,
+    loadParams,
+    loadUsage,
+    loadBackups,
+    loadStatus,
+  ]
   loaders[i]()
 }
 onMounted(() => selectTab(0))
@@ -575,8 +838,15 @@ onActivated(() => selectTab(tab.value))
   <h1>系统设置</h1>
   <div class="tabs-sticky">
     <div class="tabs">
-      <button v-for="(t, i) in tabs" :key="i" class="tab" :class="{ active: tab === i }" @click="selectTab(i)">{{ t
-      }}</button>
+      <button
+        v-for="(t, i) in tabs"
+        :key="i"
+        class="tab"
+        :class="{ active: tab === i }"
+        @click="selectTab(i)"
+      >
+        {{ t }}
+      </button>
     </div>
   </div>
 
@@ -584,19 +854,28 @@ onActivated(() => selectTab(tab.value))
   <div v-if="tab === 0">
     <div class="section-title">任务-模型分配</div>
     <div class="cw">
-      <div v-for="s in slots" :key="s.key" class="row" style="padding:10px 0;border-bottom:1px solid var(--bd)">
-        <div style="flex:1;min-width:0;padding-right:16px">
+      <div v-for="s in slots" :key="s.key" class="row settings-slot-row">
+        <div class="flex-1-min-pad">
           <b>{{ s.label }}</b>
           <span v-if="s.lightweight" class="muted">· 轻量任务</span>
           <div class="muted">{{ s.desc }}</div>
-          <div v-if="s.fallback && s.fallback.length" class="muted" style="font-size:12px">
+          <div v-if="s.fallback && s.fallback.length" class="muted settings-slot-meta">
             未配置时自动回退：{{ fallbackLabels(s) }}
           </div>
         </div>
-        <select :value="assignment[s.key + '_model']?.provider_id || ''"
-          @change="e => s.key === 'embedding' ? onEmbeddingChange(e.target.value) : setAssign(s.key, e.target.value)"
-          style="min-width:180px">
-          <option value="">{{ s.fallback && s.fallback.length ? '未配置（自动回退）' : '未配置' }}</option>
+        <select
+          :value="assignment[s.key + '_model']?.provider_id || ''"
+          class="settings-select"
+          @change="
+            (e) =>
+              s.key === 'embedding'
+                ? onEmbeddingChange(e.target.value)
+                : setAssign(s.key, e.target.value)
+          "
+        >
+          <option value="">
+            {{ s.fallback && s.fallback.length ? '未配置（自动回退）' : '未配置' }}
+          </option>
           <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.display_name }}</option>
         </select>
       </div>
@@ -604,48 +883,70 @@ onActivated(() => selectTab(tab.value))
     <div class="section-title mt">已添加的模型</div>
     <div v-for="p in providers" :key="p.id" class="cw">
       <div class="row">
-        <div class="fg" style="gap:8px"><span class="dot" style="background:var(--succtx)"></span>
-          <div><b>{{ p.display_name }}</b>
+        <div class="fg fg-gap-8">
+          <span class="dot dot-succ"></span>
+          <div>
+            <b>{{ p.display_name }}</b>
             <div class="muted">{{ p.base_url }}</div>
           </div>
         </div>
-        <div class="fg" style="gap:12px"><span class="muted">¥{{ p.input_price || 0 }}/M · ¥{{ p.output_price || 0
-        }}/M</span>
-          <button class="btn-sm" :disabled="busy('editP' + p.id)"
-            @click="run('editP' + p.id, () => openEdit(p))">编辑</button>
+        <div class="fg fg-gap-12">
+          <span class="muted">¥{{ p.input_price || 0 }}/M · ¥{{ p.output_price || 0 }}/M</span>
+          <button
+            class="btn-sm"
+            :disabled="busy('editP' + p.id)"
+            @click="run('editP' + p.id, () => openEdit(p))"
+          >
+            编辑
+          </button>
           <button class="btn-sm btn-danger" @click="delProvider(p.id)">删除</button>
         </div>
       </div>
     </div>
-    <div class="cw" style="border:1px dashed var(--bd);text-align:center;cursor:pointer"
-      @click="showAddProvider = true">
+    <div class="cw dashed-add" @click="showAddProvider = true">
       <i class="ti ti-plus"></i> 添加新的 LLM Provider
     </div>
   </div>
 
   <!-- 连接器 -->
   <div v-else-if="tab === 1">
-    <div class="row" style="margin-bottom:12px"><b>已连接的系统</b>
+    <div class="row mb-2">
+      <b>已连接的系统</b>
       <button class="btn-sm" @click="showAddConn = true">+ 添加</button>
     </div>
-    <div v-if="!connectors.length" class="empty"><i class="ti ti-plug"></i>还没有连接任何外部系统<br>通过 MCP 协议接入 GitHub、ERP 等</div>
+    <div v-if="!connectors.length" class="empty">
+      <i class="ti ti-plug"></i>还没有连接任何外部系统<br />通过 MCP 协议接入 GitHub、ERP 等
+    </div>
     <div v-for="c in connectors" :key="c.id" class="cw">
       <div class="row">
-        <div class="fg" style="gap:8px"><i class="ti ti-plug" style="color:var(--acctx)"></i>
-          <div><b>{{ c.name }}</b>
+        <div class="fg fg-gap-8">
+          <i class="ti ti-plug icon-accent"></i>
+          <div>
+            <b>{{ c.name }}</b>
             <div class="muted">{{ c.transport }} · {{ c.tool_count }} 个工具</div>
           </div>
         </div>
-        <span class="badge" :class="c.status === 'connected' ? 'badge-g' : 'badge'">{{ c.status === 'connected' ? '已连接'
-          : '已停用' }}</span>
+        <span class="badge" :class="c.status === 'connected' ? 'badge-g' : 'badge'">{{
+          c.status === 'connected' ? '已连接' : '已停用'
+        }}</span>
       </div>
-      <div class="fg" style="gap:6px;margin-top:10px">
+      <div class="fg fg-gap-6 settings-toolbar">
         <button class="btn-xs" @click="openConnEdit(c)">编辑</button>
         <button class="btn-xs" @click="openToolList(c)">工具</button>
-        <button class="btn-xs" :disabled="busy('togC' + c.id)" @click="run('togC' + c.id, () => toggleConn(c))">{{
-          c.status === 'connected' ? '断开' : '连接' }}</button>
-        <button class="btn-xs" :disabled="busy('refC' + c.id)" @click="run('refC' + c.id, () => refreshConn(c.id))"><i
-            v-if="busy('refC' + c.id)" class="ti ti-loader-2"></i> 刷新工具</button>
+        <button
+          class="btn-xs"
+          :disabled="busy('togC' + c.id)"
+          @click="run('togC' + c.id, () => toggleConn(c))"
+        >
+          {{ c.status === 'connected' ? '断开' : '连接' }}
+        </button>
+        <button
+          class="btn-xs"
+          :disabled="busy('refC' + c.id)"
+          @click="run('refC' + c.id, () => refreshConn(c.id))"
+        >
+          <i v-if="busy('refC' + c.id)" class="ti ti-loader-2"></i> 刷新工具
+        </button>
         <button class="btn-xs btn-danger" @click="delConn(c.id)">删除</button>
       </div>
     </div>
@@ -653,39 +954,83 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 接入渠道 -->
   <div v-else-if="tab === 2">
-    <div class="muted" style="margin-bottom:12px">同时只能启用一个 IM 平台</div>
+    <div class="muted mb-2">同时只能启用一个 IM 平台</div>
     <div v-for="p in platforms" :key="p.id" class="cw">
       <div class="row">
-        <div class="fg" style="gap:8px">
-          <span class="dot" :style="{ background: p.status === 'healthy' ? 'var(--succtx)' : 'var(--dangtx)' }"></span>
-          <div><b>{{ PLATFORM_MAP[p.platform_type] || p.platform_type }}</b>
-            <div class="muted">{{ p.platform_type === 'weixin' && !p.bound ? '未绑定：请点击「扫码绑定」完成接入' : p.detail }}</div>
-            <div v-if="p.failure_reason" class="muted" style="color:var(--dangtx)">{{ p.failure_reason }}</div>
+        <div class="fg fg-gap-8">
+          <span
+            class="dot"
+            :style="{ background: p.status === 'healthy' ? 'var(--succtx)' : 'var(--dangtx)' }"
+          ></span>
+          <div>
+            <b>{{ PLATFORM_MAP[p.platform_type] || p.platform_type }}</b>
+            <div class="muted">
+              {{
+                p.platform_type === 'weixin' && !p.bound
+                  ? '未绑定：请点击「扫码绑定」完成接入'
+                  : p.detail
+              }}
+            </div>
+            <div v-if="p.failure_reason" class="muted text-danger">{{ p.failure_reason }}</div>
           </div>
         </div>
-        <div class="fg" style="gap:8px">
+        <div class="fg fg-gap-8">
           <span v-if="p.enabled" class="badge badge-g">已启用</span>
-          <button v-if="p.platform_type === 'weixin' && !p.bound" class="btn-sm" :disabled="busy('wxBind')"
-            @click="run('wxBind', openWeixinScan)">扫码绑定</button>
+          <button
+            v-if="p.platform_type === 'weixin' && !p.bound"
+            class="btn-sm"
+            :disabled="busy('wxBind')"
+            @click="run('wxBind', openWeixinScan)"
+          >
+            扫码绑定
+          </button>
           <template v-else>
-            <button v-if="p.id !== 'web_default'" class="btn-sm" :disabled="busy('editCh' + p.id)"
-              @click="run('editCh' + p.id, () => openChannelEdit(p))">编辑</button>
-            <button v-if="p.id !== 'web_default' && !p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
-              @click="run('plat' + p.id, () => enablePlatform(p.id))">启用</button>
-            <button v-if="p.id !== 'web_default' && p.enabled" class="btn-sm" :disabled="busy('plat' + p.id)"
-              @click="run('plat' + p.id, () => disablePlatform(p.id))">禁用</button>
-            <button v-if="p.status === 'paused'" class="btn-sm" :disabled="busy('plat' + p.id)"
-              @click="run('plat' + p.id, () => resumePlatform(p.id))">恢复</button>
+            <button
+              v-if="p.id !== 'web_default'"
+              class="btn-sm"
+              :disabled="busy('editCh' + p.id)"
+              @click="run('editCh' + p.id, () => openChannelEdit(p))"
+            >
+              编辑
+            </button>
+            <button
+              v-if="p.id !== 'web_default' && !p.enabled"
+              class="btn-sm"
+              :disabled="busy('plat' + p.id)"
+              @click="run('plat' + p.id, () => enablePlatform(p.id))"
+            >
+              启用
+            </button>
+            <button
+              v-if="p.id !== 'web_default' && p.enabled"
+              class="btn-sm"
+              :disabled="busy('plat' + p.id)"
+              @click="run('plat' + p.id, () => disablePlatform(p.id))"
+            >
+              禁用
+            </button>
+            <button
+              v-if="p.status === 'paused'"
+              class="btn-sm"
+              :disabled="busy('plat' + p.id)"
+              @click="run('plat' + p.id, () => resumePlatform(p.id))"
+            >
+              恢复
+            </button>
           </template>
         </div>
       </div>
     </div>
     <div class="section-title mt">添加渠道</div>
     <div class="g3">
-      <div v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom', 'weixin']" :key="pt" class="cw"
-        style="text-align:center;cursor:pointer;padding:20px" @click="clickAddChannel(pt)">
+      <div
+        v-for="pt in ['feishu', 'telegram', 'dingtalk', 'wecom', 'weixin']"
+        :key="pt"
+        class="cw card channel-pick"
+        @click="clickAddChannel(pt)"
+      >
         <ChannelIcon :platform="pt" :size="28" />
-        <div style="font-weight:500;margin-top:8px">{{ PLATFORM_MAP[pt] || pt }}</div>
+        <div class="channel-pick-title">{{ PLATFORM_MAP[pt] || pt }}</div>
         <div class="muted">{{ pt === 'weixin' ? 'ClawBot 扫码绑定' : 'Bot 私聊接入' }}</div>
       </div>
     </div>
@@ -696,48 +1041,58 @@ onActivated(() => selectTab(tab.value))
     <div v-for="g in groups" :key="g" class="cw">
       <div class="section-title">{{ groupNames[g] }}</div>
       <div v-for="s in schemaByGroup(g)" :key="s.key" class="param-item">
-        <div style="flex:1;min-width:0">
+        <div class="flex-1-min">
           <div class="param-label">{{ s.label }}</div>
           <div v-if="s.desc" class="param-desc">{{ s.desc }}</div>
-          <div class="param-effect">{{ effectNames[s.effect] }}<span v-if="s.min !== undefined"> · 取值范围 {{ s.min }}–{{
-            s.max ?? '∞' }}</span></div>
+          <div class="param-effect">
+            {{ effectNames[s.effect]
+            }}<span v-if="s.min !== undefined"> · 取值范围 {{ s.min }}–{{ s.max ?? '∞' }}</span>
+          </div>
         </div>
         <div class="param-ctrl">
-          <input v-if="s.type === 'bool'" type="checkbox" v-model="params[s.key]" />
+          <input v-if="s.type === 'bool'" v-model="params[s.key]" type="checkbox" />
           <select v-else-if="s.type === 'enum'" v-model="params[s.key]">
             <option v-for="o in s.options" :key="o" :value="o">{{ enumLabel(o) }}</option>
           </select>
-          <input v-else v-model.number="params[s.key]" style="width:120px;text-align:center" />
+          <input v-else v-model.number="params[s.key]" class="settings-num-input" />
         </div>
       </div>
     </div>
-    <div class="fg" style="justify-content:flex-end;gap:8px">
+    <div class="fg fg-end fg-gap-8">
       <button @click="resetParams">恢复默认</button>
-      <button class="btn-primary" :disabled="busy('saveParams')" @click="run('saveParams', saveParams)"><i
-          v-if="busy('saveParams')" class="ti ti-loader-2"></i> 保存设置</button>
+      <button
+        class="btn-primary"
+        :disabled="busy('saveParams')"
+        @click="run('saveParams', saveParams)"
+      >
+        <i v-if="busy('saveParams')" class="ti ti-loader-2"></i> 保存设置
+      </button>
     </div>
   </div>
 
   <!-- 用量统计 -->
   <div v-else-if="tab === 4">
-    <div v-if="usage.today_ratio >= 100 || usage.month_ratio >= 100" class="banner"
-      style="background:var(--dangbg);color:var(--dangtx);margin-bottom:12px">
-      {{ usage.today_ratio >= 100 ? '今日' : '本月' }} Token 预算已用完，继续对话将超额（当前策略：仅提醒，不阻断）
+    <div
+      v-if="usage.today_ratio >= 100 || usage.month_ratio >= 100"
+      class="banner banner banner-danger-mb"
+    >
+      {{ usage.today_ratio >= 100 ? '今日' : '本月' }} Token
+      预算已用完，继续对话将超额（当前策略：仅提醒，不阻断）
     </div>
     <div v-if="usageLoadError" class="empty"><i class="ti ti-chart-bar"></i>用量数据加载失败</div>
     <template v-else>
       <!-- 口径筛选：来源/模型，作用于下方全部统计卡片与图表 -->
-      <div class="fg" style="gap:8px;margin-bottom:12px;justify-content:flex-end">
-        <select v-model="usageSource" style="font-size:var(--fs-sm)" @change="loadUsage">
+      <div class="fg settings-toolbar-end">
+        <select v-model="usageSource" class="settings-select-sm" @change="loadUsage">
           <option value="">全部来源</option>
           <option v-for="s in sourceOptions" :key="s" :value="s">{{ usageSourceLabel(s) }}</option>
         </select>
-        <select v-model="usageModel" style="font-size:var(--fs-sm)" @change="loadUsage">
+        <select v-model="usageModel" class="settings-select-sm" @change="loadUsage">
           <option value="">全部模型</option>
           <option v-for="m in modelOptions" :key="m" :value="m">{{ m }}</option>
         </select>
       </div>
-      <div class="g3" style="margin-bottom:12px">
+      <div class="g3 settings-g3-mb">
         <div class="card">
           <div class="label">今日</div>
           <div class="val">{{ formatNum(usage.today_used) }}</div>
@@ -748,98 +1103,216 @@ onActivated(() => selectTab(tab.value))
         </div>
         <div class="card">
           <div class="label">本月费用</div>
-          <div class="val" style="color:var(--sec)">¥{{ monthCost?.month_cost ?? '—' }}</div>
+          <div class="val text-sec">¥{{ monthCost?.month_cost ?? '—' }}</div>
         </div>
       </div>
       <!-- 预算条 -->
       <div class="cw">
-        <div class="row" style="margin-bottom:8px"><span class="muted">今日预算</span><span
-            :style="{ color: (usage.today_ratio || 0) >= 80 ? 'var(--warntx)' : '' }">{{ usage.today_ratio || 0
-            }}%</span></div>
-        <div class="progress">
-          <div
-            :style="{ background: (usage.today_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.today_ratio || 0) + '%' }">
-          </div>
+        <div class="row settings-row-mb">
+          <span class="muted">今日预算</span
+          ><span :style="{ color: (usage.today_ratio || 0) >= 80 ? 'var(--warntx)' : '' }"
+            >{{ usage.today_ratio || 0 }}%</span
+          >
         </div>
-        <div class="row" style="margin-top:14px;margin-bottom:8px"><span class="muted">本月预算</span><span
-            :style="{ color: (usage.month_ratio || 0) >= 80 ? 'var(--warntx)' : '' }">{{ usage.month_ratio || 0
-            }}%</span></div>
         <div class="progress">
           <div
-            :style="{ background: (usage.month_ratio || 0) >= (usage.alert_ratio || 80) ? 'var(--dangtx)' : 'var(--succtx)', width: Math.min(100, usage.month_ratio || 0) + '%' }">
-          </div>
+            :style="{
+              background:
+                (usage.today_ratio || 0) >= (usage.alert_ratio || 80)
+                  ? 'var(--dangtx)'
+                  : 'var(--succtx)',
+              width: Math.min(100, usage.today_ratio || 0) + '%',
+            }"
+          ></div>
+        </div>
+        <div class="row settings-row-mt-mb">
+          <span class="muted">本月预算</span
+          ><span :style="{ color: (usage.month_ratio || 0) >= 80 ? 'var(--warntx)' : '' }"
+            >{{ usage.month_ratio || 0 }}%</span
+          >
+        </div>
+        <div class="progress">
+          <div
+            :style="{
+              background:
+                (usage.month_ratio || 0) >= (usage.alert_ratio || 80)
+                  ? 'var(--dangtx)'
+                  : 'var(--succtx)',
+              width: Math.min(100, usage.month_ratio || 0) + '%',
+            }"
+          ></div>
         </div>
       </div>
       <!-- 趋势图 -->
-      <div class="cw" style="margin-top:12px">
-        <div class="fg" style="justify-content:space-between;margin-bottom:14px">
-          <div class="fg" style="gap:4px">
-            <button v-for="p in [{ k: '30d', n: '近 30 天' }, { k: 'month', n: '本月' }, { k: 'year', n: '当年' }]" :key="p.k"
-              class="chip" :class="{ active: trendPeriod === p.k }" @click="switchTrend(p.k)">{{
-                p.n }}</button>
+      <div class="cw settings-cw-mt">
+        <div class="fg fg-between mb-14">
+          <div class="fg fg-gap-4">
+            <button
+              v-for="p in [
+                { k: '30d', n: '近 30 天' },
+                { k: 'month', n: '本月' },
+                { k: 'year', n: '当年' },
+              ]"
+              :key="p.k"
+              class="chip"
+              :class="{ active: trendPeriod === p.k }"
+              @click="switchTrend(p.k)"
+            >
+              {{ p.n }}
+            </button>
           </div>
         </div>
-        <svg v-if="trend.length" :viewBox="'0 0 ' + TREND_W + ' ' + TREND_H" style="width:100%"
-          preserveAspectRatio="xMidYMid meet">
+        <svg
+          v-if="trend.length"
+          :viewBox="'0 0 ' + TREND_W + ' ' + TREND_H"
+          class="settings-trend-svg"
+          preserveAspectRatio="xMidYMid meet"
+        >
           <!-- grid lines -->
-          <line v-for="y in [0, .25, .5, .75]" :key="y" :x1="50" :y1="TREND_H - 20 - (TREND_H - 30) * y"
-            :x2="TREND_W - 8" :y2="TREND_H - 20 - (TREND_H - 30) * y" stroke="var(--bd)" stroke-dasharray="3,3"
-            stroke-width=".5" />
+          <line
+            v-for="y in [0, 0.25, 0.5, 0.75]"
+            :key="y"
+            :x1="50"
+            :y1="TREND_H - 20 - (TREND_H - 30) * y"
+            :x2="TREND_W - 8"
+            :y2="TREND_H - 20 - (TREND_H - 30) * y"
+            stroke="var(--bd)"
+            stroke-dasharray="3,3"
+            stroke-width=".5"
+          />
           <line x1="49" y1="10" x2="49" :y2="TREND_H - 20" stroke="var(--bd)" stroke-width=".5" />
           <!-- Y 轴标签 -->
-          <text v-for="y in [0, .25, .5, .75, 1]" :key="'yl' + y" :x="44" :y="TREND_H - 20 - (TREND_H - 30) * y + 3"
-            text-anchor="end" font-size="8" fill="var(--muted)">{{ formatNum(Math.round(trendMax * y)) }}</text>
+          <text
+            v-for="y in [0, 0.25, 0.5, 0.75, 1]"
+            :key="'yl' + y"
+            :x="44"
+            :y="TREND_H - 20 - (TREND_H - 30) * y + 3"
+            text-anchor="end"
+            font-size="8"
+            fill="var(--muted)"
+          >
+            {{ formatNum(Math.round(trendMax * y)) }}
+          </text>
           <!-- 零值柱不渲染；堆叠段顶段圆上角（path）、其余直角（rect），保证整体感 -->
-          <g v-for="(b, i) in trendBars" :key="b.label" v-show="b.tokens > 0" @mouseenter="hoveredIdx = i"
-            @mouseleave="hoveredIdx = null">
+          <g
+            v-for="(b, i) in trendBars"
+            v-show="b.tokens > 0"
+            :key="b.label"
+            @mouseenter="hoveredIdx = i"
+            @mouseleave="hoveredIdx = null"
+          >
             <template v-for="(s, si) in b.segs" :key="si">
-              <path v-if="si === b.segs.length - 1" :d="segPath(s)" :fill="s.color"
-                :style="{ opacity: hoveredIdx === i ? .75 : 1 }" />
-              <rect v-else :x="s.x" :y="s.y" :width="s.width" :height="s.height" :fill="s.color"
-                :style="{ opacity: hoveredIdx === i ? .75 : 1 }" />
+              <path
+                v-if="si === b.segs.length - 1"
+                :d="segPath(s)"
+                :fill="s.color"
+                :style="{ opacity: hoveredIdx === i ? 0.75 : 1 }"
+              />
+              <rect
+                v-else
+                :x="s.x"
+                :y="s.y"
+                :width="s.width"
+                :height="s.height"
+                :fill="s.color"
+                :style="{ opacity: hoveredIdx === i ? 0.75 : 1 }"
+              />
             </template>
           </g>
           <!-- hover 即时浮层（跟随柱子，pointer-events 关闭防闪烁，展示多模型明细；颜色全部走 token） -->
           <g v-if="hoverTip" pointer-events="none">
-            <rect :x="hoverTip.x" :y="hoverTip.y" :width="hoverTip.w" :height="hoverTip.h" rx="4"
-              fill="var(--surface-3)" opacity=".95" />
-            <text :x="hoverTip.x + 8" :y="hoverTip.y + 14" font-size="10" fill="var(--fg)" font-weight="600">{{
-              hoverTip.title }}</text>
+            <rect
+              :x="hoverTip.x"
+              :y="hoverTip.y"
+              :width="hoverTip.w"
+              :height="hoverTip.h"
+              rx="4"
+              fill="var(--surface-3)"
+              opacity=".95"
+            />
+            <text
+              :x="hoverTip.x + 8"
+              :y="hoverTip.y + 14"
+              font-size="10"
+              fill="var(--fg)"
+              font-weight="600"
+            >
+              {{ hoverTip.title }}
+            </text>
             <g v-for="(r, ri) in hoverTip.rows" :key="ri">
-              <rect :x="hoverTip.x + 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 2" width="7" height="7" rx="1.5"
-                :fill="r.color" />
-              <text :x="hoverTip.x + 19" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" font-size="9"
-                fill="var(--sec)">{{
-                  r.name }}</text>
-              <text :x="hoverTip.x + hoverTip.w - 8" :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5" text-anchor="end"
-                font-size="9" fill="var(--fg)">{{ r.value }}</text>
+              <rect
+                :x="hoverTip.x + 8"
+                :y="hoverTip.y + 20 + ri * hoverTip.lineH + 2"
+                width="7"
+                height="7"
+                rx="1.5"
+                :fill="r.color"
+              />
+              <text
+                :x="hoverTip.x + 19"
+                :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5"
+                font-size="9"
+                fill="var(--sec)"
+              >
+                {{ r.name }}
+              </text>
+              <text
+                :x="hoverTip.x + hoverTip.w - 8"
+                :y="hoverTip.y + 20 + ri * hoverTip.lineH + 8.5"
+                text-anchor="end"
+                font-size="9"
+                fill="var(--fg)"
+              >
+                {{ r.value }}
+              </text>
             </g>
           </g>
           <!-- 横轴标签：年视图逐月全显，日粒度每 3 个显示一个 -->
-          <text v-for="(b, i) in trendBars" :key="b.label + 'l'" :x="b.x + b.width / 2" :y="TREND_H - 3"
-            text-anchor="middle" font-size="9" fill="var(--muted)" v-show="labelVisible(i)">{{ dateLabel(b) }}</text>
+          <text
+            v-for="(b, i) in trendBars"
+            v-show="labelVisible(i)"
+            :key="b.label + 'l'"
+            :x="b.x + b.width / 2"
+            :y="TREND_H - 3"
+            text-anchor="middle"
+            font-size="9"
+            fill="var(--muted)"
+          >
+            {{ dateLabel(b) }}
+          </text>
         </svg>
         <!-- 模型图例：颜色 ↔ 模型名，与堆叠段颜色一致 -->
-        <div v-if="trendLegend.length" class="fg" style="gap:12px;flex-wrap:wrap;margin-top:8px;font-size:var(--fs-xs)">
-          <span v-for="lg in trendLegend" :key="lg.name" class="fg" style="gap:4px">
+        <div v-if="trendLegend.length" class="fg settings-trend-legend">
+          <span v-for="lg in trendLegend" :key="lg.name" class="fg fg-gap-4">
             <span
-              :style="{ width: '9px', height: '9px', borderRadius: '2px', background: lg.color, display: 'inline-block' }"></span>
+              :style="{
+                width: '9px',
+                height: '9px',
+                borderRadius: '2px',
+                background: lg.color,
+                display: 'inline-block',
+              }"
+            ></span>
             <span class="muted">{{ lg.name }}</span>
           </span>
         </div>
-        <div v-else class="muted" style="text-align:center;padding:20px 0">暂无数据</div>
+        <div v-else class="muted settings-empty">暂无数据</div>
       </div>
       <!-- 来源 / 模型分布 -->
-      <div class="g2" style="margin-top:12px">
-        <div class="cw"><b>按来源</b>
-          <div v-for="s in (distribution.by_source || [])" :key="s.name" class="row" style="margin-top:8px">
-            <span>{{ usageSourceLabel(s.name) }}</span><span>{{ formatNum(s.tokens) }}</span>
+      <div class="g2 settings-cw-mt">
+        <div class="cw">
+          <b>按来源</b>
+          <div v-for="s in distribution.by_source || []" :key="s.name" class="row settings-row-mt">
+            <span>{{ usageSourceLabel(s.name) }}</span
+            ><span>{{ formatNum(s.tokens) }}</span>
           </div>
           <div v-if="!distribution.by_source?.length" class="muted">暂无数据</div>
         </div>
-        <div class="cw"><b>按模型</b>
-          <div v-for="m in (distribution.by_model || [])" :key="m.name" class="row" style="margin-top:8px">
-            <span>{{ m.name }}</span><span>{{ formatNum(m.tokens) }}</span>
+        <div class="cw">
+          <b>按模型</b>
+          <div v-for="m in distribution.by_model || []" :key="m.name" class="row settings-row-mt">
+            <span>{{ m.name }}</span
+            ><span>{{ formatNum(m.tokens) }}</span>
           </div>
           <div v-if="!distribution.by_model?.length" class="muted">暂无数据</div>
         </div>
@@ -849,36 +1322,69 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 备份 -->
   <div v-else-if="tab === 5">
-    <div class="row" style="margin-bottom:12px"><b>备份记录</b>
-      <div class="fg" style="gap:6px">
+    <div class="row settings-backup-row">
+      <b>备份记录</b>
+      <div class="fg fg-gap-6">
         <button class="btn-sm" @click="createBackup">立即备份</button>
-        <button class="btn-sm" :disabled="busy('export')" @click="run('export', exportData)"><i v-if="busy('export')"
-            class="ti ti-loader-2"></i> 导出 JSON</button>
+        <button class="btn-sm" :disabled="busy('export')" @click="run('export', exportData)">
+          <i v-if="busy('export')" class="ti ti-loader-2"></i> 导出 JSON
+        </button>
         <button class="btn-sm" @click="importFileInput?.click()">导入</button>
-        <input ref="importFileInput" type="file" accept=".zip" style="display:none" @change="importData" />
+        <input
+          ref="importFileInput"
+          type="file"
+          accept=".zip"
+          class="hidden-input"
+          @change="importData"
+        />
       </div>
     </div>
-    <div v-if="!backups.length" class="empty"><i class="ti ti-database"></i>尚无备份记录<br>系统每天凌晨 2 点自动备份</div>
+    <div v-if="!backups.length" class="empty">
+      <i class="ti ti-database"></i>尚无备份记录<br />系统每天凌晨 2 点自动备份
+    </div>
     <div v-for="b in backups" :key="b.backup_id" class="cw">
       <div class="row">
-        <div class="fg" style="gap:8px"><i class="ti ti-database" style="color:var(--succtx)"></i>
-          <div><b>{{ b.type === 'auto' ? '自动备份' : b.type === 'protective' ? '保护性备份' : '手动备份' }} — {{
-            formatTime(b.created_at) }}</b>
-            <div class="muted">{{ (b.size_bytes / 1024 / 1024).toFixed(1) }} MB · {{ b.integrity }}</div>
+        <div class="fg fg-gap-8">
+          <i class="ti ti-database text-succ"></i>
+          <div>
+            <b
+              >{{
+                b.type === 'auto' ? '自动备份' : b.type === 'protective' ? '保护性备份' : '手动备份'
+              }}
+              — {{ formatTime(b.created_at) }}</b
+            >
+            <div class="muted">
+              {{ (b.size_bytes / 1024 / 1024).toFixed(1) }} MB · {{ b.integrity }}
+            </div>
           </div>
         </div>
-        <button class="btn-sm" :disabled="busy('restore' + b.backup_id)"
-          @click="run('restore' + b.backup_id, () => restoreBackup(b.backup_id))">恢复</button>
+        <button
+          class="btn-sm"
+          :disabled="busy('restore' + b.backup_id)"
+          @click="run('restore' + b.backup_id, () => restoreBackup(b.backup_id))"
+        >
+          恢复
+        </button>
       </div>
     </div>
-    <div class="muted" style="margin-top:12px;font-size:var(--fs-sm)">恢复前会自动保存当前数据作为保底备份（不占 3 份名额）。</div>
+    <div class="muted settings-note">恢复前会自动保存当前数据作为保底备份（不占 3 份名额）。</div>
     <!-- 备份命名弹窗 -->
     <BaseModal v-if="showBackupLabel" title="创建备份" size="sm" @close="showBackupLabel = false">
-      <input v-model="backupLabel" placeholder="自定义标签（可选，默认按时间命名）" style="width:100%" @keyup.enter="doCreateBackup" />
+      <input
+        v-model="backupLabel"
+        placeholder="自定义标签（可选，默认按时间命名）"
+        class="w-full"
+        @keyup.enter="doCreateBackup"
+      />
       <template #footer>
         <button @click="showBackupLabel = false">取消</button>
-        <button class="btn-primary" :disabled="busy('mkBackup')" @click="run('mkBackup', doCreateBackup)"><i
-            v-if="busy('mkBackup')" class="ti ti-loader-2"></i> 创建</button>
+        <button
+          class="btn-primary"
+          :disabled="busy('mkBackup')"
+          @click="run('mkBackup', doCreateBackup)"
+        >
+          <i v-if="busy('mkBackup')" class="ti ti-loader-2"></i> 创建
+        </button>
       </template>
     </BaseModal>
   </div>
@@ -887,34 +1393,59 @@ onActivated(() => selectTab(tab.value))
   <div v-else-if="tab === 6">
     <div v-if="status">
       <div class="banner" :style="overallStyle(status.overall)">
-        系统运行{{ overallLabel(status.overall) }} · 首次安装 {{ status.first_installed || '—' }}</div>
-      <div v-for="s in status.subsystems" :key="s.name" class="row"
-        style="padding:10px 0;border-bottom:1px solid var(--bd)">
-        <div class="fg" style="gap:8px"><span class="dot"
-            :style="{ background: s.status === 'healthy' ? 'var(--succtx)' : s.status === 'unhealthy' ? 'var(--dangtx)' : 'var(--warntx)' }"></span>
-          <div><b>{{ s.name }}</b>
+        系统运行{{ overallLabel(status.overall) }} · 首次安装 {{ status.first_installed || '—' }}
+      </div>
+      <div v-for="s in status.subsystems" :key="s.name" class="row settings-slot-row">
+        <div class="fg fg-gap-8">
+          <span
+            class="dot"
+            :style="{
+              background:
+                s.status === 'healthy'
+                  ? 'var(--succtx)'
+                  : s.status === 'unhealthy'
+                    ? 'var(--dangtx)'
+                    : 'var(--warntx)',
+            }"
+          ></span>
+          <div>
+            <b>{{ s.name }}</b>
             <div class="muted">{{ s.detail }}</div>
           </div>
         </div>
         <span class="muted">{{ s.metric }}</span>
       </div>
-      <div class="cw" style="margin-top:16px">
+      <div class="cw mt-4">
         <div class="muted">
-          产品版本 {{ status.system_info?.product_version }} · Schema {{ status.system_info?.schema_version }}
-          · 记忆 {{ status.system_info?.memory_count }} 条 · 会话 {{ status.system_info?.session_count }} 个</div>
+          产品版本 {{ status.system_info?.product_version }} · Schema
+          {{ status.system_info?.schema_version }} · 记忆 {{ status.system_info?.memory_count }} 条
+          · 会话 {{ status.system_info?.session_count }} 个
+        </div>
       </div>
       <div class="section-title mt">定时任务</div>
-      <div v-for="t in tasks" :key="t.task_id" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
-        <div><b>{{ t.name }}</b>
-          <div class="muted">{{ t.schedule }} · 上次 {{ t.last_run ? formatTime(t.last_run) : '尚未执行' }}</div>
+      <div v-for="t in tasks" :key="t.task_id" class="row task-row">
+        <div>
+          <b>{{ t.name }}</b>
+          <div class="muted">
+            {{ t.schedule }} · 上次 {{ t.last_run ? formatTime(t.last_run) : '尚未执行' }}
+          </div>
         </div>
-        <div class="fg" style="gap:6px">
+        <div class="fg fg-gap-6">
           <span class="badge" :class="taskBadge(t.status)">{{ taskLabel(t.status) }}</span>
-          <button class="btn-xs" :disabled="busy('log' + t.task_id)"
-            @click="run('log' + t.task_id, () => showTaskLogs(t.task_id))">日志</button>
-          <button class="btn-xs" :disabled="busy('runT' + t.task_id)"
-            @click="run('runT' + t.task_id, () => runTask(t.task_id))"><i v-if="busy('runT' + t.task_id)"
-              class="ti ti-loader-2"></i> 立即执行</button>
+          <button
+            class="btn-xs"
+            :disabled="busy('log' + t.task_id)"
+            @click="run('log' + t.task_id, () => showTaskLogs(t.task_id))"
+          >
+            日志
+          </button>
+          <button
+            class="btn-xs"
+            :disabled="busy('runT' + t.task_id)"
+            @click="run('runT' + t.task_id, () => runTask(t.task_id))"
+          >
+            <i v-if="busy('runT' + t.task_id)" class="ti ti-loader-2"></i> 立即执行
+          </button>
         </div>
       </div>
     </div>
@@ -923,23 +1454,23 @@ onActivated(() => selectTab(tab.value))
   <!-- 已归档项目 -->
   <div v-else-if="tab === 7">
     <div class="section-title">已归档项目</div>
-    <div v-if="archivedLoading" class="muted" style="padding:20px">加载中…</div>
+    <div v-if="archivedLoading" class="muted empty-pad-20">加载中…</div>
     <div v-else-if="!archivedProjects.length" class="empty">
-      <i class="ti ti-archive"></i>没有已归档项目<br>
+      <i class="ti ti-archive"></i>没有已归档项目<br />
       在侧栏项目菜单选择「归档项目」可将项目移到此处
     </div>
-    <div v-for="p in archivedProjects" :key="p.id" class="cw" style="margin-bottom:12px;padding:14px">
-      <div class="row" style="align-items:flex-start">
-        <div style="flex:1;min-width:0">
-          <div style="display:flex;align-items:center;gap:8px">
-            <i class="ti ti-folder" style="color:var(--muted)"></i>
+    <div v-for="p in archivedProjects" :key="p.id" class="cw archived-card">
+      <div class="row fg-start">
+        <div class="flex-1-min">
+          <div class="fg fg-gap-8">
+            <i class="ti ti-folder text-muted-icon"></i>
             <b>{{ p.title }}</b>
             <span v-if="p.path_missing" class="badge badge-r">目录已丢失</span>
           </div>
-          <div class="muted" style="font-size:12px;margin-top:4px">路径：{{ p.path }}</div>
-          <div class="muted" style="font-size:12px">归档于：{{ p.archived_at || '—' }}</div>
+          <div class="muted archived-meta">路径：{{ p.path }}</div>
+          <div class="muted archived-meta mt-0">归档于：{{ p.archived_at || '—' }}</div>
         </div>
-        <div class="fg" style="gap:8px;flex-shrink:0">
+        <div class="fg fg-gap-8 shrink-0">
           <button class="btn-xs" @click="unarchiveProject(p)">
             <i class="ti ti-restore"></i> 恢复到工作区
           </button>
@@ -953,19 +1484,22 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 永久删除二次确认 -->
   <BaseModal v-if="purgeTarget" title="永久删除项目" size="md" @close="purgeTarget = null">
-    <div style="line-height:1.7">
-      <div style="margin-bottom:12px"><b>{{ purgeTarget.title }}</b></div>
-      <p>将永久删除以下数据，<b style="color:var(--dangtx)">不可恢复</b>：</p>
-      <ul style="margin:8px 0;padding-left:24px;color:var(--muted)">
+    <div class="line-height-loose">
+      <div class="mb-12">
+        <b>{{ purgeTarget.title }}</b>
+      </div>
+      <p>将永久删除以下数据，<b class="text-danger">不可恢复</b>：</p>
+      <ul class="purge-list">
         <li>该项目所有会话及其对话历史</li>
         <li>该项目所有记忆及其向量、图谱、关联索引</li>
         <li>该项目所有知识库文档与本地目录扫描配置</li>
       </ul>
-      <div class="muted" style="margin-top:8px;padding:8px;background:var(--bg-input,rgba(127,127,127,0.08));border-radius:4px;font-size:12px">
-        ⚠ 本地项目目录（<code>{{ purgeTarget.path }}</code>）本身不会被删除。
+      <div class="muted purge-note">
+        ⚠ 本地项目目录（<code>{{ purgeTarget.path }}</code
+        >）本身不会被删除。
       </div>
-      <label style="display:flex;align-items:center;gap:8px;margin-top:16px">
-        <input type="checkbox" v-model="purgeCheckbox" />
+      <label class="fg fg-gap-8 purge-label">
+        <input v-model="purgeCheckbox" type="checkbox" />
         <span>我已理解，确认永久删除该项目及所有相关数据</span>
       </label>
     </div>
@@ -979,8 +1513,11 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 添加 Provider 弹窗 -->
   <BaseModal v-if="showAddProvider" title="添加 LLM Provider" @close="showAddProvider = false">
-    <div class="form-group"><label class="label">显示名称</label><input v-model="newProvider.display_name" /></div>
-    <div class="form-group"><label class="label">类型</label>
+    <div class="form-group">
+      <label class="label">显示名称</label><input v-model="newProvider.display_name" />
+    </div>
+    <div class="form-group">
+      <label class="label">类型</label>
       <select v-model="newProvider.provider_type">
         <option value="openai_compatible">OpenAI 兼容</option>
         <option value="anthropic">Anthropic</option>
@@ -988,30 +1525,43 @@ onActivated(() => selectTab(tab.value))
         <option value="custom">自定义</option>
       </select>
     </div>
-    <div class="form-group"><label class="label">基础地址</label><input v-model="newProvider.base_url" /></div>
-    <div class="form-group"><label class="label">API Key</label>
+    <div class="form-group">
+      <label class="label">基础地址</label><input v-model="newProvider.base_url" />
+    </div>
+    <div class="form-group">
+      <label class="label">API Key</label>
       <div class="input-affix">
         <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'" />
-        <i :class="showAddKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-          @click="showAddKey = !showAddKey"></i>
+        <i
+          :class="showAddKey ? 'ti ti-eye-off input-affix-icon' : 'ti ti-eye input-affix-icon'"
+          @click="showAddKey = !showAddKey"
+        ></i>
       </div>
     </div>
-    <div class="form-group"><label class="label">模型 ID</label><input v-model="newProvider.model_id" /></div>
-    <div class="form-grid">
-      <div><label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" /></div>
-      <div><label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" /></div>
+    <div class="form-group">
+      <label class="label">模型 ID</label><input v-model="newProvider.model_id" />
     </div>
-    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+    <div class="form-grid">
+      <div>
+        <label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" />
+      </div>
+      <div>
+        <label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" />
+      </div>
+    </div>
+    <div class="fg modal-actions">
       <button @click="showAddProvider = false">取消</button>
-      <button :disabled="busy('testAdd')" @click="run('testAdd', () => testConn(newProvider))"><i v-if="busy('testAdd')"
-          class="ti ti-loader-2"></i> 测试连接</button>
-      <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)"><i v-if="busy('addP')"
-          class="ti ti-loader-2"></i> 保存</button>
+      <button :disabled="busy('testAdd')" @click="run('testAdd', () => testConn(newProvider))">
+        <i v-if="busy('testAdd')" class="ti ti-loader-2"></i> 测试连接
+      </button>
+      <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)">
+        <i v-if="busy('addP')" class="ti ti-loader-2"></i> 保存
+      </button>
     </div>
   </BaseModal>
   <!-- Embedding 切换预估弹窗 -->
   <BaseModal v-if="embEstimate" title="Embedding 模型切换" @close="embEstimate = null">
-    <p class="muted" style="margin-bottom:12px">切换后需重新向量化所有记忆（旧向量保留 30 天可回滚）。</p>
+    <p class="muted mb-12">切换后需重新向量化所有记忆（旧向量保留 30 天可回滚）。</p>
     <div class="g2">
       <div class="card">
         <div class="label">需重跑</div>
@@ -1022,102 +1572,164 @@ onActivated(() => selectTab(tab.value))
         <div class="val">{{ embEstimate.estimated_minutes }} 分钟</div>
       </div>
     </div>
-    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+    <div class="fg modal-actions">
       <button @click="embEstimate = null">取消</button>
-      <button class="btn-primary" :disabled="busy('migrate')" @click="run('migrate', confirmMigrate)"><i
-          v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换</button>
+      <button
+        class="btn-primary"
+        :disabled="busy('migrate')"
+        @click="run('migrate', confirmMigrate)"
+      >
+        <i v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换
+      </button>
     </div>
   </BaseModal>
 
   <!-- 定时任务日志弹窗 -->
-  <BaseModal v-if="taskLogs" :title="'执行日志 · ' + taskLogs.id" size="lg" @close="taskLogs = null">
+  <BaseModal
+    v-if="taskLogs"
+    :title="'执行日志 · ' + taskLogs.id"
+    size="lg"
+    @close="taskLogs = null"
+  >
     <div v-if="!taskLogs.logs.length" class="muted">该任务尚未执行过</div>
-    <div v-for="(l, i) in taskLogs.logs" :key="i" class="row" style="padding:8px 0;border-bottom:1px solid var(--bd)">
-      <div><b>{{ formatTime(l.run_time) }}</b>
+    <div v-for="(l, i) in taskLogs.logs" :key="i" class="row task-row">
+      <div>
+        <b>{{ formatTime(l.run_time) }}</b>
         <div class="muted">
           <template v-if="l.result === 'skipped'">{{ l.fail_reason || '未执行' }}</template>
-          <template v-else>耗时 {{ formatDuration(l.duration_ms) }}
-            <span v-if="l.fail_reason" style="color:var(--dangtx)">· {{ l.fail_reason }}</span>
+          <template v-else
+            >耗时 {{ formatDuration(l.duration_ms) }}
+            <span v-if="l.fail_reason" class="text-danger">· {{ l.fail_reason }}</span>
           </template>
         </div>
       </div>
       <span class="badge" :class="taskBadge(l.result)">{{ taskLabel(l.result) }}</span>
     </div>
-    <div class="fg" style="justify-content:flex-end;margin-top:16px"><button @click="taskLogs = null">关闭</button>
-    </div>
+    <div class="fg modal-actions-plain mt-4"><button @click="taskLogs = null">关闭</button></div>
   </BaseModal>
 
   <!-- 添加连接器弹窗 -->
   <BaseModal v-if="showAddConn" title="添加 MCP 连接器" @close="showAddConn = false">
-    <div class="form-group"><label class="label">名称</label><input v-model="newConn.name" placeholder="如：GitHub" />
+    <div class="form-group">
+      <label class="label">名称</label><input v-model="newConn.name" placeholder="如：GitHub" />
     </div>
-    <div class="form-group"><label class="label">传输方式</label>
+    <div class="form-group">
+      <label class="label">传输方式</label>
       <select v-model="newConn.transport">
         <option value="stdio">stdio — 本地子进程</option>
         <option value="http">Streamable HTTP</option>
       </select>
     </div>
     <template v-if="newConn.transport === 'stdio'">
-      <div class="form-group"><label class="label">启动命令</label><input v-model="newConn.command" /></div>
-      <div class="form-group"><label class="label">参数（JSON 数组）</label><input v-model="newConn.args"
-          placeholder='["-y","@modelcontextprotocol/server-github"]' /></div>
-      <div class="form-group"><label class="label">环境变量（JSON 对象）</label><input v-model="newConn.env"
-          placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' /></div>
+      <div class="form-group">
+        <label class="label">启动命令</label><input v-model="newConn.command" />
+      </div>
+      <div class="form-group">
+        <label class="label">参数（JSON 数组）</label
+        ><input v-model="newConn.args" placeholder='["-y","@modelcontextprotocol/server-github"]' />
+      </div>
+      <div class="form-group">
+        <label class="label">环境变量（JSON 对象）</label
+        ><input v-model="newConn.env" placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' />
+      </div>
     </template>
     <template v-else>
-      <div class="form-group"><label class="label">端点地址</label><input v-model="newConn.url" /></div>
+      <div class="form-group">
+        <label class="label">端点地址</label><input v-model="newConn.url" />
+      </div>
     </template>
-    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+    <div class="fg modal-actions">
       <button @click="showAddConn = false">取消</button>
-      <button :disabled="busy('testConn')" @click="run('testConn', testConnector)"><i v-if="busy('testConn')"
-          class="ti ti-loader-2"></i> 测试连接</button>
-      <button class="btn-primary" :disabled="busy('addConn')" @click="run('addConn', addConnector)"><i
-          v-if="busy('addConn')" class="ti ti-loader-2"></i> 保存</button>
+      <button :disabled="busy('testConn')" @click="run('testConn', testConnector)">
+        <i v-if="busy('testConn')" class="ti ti-loader-2"></i> 测试连接
+      </button>
+      <button class="btn-primary" :disabled="busy('addConn')" @click="run('addConn', addConnector)">
+        <i v-if="busy('addConn')" class="ti ti-loader-2"></i> 保存
+      </button>
     </div>
   </BaseModal>
 
   <!-- 编辑连接器弹窗：与添加表单同构；占位密钥不改动时后端保留原值 -->
   <BaseModal v-if="showEditConn" title="编辑 MCP 连接器" @close="showEditConn = false">
-    <div class="form-group"><label class="label">名称</label><input v-model="editConn.name" />
-    </div>
-    <div class="form-group"><label class="label">传输方式</label>
+    <div class="form-group"><label class="label">名称</label><input v-model="editConn.name" /></div>
+    <div class="form-group">
+      <label class="label">传输方式</label>
       <select v-model="editConn.transport">
         <option value="stdio">stdio — 本地子进程</option>
         <option value="http">Streamable HTTP</option>
       </select>
     </div>
     <template v-if="editConn.transport === 'stdio'">
-      <div class="form-group"><label class="label">启动命令</label><input v-model="editConn.command" /></div>
-      <div class="form-group"><label class="label">参数（JSON 数组）</label><input v-model="editConn.args"
-          placeholder='["-y","@modelcontextprotocol/server-github"]' /></div>
-      <div class="form-group"><label class="label">环境变量（JSON 对象）</label><input v-model="editConn.env"
-          placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' /></div>
+      <div class="form-group">
+        <label class="label">启动命令</label><input v-model="editConn.command" />
+      </div>
+      <div class="form-group">
+        <label class="label">参数（JSON 数组）</label
+        ><input
+          v-model="editConn.args"
+          placeholder='["-y","@modelcontextprotocol/server-github"]'
+        />
+      </div>
+      <div class="form-group">
+        <label class="label">环境变量（JSON 对象）</label
+        ><input v-model="editConn.env" placeholder='{"GITHUB_TOKEN":"ghp_xxx"}' />
+      </div>
     </template>
     <template v-else>
-      <div class="form-group"><label class="label">端点地址</label><input v-model="editConn.url" /></div>
+      <div class="form-group">
+        <label class="label">端点地址</label><input v-model="editConn.url" />
+      </div>
     </template>
-    <div v-if="editConnMasked" class="muted" style="margin-bottom:12px">环境变量中的 •••••• 为占位密钥，保持不动即沿用原值；填入新值则覆盖。</div>
-    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+    <div v-if="editConnMasked" class="muted mb-12">
+      环境变量中的 •••••• 为占位密钥，保持不动即沿用原值；填入新值则覆盖。
+    </div>
+    <div class="fg modal-actions">
       <button @click="showEditConn = false">取消</button>
-      <button :disabled="busy('testEditConn') || editConnMasked" @click="run('testEditConn', testEditConn)"><i
-          v-if="busy('testEditConn')" class="ti ti-loader-2"></i> 测试连接</button>
-      <button class="btn-primary" :disabled="busy('saveEditConn')" @click="run('saveEditConn', saveConnEdit)"><i
-          v-if="busy('saveEditConn')" class="ti ti-loader-2"></i> 保存</button>
+      <button
+        :disabled="busy('testEditConn') || editConnMasked"
+        @click="run('testEditConn', testEditConn)"
+      >
+        <i v-if="busy('testEditConn')" class="ti ti-loader-2"></i> 测试连接
+      </button>
+      <button
+        class="btn-primary"
+        :disabled="busy('saveEditConn')"
+        @click="run('saveEditConn', saveConnEdit)"
+      >
+        <i v-if="busy('saveEditConn')" class="ti ti-loader-2"></i> 保存
+      </button>
     </div>
   </BaseModal>
 
   <!-- 连接器工具清单弹窗：数据取自列表接口的 tools 缓存，点击工具行展开参数明细 -->
-  <BaseModal v-if="viewTools" :title="'工具清单 · ' + viewTools.name" size="lg" @close="viewTools = null">
+  <BaseModal
+    v-if="viewTools"
+    :title="'工具清单 · ' + viewTools.name"
+    size="lg"
+    @close="viewTools = null"
+  >
     <div class="muted mb-3">共 {{ viewTools.tool_count }} 个工具 · 点击工具行可展开参数明细</div>
-    <div v-for="t in viewTools.tools" :key="t.name" class="cw tool-row" role="button" tabindex="0"
-      :aria-expanded="expandedTool === t.name" :aria-label="'工具 ' + t.name + '，点击展开参数明细'" @click="toggleTool(t)"
-      @keydown.enter.prevent="toggleTool(t)" @keydown.space.prevent="toggleTool(t)">
+    <div
+      v-for="t in viewTools.tools"
+      :key="t.name"
+      class="cw tool-row"
+      role="button"
+      tabindex="0"
+      :aria-expanded="expandedTool === t.name"
+      :aria-label="'工具 ' + t.name + '，点击展开参数明细'"
+      @click="toggleTool(t)"
+      @keydown.enter.prevent="toggleTool(t)"
+      @keydown.space.prevent="toggleTool(t)"
+    >
       <div class="row">
         <div class="fg">
           <code>{{ t.name }}</code>
           <span class="badge" :class="toolBadge(t).cls">{{ toolBadge(t).label }}</span>
         </div>
-        <i class="ti muted" :class="expandedTool === t.name ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+        <i
+          class="ti muted"
+          :class="expandedTool === t.name ? 'ti-chevron-up' : 'ti-chevron-down'"
+        ></i>
       </div>
       <div v-if="toolSummary(t)" class="tool-desc">{{ toolSummary(t) }}</div>
       <div v-if="expandedTool === t.name" class="tool-params" @click.stop>
@@ -1135,7 +1747,8 @@ onActivated(() => selectTab(tab.value))
 
   <!-- 接入渠道配置弹窗 -->
   <BaseModal v-if="showChannelCfg" title="配置接入渠道" @close="showChannelCfg = false">
-    <div class="form-group"><label class="label">平台</label>
+    <div class="form-group">
+      <label class="label">平台</label>
       <select v-model="newChannel.platform_type">
         <option value="feishu">飞书</option>
         <option value="telegram">Telegram</option>
@@ -1143,83 +1756,125 @@ onActivated(() => selectTab(tab.value))
         <option value="wecom">企业微信</option>
       </select>
     </div>
-    <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="newChannel.bot_token" />
+    <div class="form-group">
+      <label class="label">Bot Token / App ID</label><input v-model="newChannel.bot_token" />
     </div>
-    <div class="form-group"><label class="label">App Secret（部分平台）</label><input v-model="newChannel.app_secret"
-        type="password" /></div>
-    <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
-        v-model="newChannel.whitelist_user_id" />
+    <div class="form-group">
+      <label class="label">App Secret（部分平台）</label
+      ><input v-model="newChannel.app_secret" type="password" />
     </div>
-    <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url" /></div>
-    <div class="muted" style="margin-bottom:12px">启用后会自动禁用当前已启用的 IM 平台。</div>
-    <div class="fg" style="justify-content:flex-end;gap:8px">
+    <div class="form-group">
+      <label class="label">绑定账户 ID（只对该账户响应）</label
+      ><input v-model="newChannel.whitelist_user_id" />
+    </div>
+    <div class="form-group">
+      <label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url" />
+    </div>
+    <div class="muted mb-12">启用后会自动禁用当前已启用的 IM 平台。</div>
+    <div class="fg fg-end fg-gap-8">
       <button @click="showChannelCfg = false">取消</button>
-      <button :disabled="busy('testCh')" @click="run('testCh', testChannel)"><i v-if="busy('testCh')"
-          class="ti ti-loader-2"></i> 测试连接</button>
-      <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)"><i v-if="busy('addCh')"
-          class="ti ti-loader-2"></i> 启用</button>
+      <button :disabled="busy('testCh')" @click="run('testCh', testChannel)">
+        <i v-if="busy('testCh')" class="ti ti-loader-2"></i> 测试连接
+      </button>
+      <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)">
+        <i v-if="busy('addCh')" class="ti ti-loader-2"></i> 启用
+      </button>
     </div>
   </BaseModal>
 
   <!-- 微信扫码绑定弹窗（关闭需同步停轮询） -->
-  <BaseModal v-if="showWeixinScan" title="微信渠道扫码绑定" @close="stopWxPoll(); showWeixinScan = false">
-    <div style="text-align:center">
-      <div class="muted" style="margin:8px 0">使用微信「我 → 设置 → 插件 → ClawBot」扫描下方二维码（需微信 8.0.70+ 且账号已开放 ClawBot 灰度）</div>
+  <BaseModal
+    v-if="showWeixinScan"
+    title="微信渠道扫码绑定"
+    @close="stopWxPoll(); showWeixinScan = false"
+  >
+    <div class="text-center-block">
+      <div class="muted my-2">
+        使用微信「我 → 设置 → 插件 → ClawBot」扫描下方二维码（需微信 8.0.70+ 且账号已开放 ClawBot
+        灰度）
+      </div>
       <!-- 二维码背景强制白底：扫码识别对比度需求（例外登记 UI_UX_SPEC） -->
-      <div v-if="wxImgSrc()"
-        style="margin:16px auto;width:220px;height:220px;background:#fff;padding:8px;border-radius:var(--radius-sm)">
-        <img :src="wxImgSrc()" style="width:100%;height:100%;object-fit:contain" alt="微信扫码" />
+      <div v-if="wxImgSrc()" class="wx-qr">
+        <img :src="wxImgSrc()" class="wx-qr-img" alt="微信扫码" />
       </div>
       <div v-else-if="wxScan.busy" class="muted">正在获取二维码…</div>
-      <div v-else-if="wxScan.url" class="muted" style="margin:12px 0;word-break:break-all">请复制下方链接，在微信中打开后扫码确认：<br />{{
-        wxScan.url }}</div>
-      <div class="fg" style="justify-content:center;gap:8px;margin-top:8px">
+      <div v-else-if="wxScan.url" class="muted wx-link-note">
+        请复制下方链接，在微信中打开后扫码确认：<br />{{ wxScan.url }}
+      </div>
+      <div class="fg fg-gap-8 fg-center mt-2">
         <button v-if="!wxImgSrc() && wxScan.url" @click="copyWxUrl">复制链接</button>
       </div>
-      <div class="muted" style="margin-top:8px">{{ wxScan.status === 'confirmed' ? '绑定成功' : '等待扫码确认…' }}</div>
-      <div class="fg" style="justify-content:center;gap:8px;margin-top:16px">
+      <div class="muted mt-2">
+        {{ wxScan.status === 'confirmed' ? '绑定成功' : '等待扫码确认…' }}
+      </div>
+      <div class="fg fg-gap-8 fg-center mt-4">
         <button @click="refreshWeixinQrcode">重新获取</button>
-        <button @click="stopWxPoll(); showWeixinScan = false">关闭</button>
+        <button @click="stopWxPoll(); showWeixinScan = false">
+          关闭
+        </button>
       </div>
     </div>
   </BaseModal>
 
   <!-- 编辑接入渠道弹窗 -->
   <BaseModal v-if="showChannelEdit" title="编辑接入渠道" @close="showChannelEdit = false">
-    <div class="form-group"><label class="label">平台</label>
-      <input :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type" disabled />
+    <div class="form-group">
+      <label class="label">平台</label>
+      <input
+        :value="PLATFORM_MAP[editChannel.platform_type] || editChannel.platform_type"
+        disabled
+      />
     </div>
     <template v-if="editChannel.platform_type === 'weixin'">
-      <div class="muted" style="margin-bottom:12px">微信渠道凭证由扫码绑定流程管理（含会话 Token），此处仅可修改绑定账户与回调。</div>
+      <div class="muted mb-12">
+        微信渠道凭证由扫码绑定流程管理（含会话 Token），此处仅可修改绑定账户与回调。
+      </div>
     </template>
     <template v-else>
-      <div class="form-group"><label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
+      <div class="form-group">
+        <label class="label">Bot Token / App ID</label><input v-model="editChannel.bot_token" />
       </div>
-      <div class="form-group"><label class="label">App Secret（部分平台）</label>
+      <div class="form-group">
+        <label class="label">App Secret（部分平台）</label>
         <div class="input-affix">
           <input v-model="editChannel.app_secret" :type="showEditSecret ? 'text' : 'password'" />
-          <i :class="showEditSecret ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-            @click="showEditSecret = !showEditSecret"></i>
+          <i
+            :class="showEditSecret ? 'ti ti-eye-off input-affix-icon' : 'ti ti-eye input-affix-icon'"
+            @click="showEditSecret = !showEditSecret"
+          ></i>
         </div>
       </div>
     </template>
-    <div class="form-group"><label class="label">绑定账户 ID（只对该账户响应）</label><input
-        v-model="editChannel.whitelist_user_id" />
+    <div class="form-group">
+      <label class="label">绑定账户 ID（只对该账户响应）</label
+      ><input v-model="editChannel.whitelist_user_id" />
     </div>
-    <div class="form-group"><label class="label">回调地址（需外网可达）</label><input v-model="editChannel.callback_url" /></div>
-    <div class="fg" style="justify-content:flex-end;gap:8px">
+    <div class="form-group">
+      <label class="label">回调地址（需外网可达）</label
+      ><input v-model="editChannel.callback_url" />
+    </div>
+    <div class="fg fg-end fg-gap-8">
       <button @click="showChannelEdit = false">取消</button>
-      <button :disabled="busy('testChE')" @click="run('testChE', testEditChannel)"><i v-if="busy('testChE')"
-          class="ti ti-loader-2"></i> 测试连接</button>
-      <button class="btn-primary" :disabled="busy('saveChE')" @click="run('saveChE', saveChannelEdit)"><i
-          v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存</button>
+      <button :disabled="busy('testChE')" @click="run('testChE', testEditChannel)">
+        <i v-if="busy('testChE')" class="ti ti-loader-2"></i> 测试连接
+      </button>
+      <button
+        class="btn-primary"
+        :disabled="busy('saveChE')"
+        @click="run('saveChE', saveChannelEdit)"
+      >
+        <i v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存
+      </button>
     </div>
   </BaseModal>
 
   <!-- 编辑 Provider 弹窗 -->
   <BaseModal v-if="showEdit" title="编辑 LLM Provider" @close="showEdit = false">
-    <div class="form-group"><label class="label">显示名称</label><input v-model="editData.display_name" /></div>
-    <div class="form-group"><label class="label">类型</label>
+    <div class="form-group">
+      <label class="label">显示名称</label><input v-model="editData.display_name" />
+    </div>
+    <div class="form-group">
+      <label class="label">类型</label>
       <select v-model="editData.provider_type">
         <option value="openai_compatible">OpenAI 兼容</option>
         <option value="anthropic">Anthropic</option>
@@ -1227,27 +1882,41 @@ onActivated(() => selectTab(tab.value))
         <option value="custom">自定义</option>
       </select>
     </div>
-    <div class="form-group"><label class="label">基础地址</label><input v-model="editData.base_url" /></div>
-    <div class="form-group"><label class="label">API Key</label>
+    <div class="form-group">
+      <label class="label">基础地址</label><input v-model="editData.base_url" />
+    </div>
+    <div class="form-group">
+      <label class="label">API Key</label>
       <div class="input-affix">
         <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'" />
-        <i :class="showEditKey ? 'ti ti-eye-off' : 'ti ti-eye'" class="input-affix-icon"
-          @click="showEditKey = !showEditKey"></i>
+        <i
+          :class="showEditKey ? 'ti ti-eye-off input-affix-icon' : 'ti ti-eye input-affix-icon'"
+          @click="showEditKey = !showEditKey"
+        ></i>
       </div>
     </div>
-    <div class="form-group"><label class="label">模型 ID</label><input v-model="editData.model_id" /></div>
-    <div class="form-grid">
-      <div><label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" /></div>
-      <div><label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" /></div>
+    <div class="form-group">
+      <label class="label">模型 ID</label><input v-model="editData.model_id" />
     </div>
-    <div class="form-group" style="margin-top:12px"><label class="label">上下文窗口</label><input
-        v-model.number="editData.context_window" /></div>
-    <div class="fg" style="justify-content:flex-end;gap:8px;margin-top:16px">
+    <div class="form-grid">
+      <div>
+        <label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" />
+      </div>
+      <div>
+        <label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" />
+      </div>
+    </div>
+    <div class="form-group settings-cw-mt">
+      <label class="label">上下文窗口</label><input v-model.number="editData.context_window" />
+    </div>
+    <div class="fg modal-actions">
       <button @click="showEdit = false">取消</button>
-      <button :disabled="busy('testEdit')" @click="run('testEdit', () => testConn(editData))"><i v-if="busy('testEdit')"
-          class="ti ti-loader-2"></i> 测试连接</button>
-      <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)"><i
-          v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存</button>
+      <button :disabled="busy('testEdit')" @click="run('testEdit', () => testConn(editData))">
+        <i v-if="busy('testEdit')" class="ti ti-loader-2"></i> 测试连接
+      </button>
+      <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)">
+        <i v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存
+      </button>
     </div>
   </BaseModal>
 </template>
