@@ -243,7 +243,8 @@ class AppContainer:
                       {"role": "user", "content":
                        f"{ctx_part}当前问题：{query}\n候选：\n{listing}"}]
             resp = await self.llm.chat(snap, prompt, source="agent",
-                                       session_id=session_id, json_mode=True)
+                                       session_id=session_id, json_mode=True,
+                                       extra_body={"thinking_enabled": False})
             data = repair_json(resp["content"])
             # Δ5：不再硬 clamp 到 3；上限由 retriever.retrieval_refine_max 控制
             # （避免 container 与 retriever 两处 max 值错位，出现"配置调了没用"的迷雾）

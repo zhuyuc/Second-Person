@@ -20,6 +20,7 @@ import SessionMetricsLine from '@/components/SessionMetricsLine.vue'
 import SelectionActionBar from '@/components/SelectionActionBar.vue'
 import QuoteComposer from '@/components/QuoteComposer.vue'
 import ThinkingTimeline from '@/components/ThinkingTimeline.vue'
+import { formatTimelineSummary } from '@/utils/timelineSummary'
 import { useMessageSelection } from '@/composables/useMessageSelection'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
@@ -166,7 +167,28 @@ const decisionNotices = ref([])
 const toolEvents = ref([])
 // v7 时间线（交错 reasoning + tool_call，按到达顺序合并/就地更新）
 const timeline = ref([])
-const thinkOpen = ref(true)   // 处理进度面板：生成中展开，正文首字出现后自动折叠
+const thinkOpen = ref(true)   // 处理进度面板：默认展开，用户可手动收起
+const preBodyPhase = ref(true) // 正文未开始前为 true；首字写入后立即 false，停止思考动画
+
+// 流式区「处理进度」与「处理中」占位互斥：timeline 有项时只展示面板，避免双重点状动画
+const liveHasThinkContent = computed(() =>
+  thinkText.value || reasoningText.value ||
+  decisionNotices.value.length > 0 || toolEvents.value.length > 0 ||
+  timeline.value.length > 0
+)
+const showLiveThinkPanel = computed(() => liveHasThinkContent.value)
+const showProcessingPlaceholder = computed(() =>
+  generating.value && !streamText.value && !liveHasThinkContent.value
+)
+// 正文已开始：思考时间线进入「已完成」展示，不再显示进行中动画
+const timelineLive = computed(() => generating.value && preBodyPhase.value)
+const awaitingModel = computed(() =>
+  timeline.value.some(it => it.kind === 'step_wait' && it.status === 'running')
+)
+const showThinkLiveDots = computed(() =>
+  showLiveThinkPanel.value && (timelineLive.value || awaitingModel.value)
+)
+const liveThinkSummary = computed(() => formatTimelineSummary(timeline.value))
 const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认收起
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
 const streamVisuals = ref([])  // 本轮 tool 产出图形 [{type, data}]
@@ -310,6 +332,27 @@ function stripToastNotifs(msgs) {
     && TOAST_ONLY_NOTIF.includes(m.notification_type)))
 }
 
+function messageThinkExpanded(m) {
+  return m.thinkOpen !== false
+}
+function toggleMessageThink(m) {
+  m.thinkOpen = !messageThinkExpanded(m)
+}
+
+function findMessageIndexById(id) {
+  if (id == null) return -1
+  const key = String(id)
+  return messages.value.findIndex(m => m.id != null && String(m.id) === key)
+}
+
+/** 编辑提交：从被编辑的用户消息起截断后续 UI（含旧 AI 回复） */
+function trimMessagesFromEdit(editMsgId) {
+  const idx = findMessageIndexById(editMsgId)
+  if (idx === -1) return false
+  messages.value = messages.value.slice(0, idx)
+  return true
+}
+
 async function openSession(sid, opts = {}) {
   sessStore.setCurrent(sid)
   const [msgs, metrics] = await Promise.all([
@@ -368,6 +411,7 @@ async function tryReattach(sid) {
     decisionNotices.value = []
     toolEvents.value = []
     timeline.value = []
+    preBodyPhase.value = true
     thinkOpen.value = true
     // 重挂后删掉尾部尚未完成的那轮用户消息渲染冗余风险低：回放事件仅重建流式区
     await sse.send({
@@ -750,6 +794,7 @@ async function send() {
   streamText.value = ''
   thinkText.value = ''
   thinkOpen.value = true
+  preBodyPhase.value = true
   scrollBottom()
 
   await sse.send({
@@ -786,10 +831,42 @@ function flushStreamText() {
   maybeScroll()
   scrollStreamCode()
 }
+function finalizeStaleTimelineSteps() {
+  for (const it of timeline.value) {
+    if (it.kind === 'memory_stage' && it.status === 'running') it.status = 'ok'
+    if (it.kind === 'tool_call' && it.status === 'running') it.status = 'ok'
+    if (it.kind === 'step_wait') it.status = 'ok'
+  }
+}
+function clearStepWait() {
+  if (timeline.value.some(it => it.kind === 'step_wait')) {
+    timeline.value = timeline.value.filter(it => it.kind !== 'step_wait')
+  }
+}
+function upsertStepWait(step, label, detail) {
+  const last = timeline.value[timeline.value.length - 1]
+  if (last?.kind === 'step_wait' && last.status === 'running') {
+    if (step) last.step = step
+    if (label) last.label = label
+    if (detail) last.detail = detail
+    return
+  }
+  clearStepWait()
+  timeline.value.push({
+    kind: 'step_wait',
+    step: step || 0,
+    status: 'running',
+    label: label || '准备下一步',
+    detail: detail || '',
+  })
+}
 function pushStreamText(text) {
   if (!text) return
-  // 正文首字出现 → 自动折叠处理进度，开始流式输出回复正文
-  if (!streamText.value && !streamChunkBuf) thinkOpen.value = false
+  if (preBodyPhase.value) {
+    preBodyPhase.value = false
+    thinkOpen.value = false
+    finalizeStaleTimelineSteps()
+  }
   streamChunkBuf += text
   if (!streamRaf) streamRaf = requestAnimationFrame(flushStreamText)
 }
@@ -797,19 +874,80 @@ function pushStreamText(text) {
 // ---- 工具步旁白按步缓冲（对齐 deepseek-harness）----
 // 正文增量先进 pendingBody 缓冲：若本步是工具步（随后收到 content_reset），
 // 缓冲整体转入思考面板（旁白不进正文）；否则等待 BODY_COMMIT_MS 无 reset 后
-// 确认为最终答案，转入正文流式。这样工具步旁白永远不会出现在正文里。
+// 确认为最终答案后立即进正文；工具步旁白由 content_reset + retractToolStepBody 撤回。
 let pendingBody = ''
 let bodyCommitTimer = 0
 let bodyCommitted = false
-const BODY_COMMIT_MS = 1000
+function appendTimelineNarration(text) {
+  if (!text) return
+  const last = timeline.value[timeline.value.length - 1]
+  if (last && last.kind === 'narration') {
+    last.text = (last.text || '') + text
+  } else {
+    timeline.value.push({ kind: 'narration', text })
+  }
+}
 function commitPendingToBody() {
   if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
   if (pendingBody) { pushStreamText(pendingBody); pendingBody = '' }
   bodyCommitted = true
 }
+function retractToolStepBody() {
+  if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
+  if (streamRaf) { cancelAnimationFrame(streamRaf); streamRaf = 0 }
+  const narration = pendingBody + streamText.value + streamChunkBuf
+  pendingBody = ''
+  streamText.value = ''
+  streamChunkBuf = ''
+  bodyCommitted = false
+  appendTimelineNarration(narration)
+}
+
+function upsertMemoryStage(data) {
+  const stage = data.stage
+  if (!stage) return
+  for (let i = timeline.value.length - 1; i >= 0; i--) {
+    const it = timeline.value[i]
+    if (it.kind === 'memory_stage' && it.stage === stage) {
+      Object.assign(it, {
+        kind: 'memory_stage',
+        stage: data.stage,
+        status: data.status,
+        summary: data.summary,
+        candidates: data.candidates,
+        hit_count: data.hit_count,
+        gate: data.gate,
+        refine_path: data.refine_path,
+        elapsed_ms: data.elapsed_ms,
+        vector_hits: data.vector_hits,
+        fts_hits: data.fts_hits,
+      })
+      return
+    }
+  }
+  timeline.value.push({
+    kind: 'memory_stage',
+    stage: data.stage,
+    status: data.status,
+    summary: data.summary || '',
+    candidates: data.candidates,
+    hit_count: data.hit_count,
+    gate: data.gate,
+    refine_path: data.refine_path,
+    elapsed_ms: data.elapsed_ms,
+    vector_hits: data.vector_hits,
+    fts_hits: data.fts_hits,
+  })
+}
 
 function handleEvent(ev, data) {
-  if (ev === 'reasoning_delta') {
+  if (ev === 'memory_progress') {
+    clearStepWait()
+    upsertMemoryStage(data)
+    maybeScroll(); scrollThink()
+  }
+  else if (ev === 'reasoning_delta') {
+    clearStepWait()
     reasoningText.value += data.text || ''
     // v7 timeline：合并到末尾同类段
     const last = timeline.value[timeline.value.length - 1]
@@ -822,28 +960,31 @@ function handleEvent(ev, data) {
     maybeScroll(); scrollThink()
   }
   else if (ev === 'content_delta') {
+    clearStepWait()
     liveThroughput.record(data.text)
     if (bodyCommitted) {
       pushStreamText(data.text)
     } else {
       pendingBody += data.text
-      if (!bodyCommitTimer) bodyCommitTimer = setTimeout(commitPendingToBody, BODY_COMMIT_MS)
+      commitPendingToBody()
     }
   }
   else if (ev === 'content_reset') {
-    // 本步确认为工具步：缓冲里的旁白转入思考面板，绝不进正文
-    if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
-    if (pendingBody) {
-      timeline.value.push({ kind: 'narration', text: pendingBody })
-      pendingBody = ''
-    }
-    bodyCommitted = false
-    thinkOpen.value = true
+    // 本步确认为工具步：撤回本步全部正文（含已 commit 到 streamText 的部分）
+    retractToolStepBody()
     maybeScroll(); scrollThink()
   }
-  // turn_started / step_started 仍作为事件对下游可见（回放、可观测性），
-  // 但不再作为文案追加到思考面板：对读者零信息量，与后端持久化对齐。
+  // turn_started 仍作为事件对下游可见；step_started / step_progress 驱动步间真实进度
+  else if (ev === 'step_started') {
+    upsertStepWait(data.step, '准备下一步')
+    maybeScroll(); scrollThink()
+  }
+  else if (ev === 'step_progress') {
+    upsertStepWait(data.step, data.label, data.detail)
+    maybeScroll(); scrollThink()
+  }
   else if (ev === 'tool_executing') {
+    clearStepWait()
     toolEvents.value.push({ type: ev, ...data })
     // v7 timeline：push 一张 running 卡片
     timeline.value.push({
@@ -866,6 +1007,7 @@ function handleEvent(ev, data) {
           && it.status === 'running') {
         it.status = data.ok ? 'ok' : 'fail'
         if (data.summary) it.result_preview = data.summary.slice(0, 400)
+        if (data.citations?.length) it.citations = data.citations
         if (data.error) it.error = String(data.error).slice(0, 400)
         break
       }
@@ -925,6 +1067,7 @@ function handleThreshold(threshold) {
 
 let lastCitations = []
 let streamAnalysisMetadata = null
+const streamPushSuppressed = ref(false)  // 编辑重发：以 reloadMessages 为准，避免 finishStream 重复入列
 function finishStream(msgId) {
   // 先提交按步缓冲里尚未确认的正文（最终答案尾段），再合并节流缓冲，避免丢失
   commitPendingToBody()
@@ -935,7 +1078,8 @@ function finishStream(msgId) {
   const sameSession = finishedSid === sessStore.currentSid
   // 中断终止（停止/出错/断连，无 msgId）时已输出的内容必须保留：
   // 哪怕只输出了处理进度也要留下，否则流式区一清空内容就全部丢失
-  if ((streamText.value || thinkText.value || reasoningText.value || decisionNotices.value.length || toolEvents.value.length || timeline.value.length) && sameSession) {
+  if (!streamPushSuppressed.value
+      && (streamText.value || thinkText.value || reasoningText.value || decisionNotices.value.length || toolEvents.value.length || timeline.value.length) && sameSession) {
     const body = stripTail(streamText.value, streamVisuals.value)
     const m = {
       id: msgId, role: 'assistant',
@@ -953,14 +1097,17 @@ function finishStream(msgId) {
     }
     messages.value.push(m)
   }
+  if (streamRaf) { cancelAnimationFrame(streamRaf); streamRaf = 0 }
   streamText.value = ''
+  streamChunkBuf = ''
   thinkText.value = ''
   reasoningText.value = ''
   decisionNotices.value = []
   toolEvents.value = []
   timeline.value = []
+  preBodyPhase.value = true
   streamVisuals.value = []
-  thinkOpen.value = true
+  thinkOpen.value = false
   pendingBody = ''
   if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
   bodyCommitted = false
@@ -973,7 +1120,7 @@ function finishStream(msgId) {
   sessStore.scheduleTitleRefresh(finishedSid)
   // 长文的 SSE 缓冲可能只保留末段。turn_completed 后以持久化消息回载，
   // 保证页面显示的是完整交付而不是传输缓存的残片。
-  if (msgId && sameSession) reloadMessages(sessStore.currentSid)
+  if (msgId && sameSession && !streamPushSuppressed.value) reloadMessages(sessStore.currentSid)
   maybeScroll()
 }
 
@@ -1065,9 +1212,10 @@ async function submitEdit(msg) {
   const editMsgId = msg.id
   editingId.value = null
   editText.value = ''
-  // 立即更新 UI：移除被编辑消息及其后续所有消息，插入编辑后的用户消息
-  const idx = messages.value.findIndex(m => m.id === editMsgId)
-  if (idx !== -1) messages.value.splice(idx)
+  if (!trimMessagesFromEdit(editMsgId)) {
+    toast.push('warning', '未能同步截断旧回复，将刷新消息列表')
+    await reloadMessages(sessStore.currentSid)
+  }
   messages.value.push({
     id: -1, role: 'user', content: text,
     message_type: 'normal', citations: [], feedback: 0,
@@ -1084,16 +1232,22 @@ async function submitEdit(msg) {
   decisionNotices.value = []
   toolEvents.value = []
   timeline.value = []
+  preBodyPhase.value = true
   thinkOpen.value = true
   maybeScroll()
-  await sse.send({
-    sessionId: sessStore.currentSid, message: text,
-    editMessageId: editMsgId,
-    location: geoEnabled.value ? cachedLocation() : undefined,
-    reasoningEffort: reasoningEffort.value,
-    onEvent: (ev, data) => handleEvent(ev, data),
-    onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
-  })
+  streamPushSuppressed.value = true
+  try {
+    await sse.send({
+      sessionId: sessStore.currentSid, message: text,
+      editMessageId: editMsgId,
+      location: geoEnabled.value ? cachedLocation() : undefined,
+      reasoningEffort: reasoningEffort.value,
+      onEvent: (ev, data) => handleEvent(ev, data),
+      onError: (e) => { toast.push('error', friendlyError(e?.message)); finishStream() },
+    })
+  } finally {
+    streamPushSuppressed.value = false
+  }
   if (generating.value) finishStream()
   await reloadMessages(sessStore.currentSid)
 }
@@ -1156,6 +1310,7 @@ async function regenerate(msg) {
   decisionNotices.value = []
   toolEvents.value = []
   timeline.value = []
+  preBodyPhase.value = true
   thinkOpen.value = true
   maybeScroll()
   await sse.send({
@@ -1398,6 +1553,7 @@ function resetToHome() {
   decisionNotices.value = []
   toolEvents.value = []
   timeline.value = []
+  preBodyPhase.value = true
   streamVisuals.value = []
   input.value = ''
   clearAttachments()
@@ -1628,23 +1784,27 @@ onUnmounted(() => {
                 <!-- Legacy messages keep the old mixed text; new messages use
                      structured provider/host lanes below. -->
                 <div v-if="m.thinking && m.analysis_metadata?.schema_version !== 'agent-analysis-v1'" class="think-panel">
-                  <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
-                    <i class="ti ti-bulb"></i><span>处理进度</span>
-                    <i class="ti" :class="m.thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+                  <div class="think-head" @click="toggleMessageThink(m)">
+                    <span class="think-section-toggle">
+                      <i class="ti" :class="messageThinkExpanded(m) ? 'ti-chevron-down' : 'ti-chevron-right'"></i>
+                    </span>
+                    <span class="think-section-title">{{ formatTimelineSummary(m.analysis_metadata?.timeline) }}</span>
                   </div>
-                  <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
+                  <div v-show="messageThinkExpanded(m)" class="think-body">{{ m.thinking }}</div>
                 </div>
                 <div v-if="m.analysis_metadata?.schema_version === 'agent-analysis-v1' && (m.analysis_metadata.timeline?.length || m.analysis_metadata.reasoning_text || m.analysis_metadata.system_progress || m.analysis_metadata.decision_notices?.length || m.analysis_metadata.tool_events?.length)" class="think-panel">
-                  <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
-                    <i class="ti ti-bulb"></i><span>处理进度</span>
-                    <i class="ti" :class="m.thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+                  <div class="think-head" @click="toggleMessageThink(m)">
+                    <span class="think-section-toggle">
+                      <i class="ti" :class="messageThinkExpanded(m) ? 'ti-chevron-down' : 'ti-chevron-right'"></i>
+                    </span>
+                    <span class="think-section-title">{{ formatTimelineSummary(m.analysis_metadata?.timeline) }}</span>
                   </div>
-                  <div v-show="m.thinkOpen" class="think-body">
+                  <div v-show="messageThinkExpanded(m)" class="think-body think-body-timeline">
                     <!-- v7 优先按时间线渲染，历史消息无 timeline 时降级 -->
                     <ThinkingTimeline v-if="m.analysis_metadata.timeline?.length"
                                       :items="m.analysis_metadata.timeline" />
                     <template v-else>
-                      <div v-if="m.analysis_metadata.reasoning_text" class="think-lane"><strong>模型 reasoning</strong><span>{{ m.analysis_metadata.reasoning_text }}</span></div>
+                      <div v-if="m.analysis_metadata.reasoning_text" class="think-lane"><strong>模型推理</strong><span>{{ m.analysis_metadata.reasoning_text }}</span></div>
                       <div v-if="m.analysis_metadata.system_progress" class="think-lane"><strong>系统进度</strong><span>{{ m.analysis_metadata.system_progress }}</span></div>
                       <div v-if="m.analysis_metadata.decision_notices?.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in m.analysis_metadata.decision_notices" :key="ni">{{ n.summary }}</span></div>
                       <div v-if="m.analysis_metadata.tool_events?.length" class="think-lane"><strong>工具执行</strong><span v-for="(t, ti) in m.analysis_metadata.tool_events" :key="ti">{{ t.tool_name }}：{{ t.type === 'tool_result' ? (t.ok ? '已完成' : '未完成') : '执行中' }}</span></div>
@@ -1702,26 +1862,29 @@ onUnmounted(() => {
           <div v-if="(generating || streamText) && streamSid === sessStore.currentSid" class="msg-ai">
             <div class="avatar"><i class="ti ti-brain"></i></div>
             <div class="body">
-              <div v-if="thinkText || reasoningText || decisionNotices.length || toolEvents.length || timeline.length" class="think-panel">
+              <div v-if="showLiveThinkPanel" class="think-panel">
                 <div class="think-head" @click="thinkOpen = !thinkOpen">
-                  <i class="ti ti-bulb"></i><span>处理进度</span>
-                  <span v-if="!streamText" class="think-live"><span
-                      class="think-dots"><span></span><span></span><span></span></span></span>
-                  <i class="ti" :class="thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
+                  <span class="think-section-toggle">
+                    <i class="ti" :class="thinkOpen ? 'ti-chevron-down' : 'ti-chevron-right'"></i>
+                  </span>
+                  <span class="think-section-title">
+                    {{ liveThinkSummary }}
+                    <span v-if="showThinkLiveDots" class="think-live"><span
+                        class="think-dots"><span></span><span></span><span></span></span></span>
+                  </span>
                 </div>
-                <div v-show="thinkOpen" ref="liveThink" class="think-body">
-                  <!-- v7 时间线视图：交错渲染 reasoning + tool_call；吸底跟随最新 -->
-                  <ThinkingTimeline v-if="timeline.length" :items="timeline" :live="true" />
+                <div v-show="thinkOpen" ref="liveThink" class="think-body think-body-timeline">
+                  <ThinkingTimeline v-if="timeline.length" :items="timeline" :live="timelineLive" />
                   <!-- 不含 timeline 的降级：老的分区结构 -->
                   <template v-else>
-                    <div v-if="reasoningText" class="think-lane"><strong>模型 reasoning</strong><span>{{ reasoningText }}</span></div>
+                    <div v-if="reasoningText" class="think-lane"><strong>模型推理</strong><span>{{ reasoningText }}</span></div>
                     <div v-if="thinkText" class="think-lane"><strong>系统进度</strong><span>{{ thinkText }}</span></div>
                     <div v-if="decisionNotices.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in decisionNotices" :key="ni">{{ n.summary }}</span></div>
                   </template>
                 </div>
               </div>
-              <!-- 尚无任何输出：处理中占位 -->
-              <div v-if="!streamText && !thinkText && !reasoningText && !decisionNotices.length && !toolEvents.length" class="content" style="display:flex;align-items:center;gap:8px">
+              <!-- 尚无任何进度事件：单一「处理中」占位（与上方面板互斥） -->
+              <div v-if="showProcessingPlaceholder" class="content" style="display:flex;align-items:center;gap:8px">
                 <span class="muted">处理中</span>
                 <span class="think-dots"><span></span><span></span><span></span></span>
               </div>

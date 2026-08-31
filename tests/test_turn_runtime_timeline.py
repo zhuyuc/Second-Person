@@ -299,3 +299,74 @@ def test_timeline_empty_when_no_events(tmp_path: Path):
             db.close()
 
     _run(scenario())
+
+
+def test_timeline_web_search_carries_citations(tmp_path: Path):
+    """web_search 完成后 timeline 应携带结构化 citations（标题 + URL）。"""
+    class _WebSearchExecutor:
+        async def execute_tool(self, name, params, **_kw):
+            return {
+                "ok": True,
+                "result": [
+                    {"title": "WEF Future of Jobs 2025", "url": "https://wef.org/report",
+                     "snippet": "..."},
+                    {"title": "Another", "url": "https://example.com/page", "snippet": ""},
+                ],
+            }
+
+    class _SearchLLM:
+        def __init__(self): self.n = 0
+        async def stream_chat(self, _snap, _msgs, **_kw):
+            self.n += 1
+            if self.n == 1:
+                yield "reasoning", "先搜一下。"
+                yield "done", {"content": "", "tool_calls": [
+                    {"id": "ws1", "type": "function",
+                     "function": {"name": "web_search",
+                                   "arguments": '{"query":"AI jobs"}'}}
+                ], "usage": {"input_tokens": 5, "output_tokens": 0}}
+            else:
+                yield "content", "OK"
+                yield "done", {"content": "OK", "tool_calls": [],
+                                "usage": {"input_tokens": 10, "output_tokens": 1}}
+
+    async def scenario():
+        db = _db(tmp_path)
+        try:
+            registry = ToolRegistry()
+            registry.register_function(ToolSpec(
+                "web_search", "", {"type": "object", "properties": {
+                    "query": {"type": "string"}}, "required": ["query"]}),
+                lambda **_: None)
+            sessions = _Sessions()
+            emitted: list[tuple[str, dict]] = []
+
+            async def context_loader(**_kw):
+                return {"snap": _Provider(), "history": [],
+                        "history_ids": [], "memory_count": 0}
+
+            async def emit(name, data):
+                emitted.append((name, data))
+
+            runtime = TurnRuntime(
+                db=db, config=_Config(agent_max_steps=3),
+                sessions=sessions, registry=registry,
+                executor=_WebSearchExecutor(), llm=_SearchLLM(),
+                providers=_Providers(),
+                system_prompt=lambda *_a: "sys",
+                context_loader=context_loader)
+            await runtime.run(session_id="s", message="search",
+                              reasoning_effort="high", emit=emit)
+            tl = sessions.messages[-1]["analysis_metadata"]["timeline"]
+            tools = [x for x in tl if x["kind"] == "tool_call"]
+            assert len(tools) == 1
+            cites = tools[0].get("citations") or []
+            assert len(cites) == 2
+            assert cites[0]["url"] == "https://wef.org/report"
+            assert cites[0]["title"] == "WEF Future of Jobs 2025"
+            tool_results = [d for n, d in emitted if n == "tool_result"]
+            assert tool_results[0]["citations"][0]["url"] == "https://wef.org/report"
+        finally:
+            db.close()
+
+    _run(scenario())

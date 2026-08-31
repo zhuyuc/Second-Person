@@ -107,6 +107,11 @@ RETRIEVER_REFINE_CACHE_TTL_SECONDS = 300   # 5 分钟：覆盖典型重生成窗
 REFINE_NEGATIVE_FEEDBACK_TOP_K = 3
 # LLM 精筛不可用时的相对得分兜底比例
 REFINE_DEGRADE_SCORE_RATIO = 0.5
+# 唯一候选且 vector 分 ≥ 此值时跳过 LLM 精筛（快路径）
+REFINE_FAST_PATH_MIN_SCORE = 0.85
+# top-1 相对 top-2 显著领先时的快路径门槛
+REFINE_FAST_PATH_GAP_RATIO = 2.0
+REFINE_FAST_PATH_GAP_MIN_SCORE = 0.75
 
 # ---- 待确认记忆频次（收敛自 agent/core.py 硬编码 UX 规则）-----------------
 # 用户消息 < 该字符数时不追加「待确认记忆」块（避免打扰"你好"这种寒暄）

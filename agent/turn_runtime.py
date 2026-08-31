@@ -52,6 +52,47 @@ def _summarize_tool_result(result: Any) -> str:
     return text[:200]
 
 
+def _extract_web_citations(tool_name: str, result: Any,
+                           arguments: Any = None) -> list[dict[str, str]]:
+    """从 web_search / web_fetch 结果提取可展示的引用链接。"""
+    name = (tool_name or "").lower()
+    if name == "web_fetch":
+        args: dict = {}
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+                if isinstance(parsed, dict):
+                    args = parsed
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(arguments, dict):
+            args = arguments
+        url = (args.get("url") or "").strip()
+        if url:
+            return [{"title": url, "url": url}]
+        return []
+    if name != "web_search":
+        return []
+    items = result
+    if isinstance(result, str):
+        try:
+            items = json.loads(result)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(items, list):
+        return []
+    cites: list[dict[str, str]] = []
+    for it in items[:5]:
+        if not isinstance(it, dict):
+            continue
+        url = (it.get("url") or "").strip()
+        if not url:
+            continue
+        title = (it.get("title") or "").strip() or url
+        cites.append({"title": title, "url": url})
+    return cites
+
+
 def _format_turn_time() -> str | None:
     """本轮时间元信息文本，追加到 messages 末尾而不进 system prompt。
 
@@ -181,14 +222,20 @@ class TurnRuntime:
                         item["result_preview"] = preview
                     if evt.get("error"):
                         item["error"] = str(evt["error"])[:400]
+                    cites = evt.get("citations")
+                    if cites:
+                        item["citations"] = cites
                     return
-            timeline.append({
+            orphan: dict[str, Any] = {
                 "kind": "tool_call", "call_id": call_id, "name": name,
                 "arguments": evt.get("arguments") or "",
                 "status": "ok" if evt.get("ok") else "fail",
                 "result_preview": preview,
                 **({"error": str(evt["error"])[:400]} if evt.get("error") else {}),
-            })
+            }
+            if evt.get("citations"):
+                orphan["citations"] = evt["citations"]
+            timeline.append(orphan)
         from memory import _constants as _mem_const
         repeat_guard = RepeatToolGuard(_mem_const.REPEAT_TOOL_THRESHOLDS)
         reasoning_source = "none"
@@ -256,12 +303,27 @@ class TurnRuntime:
                 self.events.append(turn_id, "step.started", actor="host", step=step,
                                    payload={"reasoning_effort": reasoning_effort})
                 await runtime_emit("step_started", {"turn_id": turn_id, "step": step})
+
+                async def _progress(phase: str, label: str, detail: str = "") -> None:
+                    await emit("step_progress", {
+                        "turn_id": turn_id, "step": step,
+                        "phase": phase, "label": label, "detail": detail,
+                    })
+
+                if turn_context is None:
+                    await _progress("memory", "检索相关记忆", "向量检索与组装对话上下文")
+                else:
+                    await _progress("continue", "整合工具结果", f"进入第 {step} 步继续推理")
                 if turn_context is None:
                     context_span = tracer.span_start("context.assemble", input={
                         "turn_id": turn_id, "step": step})
                     turn_context = await self.context_loader(
                         session_id=session_id, turn_id=turn_id, message=message,
-                        onboarding=onboarding, step=step, handoff_path=handoff_path)
+                        onboarding=onboarding, step=step, handoff_path=handoff_path,
+                        emit=emit)
+                    memory_timeline = turn_context.get("memory_timeline") or []
+                    if memory_timeline:
+                        timeline.extend(memory_timeline)
                     context_span.end(output={
                         "history_messages": len(turn_context["history"]),
                         "memories": turn_context.get("memory_count", 0)})
@@ -316,6 +378,8 @@ class TurnRuntime:
                 tools = self._project_tools(session_id)
                 # v7：pre-step 自动压缩（step≥2 才检查，step 1 无累积压力）
                 if step >= 2 and self.compaction_engine is not None:
+                    await _progress("compact_check", "检查会话上下文容量",
+                                    "判断是否需压缩早期对话")
                     try:
                         compact_result = await self.compaction_engine.compact_if_needed(
                             session_id=session_id, snap=snap,
@@ -326,6 +390,9 @@ class TurnRuntime:
                         logger.warning("压缩检查异常，跳过本轮", exc_info=True)
                         compact_result = None
                     if compact_result is not None:
+                        await _progress(
+                            "compact", "压缩早期对话",
+                            f"已收起 {compact_result.shadowed_count} 条早期消息")
                         self.events.append(
                             turn_id, "context.compacted", actor="host",
                             model_visible=False,
@@ -339,10 +406,15 @@ class TurnRuntime:
                             "trigger": compact_result.trigger,
                             "shadowed_count": compact_result.shadowed_count,
                             "released_tokens_est": compact_result.released_tokens_est})
+                        await _progress("context_reload", "重新加载会话历史")
                         # 压缩推了水位——重新加载 context 拿新 history
                         turn_context = await self.context_loader(
                             session_id=session_id, turn_id=turn_id, message=message,
-                            onboarding=onboarding, step=step, handoff_path=handoff_path)
+                            onboarding=onboarding, step=step, handoff_path=handoff_path,
+                            emit=emit)
+                        memory_timeline = turn_context.get("memory_timeline") or []
+                        if memory_timeline:
+                            timeline.extend(memory_timeline)
                         context = turn_context
                         system_content = self.system_prompt(
                             onboarding, location, session_id,
@@ -370,6 +442,21 @@ class TurnRuntime:
                 # LLM 调用起点：ttft/llm/decode 都以此为基准（对齐 harness step/start）。
                 step_started_at = time.perf_counter()
                 context_ms = max(0, round((step_started_at - context_prep_started_at) * 1000))
+                llm_detail = "等待模型返回首 token"
+                try:
+                    if self.token_meter is not None:
+                        meas = self.token_meter.measure(
+                            session_id, prompt[1:], system=system_content, tools=tools)
+                        k = int(meas.total_tokens or 0)
+                        if k >= 10000:
+                            llm_detail = f"约 {k / 1000:.0f}K 输入 token，首字可能需数十秒"
+                        elif k >= 1000:
+                            llm_detail = f"约 {k / 1000:.1f}K 输入 token"
+                        elif k > 0:
+                            llm_detail = f"约 {k} 输入 token"
+                except Exception:  # noqa: BLE001
+                    pass
+                await _progress("llm", "调用模型推理", llm_detail)
                 try:
                     # 流式：内容增量边收边发 content_delta，首字延迟由整段生成
                     # 时间降到首 chunk 到达时间；tool_calls 在流内累积，末尾 done
@@ -676,12 +763,14 @@ class TurnRuntime:
                                                       session_id=turn.get("session_id", ""))
             duration_ms = max(0, round((time.perf_counter() - tool_started_at) * 1000))
             if result.get("ok"):
-                recorded = await self._record_result(turn_id, step, call_id, name, True,
-                                                     result.get("result"), emit)
+                recorded = await self._record_result(
+                    turn_id, step, call_id, name, True,
+                    result.get("result"), emit, arguments=params)
             else:
                 recorded = await self._record_result(
                     turn_id, step, call_id, name, False,
-                    result.get("error") or "工具执行失败", emit)
+                    result.get("error") or "工具执行失败", emit,
+                    arguments=params)
             recorded["_duration_ms"] = duration_ms
             return recorded
 
@@ -694,14 +783,22 @@ class TurnRuntime:
         return [await run_one(raw, i) for i, raw in enumerate(tool_calls, 1)]
 
     async def _record_result(self, turn_id: str, step: int, call_id: str, name: str,
-                             ok: bool, result: Any, emit) -> dict:
+                             ok: bool, result: Any, emit,
+                             arguments: Any = None) -> dict:
         content = json.dumps(result, ensure_ascii=False, default=str) if not isinstance(result, str) else result
         content = content[:12000]
         self.events.append(turn_id, "tool.result", actor="tool", step=step, call_id=call_id,
                            model_visible=True, payload={"tool_name": name, "ok": ok,
                                                         "model_content": content})
-        await emit("tool_result", {"turn_id": turn_id, "call_id": call_id,
-                                    "tool_name": name, "ok": ok,
-                                    "summary": content[:500]})
+        payload: dict[str, Any] = {
+            "turn_id": turn_id, "call_id": call_id,
+            "tool_name": name, "ok": ok,
+            "summary": content[:500],
+        }
+        if ok:
+            cites = _extract_web_citations(name, result, arguments)
+            if cites:
+                payload["citations"] = cites
+        await emit("tool_result", payload)
         return {"tool": name, "ok": ok, "result": result if ok else None,
                 "error": None if ok else content}

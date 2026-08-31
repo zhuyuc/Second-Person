@@ -192,6 +192,23 @@ class TestBranchWorkflow:
         assert "a1-v2" in contents
         assert "u1" not in contents
 
+    def test_edit_deactivates_tail_when_parent_id_missing(self, store: SessionStore):
+        """编辑时按 id 截断旧链：parent_id 缺失的旧 assistant 也不应继续展示。"""
+        sid = _sid(store)
+        m1 = store.append_message(sid, "user", "question")
+        m2 = store.append_message(sid, "assistant", "old answer")
+        store.db.execute("UPDATE conversations SET parent_id=NULL WHERE id=?", (m2,))
+        store.db.execute(
+            "UPDATE conversations SET is_active=0 WHERE version_group_id=?", (m1,))
+        store.db.execute(
+            "UPDATE conversations SET is_active=0 WHERE session_id=? AND id>?",
+            (sid, m1))
+        m3 = store.append_message(
+            sid, "user", "question v2", version_group_id=m1, parent_id=None)
+        m4 = store.append_message(sid, "assistant", "new answer", parent_id=m3)
+        msgs = store.get_messages(sid)
+        assert [m["content"] for m in msgs] == ["question v2", "new answer"]
+
 
 class TestLoadRecoveryContext:
     def test_only_active_branch_in_context(self, store: SessionStore):

@@ -26,9 +26,17 @@ SSE_EVENT_SPECS: dict[str, SSEEventSpec] = {
     "queued": SSEEventSpec("同会话任务正在排队", frozenset({"session_id"})),
     "error": SSEEventSpec("本轮生成失败或被停止", frozenset({"code", "message"})),
     "reasoning_delta": SSEEventSpec("Provider 返回的原生 reasoning 增量", frozenset({"text", "source"})),
+    "memory_progress": SSEEventSpec(
+        "记忆检索阶段真实进度（候选数/命中数/ gate 均由运行时测量）",
+        frozenset({"stage", "status", "summary"}),
+    ),
     "decision_notice": SSEEventSpec("宿主推断的可验证决策摘要", frozenset({"stage", "actor", "source", "reason_code", "summary"})),
     "turn_started": SSEEventSpec("持久化任务轮次已创建", frozenset({"turn_id", "reasoning_effort"})),
     "step_started": SSEEventSpec("模型/工具循环的新步骤", frozenset({"turn_id", "step"})),
+    "step_progress": SSEEventSpec(
+        "步骤内真实进度（记忆检索/压缩/模型推理等）",
+        frozenset({"turn_id", "step", "phase", "label"}),
+    ),
     "tool_executing": SSEEventSpec("工具调用状态", frozenset({"tool_name", "status"})),
     "tool_result": SSEEventSpec("工具执行结果摘要", frozenset({"turn_id", "tool_name", "ok"})),
     "tool_visual": SSEEventSpec("工具生成的可视化", frozenset({"type", "data"})),

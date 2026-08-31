@@ -32,8 +32,19 @@ from infrastructure.fts import fts_escape as _fts_escape
 from infrastructure.timeutil import now_cst
 
 from .md_file import parse_memory_md
+from .retriever_progress import (
+    build_progress_payload,
+    done_summary,
+    presearch_summary,
+    refine_start_summary,
+    skip_summary,
+)
 
 logger = logging.getLogger("second_person.retriever")
+
+
+def has_recall_intent(query: str) -> bool:
+    return any(re.search(p, query) for p in RECALL_INTENT_PATTERNS)
 
 # 唯一保留的意图识别：明确回忆语（"你还记得/我之前说过"），仅用于兜底路径
 # 调低阈值再跑一次。不用于任何"关门"（不再有 personal / knowledge 分流）。
@@ -41,24 +52,46 @@ RECALL_INTENT_PATTERNS = [
     r"你还记得", r"我之前(说过|提过|讲过)", r"我上次", r"还记不记得", r"之前(聊|谈)过",
 ]
 
+# 确认/致谢类：明确不需要查记忆库（仍走 retrieve 入口，内部短路）
+ACK_ONLY_PATTERNS = [
+    r"^(好|好的|嗯+|谢谢|感谢|多谢|OK|ok|继续|收到|明白|知道了|没问题)[。!！?？…~]*$",
+]
 
-def has_recall_intent(query: str) -> bool:
-    return any(re.search(p, query) for p in RECALL_INTENT_PATTERNS)
+# 第一人称历史指代：永不短路
+HISTORY_REF_PATTERNS = [
+    r"我的", r"上次", r"之前", r"老样子", r"照旧", r"还是那样",
+]
 
 
-# 极短寒暄短路：query 极短 且携带 context_text 且非回忆意图 → 跳过整条检索链路
-# 直觉：单独一个"你好"不该被上一话题的向量把无关记忆拽出来。
-# 无 context_text 时不短路（真正的"零上下文你好"仍走完整链路，兼容测试用例）。
-def _should_short_circuit(query: str, context_text: str | None,
-                           min_chars: int) -> bool:
+def has_history_reference(query: str) -> bool:
+    q = (query or "").strip()
+    return any(re.search(p, q) for p in HISTORY_REF_PATTERNS)
+
+
+def is_ack_only(query: str) -> bool:
     q = (query or "").strip()
     if not q:
-        return True
-    if not context_text:
         return False
-    if has_recall_intent(query):
-        return False
-    return len(q) <= max(0, int(min_chars))
+    return any(re.match(p, q, re.IGNORECASE) for p in ACK_ONLY_PATTERNS)
+
+
+def short_circuit_gate(query: str, context_text: str | None, min_chars: int) -> str | None:
+    """Return gate code if retrieval should skip, else None."""
+    q = (query or "").strip()
+    if not q:
+        return "empty_query"
+    if has_recall_intent(q) or has_history_reference(q):
+        return None
+    if is_ack_only(q):
+        return "ack_shortcut"
+    if context_text and len(q) <= max(0, int(min_chars)):
+        return "short_query_shortcircuit"
+    return None
+
+
+def _should_short_circuit(query: str, context_text: str | None,
+                           min_chars: int) -> bool:
+    return short_circuit_gate(query, context_text, min_chars) is not None
 
 
 @dataclass
@@ -117,6 +150,33 @@ class Retriever:
         # 覆盖重生成/异常重试场景，一 turn 内重复调用直接命中省 2-3s LLM 精筛。
         self._refine_cache: OrderedDict[tuple, tuple[list[str], float]] = OrderedDict()
 
+    @staticmethod
+    async def _notify_progress(
+            on_progress,
+            payload: dict,
+    ) -> None:
+        if on_progress is not None:
+            await on_progress(payload)
+
+    def _try_fast_path_refine(self, candidates: list[Candidate]) -> list[str] | None:
+        """High-confidence paths that skip LLM refine."""
+        from . import _constants as _mem_const
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            score = float(candidates[0].vector_score or 0.0)
+            if score >= _mem_const.REFINE_FAST_PATH_MIN_SCORE:
+                return [candidates[0].memory_id]
+            return None
+        top, second = candidates[0], candidates[1]
+        top_score = float(top.vector_score or 0.0)
+        second_score = float(second.vector_score or 0.0)
+        if (top_score >= _mem_const.REFINE_FAST_PATH_GAP_MIN_SCORE
+                and second_score > 0
+                and top_score >= second_score * _mem_const.REFINE_FAST_PATH_GAP_RATIO):
+            return [top.memory_id]
+        return None
+
     def _refine_cache_key(self, session_id: str | None, query: str,
                           candidate_ids: list[str]) -> tuple:
         """Stable key across attempts: candidate order can shift so we sort ids."""
@@ -162,7 +222,9 @@ class Retriever:
     # ---- 第 1 层 Hybrid 预筛 -------------------------------------------------
     async def hybrid_presearch(self, query: str, query_vec=None,
                                fallback: bool = False,
-                               project_id: str | None = None) -> _PresearchResult:
+                               project_id: str | None = None,
+                               fts_hits: list[tuple[str, float]] | None = None
+                               ) -> _PresearchResult:
         cfg = self.config
         from . import _constants as _mem_const
         vthr = _mem_const.RECALL_FALLBACK_THRESHOLD if fallback \
@@ -176,8 +238,8 @@ class Retriever:
             vector_hits = self.vs.search(
                 query_vec, top_k=top_k, threshold=vthr)
 
-        fts_hits: list[tuple[str, float]] = self._fts_search(
-            query, top_k, bm25_floor)
+        if fts_hits is None:
+            fts_hits = self._fts_search(query, top_k, bm25_floor)
         n_vec = len(vector_hits)
         n_fts = len(fts_hits)
         top_score = float(vector_hits[0][1]) if vector_hits else 0.0
@@ -332,29 +394,40 @@ class Retriever:
     async def retrieve(self, query: str,
                        session_id: str | None = None,
                        context_text: str | None = None,
-                       project_id: str | None = None) -> RetrievalResult:
+                       project_id: str | None = None,
+                       on_progress=None) -> RetrievalResult:
         """检索入口 —— 无开关分支，一条直路。
 
         流程：embed 线索 → hybrid 预筛 → 图扩展（links + entities）→
         LLM 精筛 → 加载详情 + 按关系分组返回。
+        on_progress：可选 async 回调，推送 memory_progress 真实进度 payload。
         """
         _start = time.perf_counter()
         result = RetrievalResult()
         diag_gate = "none"
+        refine_path = "full"
 
-        # 0) 极短寒暄短路：只在"query 极短 + 已有 context_text + 非回忆意图"三条同时
-        #    满足时才跳过。"你好"这种寒暄若单独出现不短路；但接在讨论 AI 模型的话题
-        #    后面就短路，防止上一话题的向量把无关记忆拽出来。
         from . import _constants as _mem_const
         min_chars = int(self.config.get(
             "min_query_chars_for_context", _mem_const.MIN_QUERY_CHARS_FOR_CONTEXT))
-        if _should_short_circuit(query, context_text, min_chars):
+        gate = short_circuit_gate(query, context_text, min_chars)
+        if gate is not None:
             result.diagnostics = self._empty_diagnostics(
                 query, _PresearchResult(), context_text, "", _start)
-            result.diagnostics["gate"] = "short_query_shortcircuit"
+            result.diagnostics["gate"] = gate
+            elapsed = round((time.perf_counter() - _start) * 1000)
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="skipped", status="skipped", summary=skip_summary(gate, query),
+                gate=gate, hit_count=0, candidates=0, elapsed_ms=elapsed,
+            ))
             return result
 
-        # 1) embed 线索：上下文 + 当轮，始终参与（embedding 自然过滤无关话题）
+        await self._notify_progress(on_progress, build_progress_payload(
+            stage="embed", status="running",
+            summary="正在生成检索向量并扫描记忆库",
+        ))
+
+        # 1) embed 线索 + FTS 并行
         q_part = query[:self.EMBED_QUERY_MAX_CHARS]
         budget = self.EMBED_QUERY_MAX_CHARS - len(q_part) - 1
         if context_text and budget > 0:
@@ -362,35 +435,61 @@ class Retriever:
         else:
             embed_cue = q_part
         query_vec = None
+        top_k = self.config.get("retrieval_top_k", 10)
+        bm25_floor = _mem_const.BM25_RELATIVE_FLOOR
+        fts_task = asyncio.create_task(asyncio.to_thread(
+            self._fts_search, query, top_k, bm25_floor))
         if self.embed_fn:
             try:
                 query_vec = (await self.embed_fn([embed_cue]))[0]
             except Exception:  # noqa: BLE001
                 result.degraded = "Embedding 不可用，检索降级 FTS5 单路"
                 logger.info(result.degraded)
+        fts_hits = await fts_task
 
-        # 2) 预筛（M2：project_id 硬过滤：本项目 + 全局；无项目会话仅全局）
-        pre = await self.hybrid_presearch(query, query_vec, project_id=project_id)
+        await self._notify_progress(on_progress, build_progress_payload(
+            stage="presearch", status="running", summary="Hybrid 预筛进行中",
+        ))
+
+        pre = await self.hybrid_presearch(
+            query, query_vec, project_id=project_id, fts_hits=fts_hits)
         candidates = pre.candidates
-        # 未命中且明确回忆 → 调低阈值再跑一次
         if not candidates and has_recall_intent(query):
-            pre = await self.hybrid_presearch(query, query_vec, fallback=True,
-                                              project_id=project_id)
+            pre = await self.hybrid_presearch(
+                query, query_vec, fallback=True, project_id=project_id,
+                fts_hits=fts_hits)
             candidates = pre.candidates
-        # F3：把本轮候选池里被硬砍的争议记忆带回来，供上层提示
         if pre.disputed:
             result.disputed = list(pre.disputed)
+
+        await self._notify_progress(on_progress, build_progress_payload(
+            stage="presearch", status="ok" if candidates else "skipped",
+            summary=presearch_summary(len(candidates), pre.vector_hits, pre.fts_hits),
+            candidates=len(candidates),
+            vector_hits=pre.vector_hits,
+            fts_hits=pre.fts_hits,
+            elapsed_ms=round((time.perf_counter() - _start) * 1000),
+        ))
+
         if not candidates:
             result.diagnostics = self._empty_diagnostics(
                 query, pre, context_text, result.degraded, _start)
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="done", status="ok", summary=done_summary(0),
+                candidates=0, hit_count=0, gate="presearch_empty",
+                elapsed_ms=round((time.perf_counter() - _start) * 1000),
+            ))
             return result
 
-        # 3) 图扩展：从 candidates[:seed_pool_size] 出发做双向 links + 实体共现
+        await self._notify_progress(on_progress, build_progress_payload(
+            stage="graph", status="running",
+            summary=f"从 {min(len(candidates), int(self.config.get('graph_expand_seed_pool', _mem_const.GRAPH_EXPAND_SEED_POOL)))} 条 seed 做图扩展",
+        ))
+
         seed_pool = candidates[:int(self.config.get(
             "graph_expand_seed_pool", _mem_const.GRAPH_EXPAND_SEED_POOL))]
         graph_neighbors = await self._expand_graph(
             [c.memory_id for c in seed_pool], query_vec)
-        # 合并进候选池（图节点也送 LLM 精筛裁决）
         seen_ids = {c.memory_id for c in candidates}
         for neighbor in graph_neighbors:
             if neighbor.memory_id in seen_ids:
@@ -398,18 +497,37 @@ class Retriever:
             candidates.append(neighbor)
             seen_ids.add(neighbor.memory_id)
 
-        # 4) LLM 精筛（始终跑；异常/未配置走基于相对得分的兜底）
-        chosen_ids = await self._refine(
-            query, candidates, session_id, context_text, result)
+        pool_cap = int(self.config.get(
+            "candidate_pool_hard_cap", _mem_const.CANDIDATE_POOL_HARD_CAP))
+        picked = candidates[:pool_cap]
+        refine_path = "full"
+        fast_ids = self._try_fast_path_refine(picked)
+        if fast_ids is not None:
+            refine_path = "fast_path"
+            chosen_ids = fast_ids
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="refine", status="ok",
+                summary=refine_start_summary(len(picked), refine_path),
+                candidates=len(picked), refine_path=refine_path,
+            ))
+        else:
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="refine", status="running",
+                summary=refine_start_summary(len(picked)),
+                candidates=len(picked),
+            ))
+            chosen_ids, refine_path = await self._refine(
+                query, candidates, session_id, context_text, result,
+                on_progress=on_progress)
         if not chosen_ids:
             diag_gate = "refine_empty"
 
-        # 5) 加载详情（主命中 + 关联记忆分组）
         chosen_set = set(chosen_ids)
-        for mid in chosen_ids:
-            detail = await asyncio.to_thread(self._load_detail, mid)
+        detail_rows = await asyncio.gather(*[
+            asyncio.to_thread(self._load_detail, mid) for mid in chosen_ids
+        ])
+        for mid, detail in zip(chosen_ids, detail_rows, strict=True):
             if detail:
-                # 若该 id 是图扩展节点，把 relation/from_seed 塞进去
                 cand = next((c for c in candidates if c.memory_id == mid), None)
                 if cand and cand.relation:
                     detail["relation"] = cand.relation
@@ -419,10 +537,6 @@ class Retriever:
                     result.hits.append(detail)
                 result.loaded_ids.append(mid)
 
-        # 若精筛挑到 hits，把图扩展里 top-N 关联（未被选中的）也保留供上层参考
-        # —— 这样即便 LLM 只给了 1 条主命中，也能顺带带回图上下文。
-        # 但当 LLM 明确判空（chosen_ids 为空）时，必须尊重"宁缺毋滥"信号，
-        # 不再强行注入图邻居，否则会污染上下文（本次修复的关键 bug）。
         extra_related_cap = int(self.config.get(
             "graph_extra_related_cap", _mem_const.GRAPH_EXTRA_RELATED_CAP))
         if chosen_ids and extra_related_cap > 0:
@@ -430,17 +544,18 @@ class Retriever:
                              if c.memory_id not in chosen_set
                              and c.memory_id not in result.loaded_ids]
             neighbor_pool.sort(key=lambda x: -x.final_score)
-            for cand in neighbor_pool[:extra_related_cap]:
-                detail = await asyncio.to_thread(
-                    self._load_detail, cand.memory_id)
+            extra_ids = [c.memory_id for c in neighbor_pool[:extra_related_cap]]
+            extra_details = await asyncio.gather(*[
+                asyncio.to_thread(self._load_detail, mid) for mid in extra_ids
+            ])
+            for cand, detail in zip(neighbor_pool[:extra_related_cap], extra_details,
+                                    strict=True):
                 if detail:
                     detail["relation"] = cand.relation
                     detail["from_seed"] = cand.from_seed
                     result.related.append(detail)
                     result.loaded_ids.append(cand.memory_id)
 
-        # E7 负样本反馈：LLM 精筛判空 = 本轮候选整体不相关。把候选池 top-K
-        # 的 retrieval_negative_count 加一，让下次同 seed 主题再次被检索时降权。
         if not chosen_ids and candidates:
             self._record_negative_feedback(candidates)
 
@@ -449,12 +564,23 @@ class Retriever:
                     len(candidates), len(result.hits), len(result.related),
                     elapsed_ms, result.degraded or "-")
 
+        hit_count = len(result.hits)
+        await self._notify_progress(on_progress, build_progress_payload(
+            stage="done", status="ok",
+            summary=done_summary(hit_count, len(result.related)),
+            candidates=len(candidates), hit_count=hit_count + len(result.related),
+            gate=diag_gate if diag_gate != "none" else None,
+            refine_path=refine_path,
+            elapsed_ms=int(elapsed_ms),
+        ))
+
         result.diagnostics = {
             "degraded": bool(result.degraded),
             "vector_hits": pre.vector_hits,
             "fts_hits": pre.fts_hits,
             "top_vector_score": round(pre.top_vector_score, 4),
             "gate": diag_gate,
+            "refine_path": refine_path,
             "context_chars": len(context_text or ""),
             "retrieval_time_ms": elapsed_ms,
             "refined_count": len(chosen_ids),
@@ -485,16 +611,22 @@ class Retriever:
     async def _refine(self, query: str, candidates: list[Candidate],
                        session_id: str | None,
                        context_text: str | None,
-                       result: RetrievalResult) -> list[str]:
+                       result: RetrievalResult,
+                       on_progress=None) -> tuple[list[str], str]:
         from . import _constants as _mem_const
         if not self.llm_refine_fn:
-            return self._degrade_pick(candidates)
-        # Δ4：候选池太小时跳过 LLM 精筛，直接走得分兜底。省下固定 ~2s 开销。
+            return self._degrade_pick(candidates), "degrade_pick"
         min_cands = int(self.config.get(
             "retrieval_refine_min_candidates",
             _mem_const.RETRIEVAL_REFINE_MIN_CANDIDATES))
         if len(candidates) < max(1, min_cands):
-            return self._degrade_pick(candidates)
+            path = "degrade_pick"
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="refine", status="ok",
+                summary=refine_start_summary(len(candidates), path),
+                candidates=len(candidates), refine_path=path,
+            ))
+            return self._degrade_pick(candidates), path
         try:
             timeout = self.config.get(
                 "retrieval_refine_timeout_seconds",
@@ -502,15 +634,20 @@ class Retriever:
             pool_cap = int(self.config.get(
                 "candidate_pool_hard_cap", _mem_const.CANDIDATE_POOL_HARD_CAP))
             picked = candidates[:pool_cap]
-            # v7 精筛 cache：同 session + 同 query + 同候选池 → 直接复用
             cache_key = self._refine_cache_key(
                 session_id, query, [c.memory_id for c in picked])
             cached = self._refine_cache_get(cache_key)
             if cached is not None:
                 result.degraded = "第 2 层精筛 cache 命中"
                 logger.debug("refine cache hit sid=%s query=%r", session_id, query[:40])
+                path = "refine_cache"
+                await self._notify_progress(on_progress, build_progress_payload(
+                    stage="refine", status="ok",
+                    summary=refine_start_summary(len(picked), path),
+                    candidates=len(picked), refine_path=path,
+                ))
                 return cached[:int(self.config.get(
-                    "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
+                    "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))], path
             payload = [{"id": c.memory_id, "title": c.title,
                         "summary": c.summary, "source_type": c.source_type,
                         "confidence": c.confidence,
@@ -525,20 +662,36 @@ class Retriever:
                                    context_text=context_text),
                 timeout=timeout)
             chosen_list = list(chosen)
-            # 落 cache（LRU + TTL）——精度、超时、异常路径都不落，只落成功结果
             self._refine_cache_put(cache_key, chosen_list)
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="refine", status="ok",
+                summary=refine_start_summary(len(picked), "full"),
+                candidates=len(picked), refine_path="full",
+            ))
             return chosen_list[:int(self.config.get(
-                "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
+                "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))], "full"
         except asyncio.TimeoutError:
             result.degraded = "第 2 层精筛超时，按得分兜底"
             logger.warning("检索精筛超时")
-            return self._degrade_pick(candidates)
+            path = "degrade_pick"
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="refine", status="ok",
+                summary=refine_start_summary(len(candidates), path),
+                candidates=len(candidates), refine_path=path,
+            ))
+            return self._degrade_pick(candidates), path
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             result.degraded = "第 2 层精筛不可用，按得分兜底"
             logger.info("检索精筛异常，按得分兜底", exc_info=True)
-            return self._degrade_pick(candidates)
+            path = "degrade_pick"
+            await self._notify_progress(on_progress, build_progress_payload(
+                stage="refine", status="ok",
+                summary=refine_start_summary(len(candidates), path),
+                candidates=len(candidates), refine_path=path,
+            ))
+            return self._degrade_pick(candidates), path
 
     def _degrade_pick(self, candidates: list[Candidate]) -> list[str]:
         """LLM 挂时按相对得分兜底 —— 不再问用户"意图"。

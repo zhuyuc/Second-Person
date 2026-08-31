@@ -217,6 +217,11 @@ async def chat_send(request: Request):
                 (edit_version_group_id,))
             for sib in siblings:
                 c.sessions._deactivate_downstream(sib["id"])
+            # 停用被编辑消息之后的旧链（旧 assistant 等），兼容 parent_id 缺失的存量数据
+            c.db.execute(
+                "UPDATE conversations SET is_active=0 "
+                "WHERE session_id=? AND id>?",
+                (sid, edit_message_id))
 
     # 重新生成分支化：旧回复保留，创建 assistant 兄弟节点
     regen_parent_id = None

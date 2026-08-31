@@ -58,8 +58,8 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
         "queued", "error", "reasoning_delta", "decision_notice", "tool_executing",
         "tool_visual", "content_delta", "content_reset", "citations",
         "handoff_ready", "mood_updated", "turn_completed",
-        "turn_started", "step_started",
-        "tool_result", "step_metrics",
+        "turn_started", "step_started", "step_progress",
+        "tool_result", "step_metrics", "memory_progress",
     }
     assert expected == set(SSE_EVENT_SPECS)
     assert SSE_TERMINAL_EVENTS == {"turn_completed", "error"}
@@ -67,8 +67,14 @@ def test_chat_sse_events_are_registered_and_have_terminal_semantics():
     assert "tool_pending_approval" not in SSE_EVENT_SPECS
     assert "tool_blocked" not in SSE_EVENT_SPECS
 
-    validate_sse_event("tool_result", {
-        "turn_id": "turn_1", "tool_name": "file_write", "ok": True,
+    validate_sse_event("memory_progress", {
+        "stage": "presearch", "status": "ok",
+        "summary": "Hybrid 预筛召回 3 条候选（向量 2 + FTS 1）",
+        "candidates": 3, "hit_count": 0,
+    })
+    validate_sse_event("step_progress", {
+        "turn_id": "t1", "step": 2, "phase": "llm",
+        "label": "调用模型推理", "detail": "约 164K 输入 token",
     })
     with pytest.raises(SSEContractError, match="missing fields"):
         validate_sse_event("content_delta", {})

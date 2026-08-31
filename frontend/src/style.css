@@ -1439,29 +1439,52 @@ code {
     opacity: 1
 }
 
-/* 思考过程面板：生成中展开流式展示，正文首字后自动折叠，可点击展开/收起 */
+/* 思考轨迹：参考图 — 左侧方框折叠钮 + 行内列表，非卡片面板 */
 .think-panel {
-    margin-bottom: 10px;
-    border: 1px solid var(--bd);
-    border-radius: 10px;
-    background: var(--surface-2);
+    margin-bottom: 8px;
+    border: none;
+    border-radius: 0;
+    background: transparent;
     overflow: hidden
 }
 
 .think-head {
     display: flex;
     align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
+    gap: 8px;
+    padding: 2px 0;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     color: var(--muted);
     cursor: pointer;
-    user-select: none
+    user-select: none;
+    border-radius: 0
 }
 
 .think-head:hover {
     color: var(--fg)
+}
+
+.think-section-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+    border-radius: 4px;
+    background: var(--bg-input, rgba(127, 127, 127, 0.1));
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.think-head:hover .think-section-toggle {
+    background: var(--bg-input, rgba(127, 127, 127, 0.16));
+    color: var(--fg)
+}
+
+.think-section-title {
+    min-width: 0;
 }
 
 .think-head .ti-chevron-up,
@@ -1471,18 +1494,26 @@ code {
 
 .think-live {
     display: inline-flex;
-    align-items: center
+    align-items: center;
+    margin-left: 6px
 }
 
 .think-body {
-    padding: 0 12px 10px;
+    padding: 4px 0 6px;
     font-size: 12.5px;
     line-height: 1.7;
     color: var(--fg);
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 260px;
+    max-height: 320px;
     overflow-y: auto
+}
+
+/* 时间线模式 */
+.think-body.think-body-timeline {
+    white-space: normal;
+    padding-top: 2px;
+    max-height: 280px;
 }
 
 /* 用户气泡的操作：默认隐藏，悬浮该消息时才显示 */

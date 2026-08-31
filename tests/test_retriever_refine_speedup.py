@@ -54,7 +54,7 @@ def test_pool_cap_limits_payload_to_first_ten():
     r = _retriever(refine)
     cands = [_make_candidate(f"m{i}", 1.0 - i * 0.05) for i in range(15)]
     result = RetrievalResult()
-    picked = _run(r._refine("q", cands, session_id="s", context_text=None, result=result))
+    picked, _path = _run(r._refine("q", cands, session_id="s", context_text=None, result=result))
 
     assert len(seen_payloads) == 1
     assert len(seen_payloads[0]) == 10   # ← 硬帽起作用
@@ -86,9 +86,11 @@ def test_cache_hit_skips_llm_call():
 
     r = _retriever(refine)
     cands = [_make_candidate(f"m{i}") for i in range(5)]
-    first = _run(r._refine("q1", cands, session_id="s1", context_text=None, result=RetrievalResult()))
-    second = _run(r._refine("q1", cands, session_id="s1", context_text=None, result=RetrievalResult()))
-    assert first == second == ["m0", "m1"]
+    first_ids, first_path = _run(r._refine("q1", cands, session_id="s1", context_text=None, result=RetrievalResult()))
+    second_ids, second_path = _run(r._refine("q1", cands, session_id="s1", context_text=None, result=RetrievalResult()))
+    assert first_ids == second_ids == ["m0", "m1"]
+    assert first_path == "full"
+    assert second_path == "refine_cache"
     assert call_count == 1    # ← 第二次命中 cache，不再调 LLM
 
 
