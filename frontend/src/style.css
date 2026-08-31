@@ -978,13 +978,12 @@ code {
   opacity: 1;
 }
 
-/* 用户气泡：元宝式浅底小气泡，不再大面积品牌色 */
+/* 用户气泡：元宝式浅底小气泡，不再大面积品牌色。宽度受外层 .max-w-user 统一约束 */
 .msg-user .bubble {
   background: var(--surface-2);
   color: var(--fg);
   padding: 11px 16px;
   border-radius: 16px;
-  max-width: 80%;
   font-size: 15px;
   line-height: 1.7;
   word-break: break-word;
@@ -3588,8 +3587,11 @@ button.btn-danger:hover {
 }
 .max-w-user {
   max-width: 80%;
-  /* 让整列跟随气泡宽度收缩，短消息不再被拉宽换行 */
-  width: fit-content;
+  /* inline-flex 列布局：整列宽度 = 最宽子项（气泡或操作行）宽度，
+     子项一律右对齐；短消息不会被操作行拉宽换行。 */
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
 }
 .max-w-user-edit {
   width: 80%;
