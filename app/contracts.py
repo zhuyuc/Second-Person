@@ -68,6 +68,7 @@ class ChatSendRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     session_id: str | None = None
+    project_id: str | None = None
     message: str = ""
     client_request_id: str | None = None
     images: list[str] | None = None
@@ -83,6 +84,13 @@ class ChatSendRequest(BaseModel):
         if value is None:
             return None
         return _required_string(value, "session_id")
+
+    @field_validator("project_id", mode="before")
+    @classmethod
+    def _validate_project_id(cls, value: Any) -> str | None:
+        if value in (None, ""):
+            return None
+        return _required_string(value, "project_id")
 
     @field_validator("message", mode="before")
     @classmethod

@@ -28,11 +28,14 @@
 | 17 | app/prompts/memory_refine.md | 记忆精筛 | app/container.py | A |
 | 18 | app/prompts/merge_judge.md | 记忆合并判定 | app/container.py | A |
 | 19 | app/prompts/title_gen.md | 会话标题生成 | app/routes/chat.py | A |
-| 20 | soul/prompts/default_soul_core.md | SOUL 核心默认值 | soul/constants.py | B |
-| 21 | soul/prompts/default_soul_style_dialog.md | SOUL 对话风格默认值 | soul/constants.py | B |
-| 22 | soul/prompts/default_soul_style_output.md | SOUL 输出样式默认值 | soul/constants.py | B |
-| 23 | soul/prompts/onboarding_persona.md | 引导期人格 | soul/constants.py | B |
-| 24 | soul/prompts/output_style_meta_rule.md | 输出样式元规则 | soul/constants.py | B |
+| 20 | app/prompts/base_rules_fs.md | fs 工具族使用规则（M3 项目工作区） | agent/core.py | B |
+| 21 | soul/prompts/default_soul_core.md | SOUL 核心默认值 | soul/constants.py | B |
+| 22 | soul/prompts/default_soul_style_dialog.md | SOUL 对话风格默认值 | soul/constants.py | B |
+| 23 | soul/prompts/default_soul_style_output.md | SOUL 输出样式默认值 | soul/constants.py | B |
+| 24 | soul/prompts/onboarding_persona.md | 引导期人格 | soul/constants.py | B |
+| 25 | soul/prompts/output_style_meta_rule.md | 输出样式元规则 | soul/constants.py | B |
+| 26 | agent/prompts/compact_instruction.md | 自动压缩 8 段摘要指令（v7 CompactionEngine） | agent/compaction_engine.py | A |
+| 27 | agent/prompts/compact_preamble.md | 压缩摘要 checkpoint 前言 + `<compacted-summary>` 框架 | agent/compaction_engine.py | A |
 
 ## LLM 调用点
 
@@ -55,3 +58,4 @@
 | 15 | memory/handoff_summary.py::_llm_generate | chat | handoff_summary | agent/prompts/handoff_summary.md | handoff 生成 |
 | 16 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像冲突识别 |
 | 17 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取 |
+| 18 | agent/compaction_engine.py::_summarize | chat | system_agent | agent/prompts/compact_instruction.md | v7 自动压缩摘要生成 |

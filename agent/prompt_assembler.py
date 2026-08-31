@@ -11,7 +11,20 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-PROMPT_VERSION = "turn-prompt-v1"
+PROMPT_VERSION = "turn-prompt-v2"
+
+
+@dataclass(frozen=True)
+class SessionCtx:
+    """Session-level facts that gate which tools the model sees.
+
+    Kept intentionally tiny so tool schema selection cannot silently pick up
+    per-message signals (which would break provider prefix cache reuse).
+
+    Sandbox mode is now the single axis — project attachment is orthogonal
+    (it only decides *where* fs_* operate, not *whether* they exist).
+    """
+    sandbox_mode: str = "workspace-write"  # read-only / workspace-write / danger-full-access
 
 
 @dataclass(frozen=True)
@@ -53,6 +66,8 @@ class ToolPromptBuilder:
     """Build tool schemas and the stable host rules used by each turn."""
 
     RULES = (
+        "调工具的步骤里禁止输出任何正文文字：所有过程性思考、'先看看/再查一下'之类的话必须写进推理(reasoning)，"
+        "正文(content)只用于没有任何工具调用的最终回复。"
         "工具由宿主按风险策略执行。只能调用当前 tools 参数中提供的工具，"
         "严格遵守每个工具的参数 schema；不得臆造工具结果。"
         "只读工具可以并行，具有副作用的工具必须串行并遵守确认策略。"
@@ -70,42 +85,33 @@ class ToolPromptBuilder:
     def build_rules(self) -> str:
         return self.RULES
 
-    def schemas(self, message: str, step: int) -> list[dict]:
-        if not self.config.get("tool_projection_enabled", True):
-            return self.registry.openai_schemas()
-        specs = self.registry.all_specs()
-        if not specs:
+    # fs 写 / edit 家族——只在 workspace-write / danger 档位暴露
+    _WRITE_DENY = frozenset({"fs_write", "fs_edit"})
+    # shell_exec——只在 danger-full-access 档位暴露（执行层还有二次 gate）
+    _SHELL_DENY = frozenset({"shell_exec"})
+
+    def schemas(self, session_ctx: SessionCtx) -> list[dict]:
+        """Expose the full tool catalog, gated by sandbox mode only.
+
+        Rationale — see PROMPT_VERSION history: keyword-driven allowlisting
+        made tool schemas fluctuate per user message and shredded provider
+        prefix cache. Sandbox-mode gating changes only on the user's own
+        policy change events, so the tools payload stays byte-stable across
+        normal turns.
+
+        Note: fs_* is exposed to every session regardless of project state —
+        the execution-layer WorkspaceResolver decides *where* they operate.
+        A non-project session has fs_read/fs_list access to legacy_workspace;
+        the model discovering "there's nothing there" is a legitimate
+        answer that requires no schema-level hiding.
+        """
+        if not self.registry.all_specs():
             return []
-        text = (message or "").lower()
-        groups = {
-            "external": {"web_search", "web_fetch", "search", "fetch"},
-            "memory": {"memory_search", "memory_get", "memory_save"},
-            "files": {"file_read", "read_file", "file_write", "generate_document",
-                      "format_template_save"},
-            "system": {"shell_exec", "calculator", "datetime_now"},
-        }
-        selected: set[str] = set()
-        if any(k in text for k in (
-                "搜索", "查一下", "查询", "查找", "联网", "网页", "资料", "最新",
-                "当前", "现在", "近期", "引用", "web", "2025", "2026")):
-            selected |= groups["external"]
-        if any(k in text for k in ("历史偏好", "之前聊", "知识库", "查记忆", "记忆里")):
-            selected |= {"memory_search", "memory_get"}
-        if any(k in text for k in (
-                "记住", "保存记忆", "写入记忆", "长期保存", "记录下来", "以后都按")):
-            selected.add("memory_save")
-        if any(k in text for k in (
-                "文件", "文档", "导出", "生成文档", "保存到文件", "读取文件", "下载")):
-            selected |= groups["files"]
-        if any(k in text for k in (
-                "执行命令", "命令行", "脚本", "计算", "时间", "日期", "shell", "终端")):
-            selected |= groups["system"]
-        if step > 1:
-            selected |= {
-                spec.name for spec in specs
-                if spec.name in text or spec.name.replace("_", " ") in text
-            }
-        # An ordinary conversational question must not receive every tool.
-        # Passing ``None`` means "all tools" in ToolRegistry, which makes the
-        # model over-plan and is especially dangerous for write tools.
-        return self.registry.openai_schemas_for(selected)
+        denied: set[str] = set()
+        if session_ctx.sandbox_mode == "read-only":
+            denied |= self._WRITE_DENY
+            denied |= self._SHELL_DENY
+        elif session_ctx.sandbox_mode == "workspace-write":
+            denied |= self._SHELL_DENY
+        # danger-full-access: no additional deny (writes + shell exposed)
+        return self.registry.openai_schemas_excluding(denied)

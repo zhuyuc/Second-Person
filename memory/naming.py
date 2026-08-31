@@ -18,14 +18,20 @@ def memory_id(seq: int) -> str:
     return f"mem_{seq:06d}"
 
 
-def entity_id(name: str, disambiguator: str = "") -> str:
-    """ent_{规范化名 + 消歧位 后的 SHA1 前 10 位}。
+def entity_id(name: str, disambiguator: str = "",
+              project_id: str | None = None) -> str:
+    """ent_{规范化名 + 消歧位 [+ project_id] 后的 SHA1 前 10 位}。
 
     P4-B：加 disambiguator（如"客户"/"同事"/所属 domain）后 sha1，同名不同实体
     可以共存。老调用无 disambiguator 时行为与之前完全一致（""）。
+
+    M2：project_id 参与哈希 → 同名实体在不同项目自然得到不同 entity_id，
+    memory_entities 表 PK 约束天然满足；project_id=None（全局）时与旧行为字节一致。
     """
     norm = normalize_entity_name(name)
     key = f"{norm}|{(disambiguator or '').strip().lower()}" if disambiguator else norm
+    if project_id:
+        key = f"{key}|{project_id}"
     return "ent_" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:10]
 
 
@@ -178,3 +184,8 @@ def raw_doc_id(seq: int) -> str:
 
 def session_id(seq: int) -> str:
     return f"sess_{seq:04d}"
+
+
+def project_id() -> str:
+    """proj_{8 位 hex}。项目 ID 无自增序列，直接 uuid 截断。"""
+    return f"proj_{uuid.uuid4().hex[:8]}"

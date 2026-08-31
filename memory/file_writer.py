@@ -343,12 +343,15 @@ class FileWriter:
             with self.db.transaction() as conn:
                 self.palace.upsert_index(conn, fm, summary, md_rel)
                 self.palace.sync_fts(conn, mid, fm.get(
-                    "title", ""), summary, detail, domain)
+                    "title", ""), summary, detail, domain,
+                    project_id=fm.get("project_id"))
                 self.palace.replace_links(
-                    conn, mid, p.get("links", fm.get("links", [])))
+                    conn, mid, p.get("links", fm.get("links", [])),
+                    project_id=fm.get("project_id"))
                 self.palace.sync_entities(conn, mid, p.get(
                     "entities", fm.get("entities", [])),
-                    entity_types=p.get("entity_types"))
+                    entity_types=p.get("entity_types"),
+                    project_id=fm.get("project_id"))
                 self.palace.add_timeline(
                     conn, mid,
                     # 语义事件覆盖：演变/合并/导入等业务语义由调用方传入，

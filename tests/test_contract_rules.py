@@ -56,7 +56,7 @@ def test_chat_request_contract_uses_only_reasoning_effort():
 def test_chat_sse_events_are_registered_and_have_terminal_semantics():
     expected = {
         "queued", "error", "reasoning_delta", "decision_notice", "tool_executing",
-        "tool_visual", "content_delta", "citations",
+        "tool_visual", "content_delta", "content_reset", "citations",
         "handoff_ready", "mood_updated", "turn_completed",
         "turn_started", "step_started",
         "tool_result", "step_metrics",

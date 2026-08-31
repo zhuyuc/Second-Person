@@ -1,4 +1,6 @@
-from agent.prompt_assembler import PromptAssembler, PromptBlock, ToolPromptBuilder
+from agent.prompt_assembler import (
+    PromptAssembler, PromptBlock, SessionCtx, ToolPromptBuilder,
+)
 
 
 def test_dynamic_blocks_are_always_last():
@@ -37,8 +39,10 @@ class _Spec:
 
 
 class _Registry:
-    def __init__(self):
-        self.specs = [_Spec("web_search"), _Spec("calculator")]
+    """Full-catalog fake matching the denylist-based ToolRegistry API."""
+
+    def __init__(self, names):
+        self.specs = [_Spec(n) for n in names]
 
     def all_specs(self):
         return self.specs
@@ -46,26 +50,81 @@ class _Registry:
     def openai_schemas(self):
         return [{"function": {"name": spec.name}} for spec in self.specs]
 
-    def openai_schemas_for(self, names):
+    def openai_schemas_excluding(self, denied):
+        denied = denied or set()
         return [{"function": {"name": spec.name}}
-                for spec in self.specs if names is None or spec.name in names]
+                for spec in self.specs if spec.name not in denied]
 
 
-def test_tool_projection_is_separate_from_tool_rules():
-    builder = ToolPromptBuilder(_Registry(), _Config())
+ALL_TOOLS = [
+    "web_search", "web_fetch", "memory_search", "memory_save",
+    "fs_read", "fs_list", "fs_glob", "fs_grep", "fs_write", "fs_edit",
+    "shell_exec", "datetime_now",
+]
+
+
+def _names(schemas):
+    return sorted(item["function"]["name"] for item in schemas)
+
+
+def test_tool_rules_have_no_projection_side_effects():
+    builder = ToolPromptBuilder(_Registry(ALL_TOOLS), _Config())
     assert "工具由宿主" in builder.build_rules()
     assert "不要为了凑步骤调用工具" in builder.build_rules()
-    assert [item["function"]["name"] for item in builder.schemas("请搜索最新资料", 1)] == ["web_search"]
 
 
-def test_tool_projection_does_not_expose_all_tools_for_normal_chat():
-    builder = ToolPromptBuilder(_Registry(), _Config())
-    assert builder.schemas("请解释一下 Agent Loop 是什么", 1) == []
+# --------------- 三档 × 项目/非项目 一致性（v6 沙箱统一化）--------------
+
+def test_workspace_write_default_exposes_read_and_write():
+    """默认档位（workspace-write）：fs_* 读写都在，shell 拒。"""
+    builder = ToolPromptBuilder(_Registry(ALL_TOOLS), _Config())
+    names = _names(builder.schemas(SessionCtx(sandbox_mode="workspace-write")))
+    assert "fs_read" in names
+    assert "fs_list" in names
+    assert "fs_write" in names
+    assert "fs_edit" in names
+    assert "shell_exec" not in names
+    # 非 fs 工具无条件常驻
+    assert "web_search" in names
+    assert "memory_save" in names
 
 
-def test_memory_save_requires_explicit_memory_instruction():
-    registry = _Registry()
-    registry.specs.append(_Spec("memory_save"))
-    builder = ToolPromptBuilder(registry, _Config())
-    assert [item["function"]["name"] for item in builder.schemas("记忆是什么", 1)] == []
-    assert [item["function"]["name"] for item in builder.schemas("请记住我以后都用中文", 1)] == ["memory_save"]
+def test_readonly_mode_denies_write_and_shell():
+    """read-only：fs 读 OK，写 + shell 全拒。"""
+    builder = ToolPromptBuilder(_Registry(ALL_TOOLS), _Config())
+    names = _names(builder.schemas(SessionCtx(sandbox_mode="read-only")))
+    assert "fs_read" in names
+    assert "fs_list" in names
+    assert "fs_write" not in names
+    assert "fs_edit" not in names
+    assert "shell_exec" not in names
+
+
+def test_danger_mode_opens_shell():
+    """danger-full-access：读写 + shell 全开。"""
+    builder = ToolPromptBuilder(_Registry(ALL_TOOLS), _Config())
+    names = _names(builder.schemas(SessionCtx(sandbox_mode="danger-full-access")))
+    assert "shell_exec" in names
+    assert "fs_write" in names
+    assert "fs_edit" in names
+    assert "fs_read" in names
+
+
+def test_default_sandbox_ctx_is_workspace_write():
+    """SessionCtx 默认值就是 workspace-write（沙箱下沉后的合理默认）。"""
+    ctx = SessionCtx()
+    assert ctx.sandbox_mode == "workspace-write"
+
+
+def test_schemas_byte_stable_across_calls():
+    """核心不变式：同 session_ctx 出的 schemas 每次字节完全一致。"""
+    builder = ToolPromptBuilder(_Registry(ALL_TOOLS), _Config())
+    ctx = SessionCtx(sandbox_mode="workspace-write")
+    first = builder.schemas(ctx)
+    for _ in range(3):
+        assert builder.schemas(ctx) == first
+
+
+def test_empty_registry_returns_empty():
+    builder = ToolPromptBuilder(_Registry([]), _Config())
+    assert builder.schemas(SessionCtx()) == []

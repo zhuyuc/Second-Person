@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import uuid
 from collections import defaultdict
@@ -17,9 +18,13 @@ from typing import AsyncIterator
 from soul.constants import ONBOARDING_PERSONA
 
 from .contracts import normalize_reasoning_effort
+from .project_instructions import (
+    load_baseline, paths_hash_map, reconcile,
+)
 from .prompt_assembler import PromptAssembler, PromptBlock, ToolPromptBuilder
 from .turn_events import TurnEventStore
 from .turn_runtime import TurnRuntime
+from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.core")
 
@@ -32,7 +37,9 @@ class AgentCore:
                  lifecycle, signal_collector, llm_client, provider_registry,
                  file_writer, skill_manager, event_bus=None, notifier=None,
                  mood_manager=None, mood_trigger=None,
-                 mood_action_dispatcher=None, memory_gate=None):
+                 mood_action_dispatcher=None, memory_gate=None,
+                 projects=None, workspace_resolver=None,
+                 token_meter=None, compaction_engine=None):
         self.db = db
         self.config = config
         self.sessions = session_store
@@ -54,6 +61,12 @@ class AgentCore:
         self.mood = mood_manager
         self.mood_trigger = mood_trigger
         self.mood_action_dispatcher = mood_action_dispatcher
+        # M3：项目工作区解析（无项目部署时保留 None，检索/prompt 分支跳过）
+        self.projects = projects
+        self.workspace_resolver = workspace_resolver
+        # v7：token 度量 + 自动压缩（可 None，turn_runtime 缺失时降级）
+        self.token_meter = token_meter
+        self.compaction_engine = compaction_engine
         self.image_kb_fn = None
         self._pending_low_confirm: dict | None = None
         # Δ9：同一会话内至多问一次低置信记忆确认，避免多轮打扰
@@ -69,6 +82,8 @@ class AgentCore:
             system_prompt=self._build_system_prompt,
             context_loader=self._runtime_context, persist_images=self._persist_images,
             tool_prompt_builder=self.tool_prompts,
+            token_meter=token_meter,
+            compaction_engine=compaction_engine,
         )
 
     async def run(self, session_id: str, message: str,
@@ -159,18 +174,24 @@ class AgentCore:
         snap = self.providers.snapshot_for("chat") or self.providers.snapshot_for("agent")
         if not snap:
             raise RuntimeError("未配置可用对话模型")
-        history = self.sessions.load_recovery_context(session_id)
-        if (history and history[-1].get("role") == "user"
-                and history[-1].get("content") == message):
-            history = history[:-1]
-        history = [
-            {"role": item["role"], "content": item["content"]}
-            for item in history
-            if item.get("role") in {"user", "assistant", "system"}
-        ]
+        history_raw = self.sessions.load_recovery_context(session_id)
+        if (history_raw and history_raw[-1].get("role") == "user"
+                and history_raw[-1].get("content") == message):
+            history_raw = history_raw[:-1]
+        history_raw = [item for item in history_raw
+                       if item.get("role") in {"user", "assistant", "system"}]
+        # 两份视图：history 供 LLM（无 id 干扰），history_ids 供 compaction 定位水位
+        history = [{"role": item["role"], "content": item["content"]}
+                   for item in history_raw]
+        history_ids = [item.get("id") for item in history_raw]
         context_text = "\n".join(str(item.get("content", "")) for item in history[-6:])
+        # M2 §5.1：会话所在项目决定记忆检索范围（项目 + 全局 / 仅全局）
+        session_row = self.db.query_one(
+            "SELECT project_id FROM sessions WHERE session_id=?", (session_id,))
+        session_project_id = session_row["project_id"] if session_row else None
         retrieval = await self.retriever.retrieve(
-            message, session_id=session_id, context_text=context_text)
+            message, session_id=session_id, context_text=context_text,
+            project_id=session_project_id)
         # 常态化拼装图结构：主命中 + 关联记忆按关系分组，显式表达图关系给模型；
         # 若本轮候选池里有争议记忆，附上争议提醒（不注入原文，只感知）
         memory_text = self._compose_memory_context(
@@ -187,12 +208,119 @@ class AgentCore:
             handoff = await asyncio.to_thread(self._load_handoff_context, handoff_path)
             if handoff:
                 handoff_context = "[会话交接摘要] 以下内容仅作背景参考：\n" + handoff
+        # v6：沙箱策略对所有会话生效——非项目会话也输出策略行，让模型看得到；
+        # 项目说明书 baseline 仅项目会话有意义（无 project_root 就无书可读）
+        project_context: str | None = None
+        project_instructions: str | None = None
+        project_instructions_changes: str | None = None
+        if hasattr(self, "workspace_resolver") \
+                and self.workspace_resolver is not None:
+            try:
+                ctx = self.workspace_resolver.resolve(session_id)
+                writable = ", ".join(str(p) for p in ctx.writable_roots) or "（无）"
+                if session_project_id:
+                    proj = self.projects.get(session_project_id) if self.projects else None
+                    title = proj.title if proj else session_project_id
+                    project_context = (
+                        f"[项目] {title}\n"
+                        f"[路径] {ctx.project_root}\n"
+                        f"[沙箱策略] {ctx.sandbox_mode}（可写：{writable}）"
+                    )
+                    # 项目说明书 baseline reconciliation：首次注入完整 baseline，
+                    # 之后只在 hash 变化时追加 changes 块。unchanged / empty 两态
+                    # 不发任何上下文事件，保证 provider prefix cache 完整命中。
+                    baseline_ctx, changes_ctx = await asyncio.to_thread(
+                        self._reconcile_project_baseline,
+                        session_id, session_project_id, ctx.project_root)
+                    project_instructions = baseline_ctx
+                    project_instructions_changes = changes_ctx
+                else:
+                    # 无项目会话：仅输出沙箱策略行；project_root 缺失时展示 workspace 根
+                    read = ", ".join(str(p) for p in ctx.read_roots) or "（无）"
+                    project_context = (
+                        f"[沙箱策略] {ctx.sandbox_mode}（可写：{writable}；可读：{read}）"
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug("组装沙箱上下文失败", exc_info=True)
         return {"snap": snap, "history": history,
+                "history_ids": history_ids,   # v7 compaction 定位水位用
                 "dynamic_blocks": [],  # 保留字段以兼容 _build_system_prompt 签名
                 "memory_context": memory_context,
                 "handoff_context": handoff_context,
+                "project_context": project_context,
+                "project_instructions": project_instructions,
+                "project_instructions_changes": project_instructions_changes,
                 "memory_count": len(retrieval.hits) + len(retrieval.related),
                 "turn_id": turn_id, "step": step}
+
+    def _reconcile_project_baseline(self, session_id: str,
+                                     project_id: str,
+                                     project_root: Path | None
+                                     ) -> tuple[str | None, str | None]:
+        """Return (baseline_text_for_initial, changes_text_for_delta).
+
+        Both fields are None when nothing should be emitted this turn:
+        - unchanged files: reuse the baseline already in history
+        - project has no candidate files: emit nothing
+        - fatal read error: swallow and emit nothing (obs log only)
+        """
+        if not project_root:
+            return None, None
+        try:
+            files, truncated = load_baseline(Path(project_root))
+        except Exception:  # noqa: BLE001
+            logger.debug("读取项目说明书失败", exc_info=True)
+            return None, None
+        # Fetch prior reconciliation state, if any.
+        prev_hash: str | None = None
+        prev_paths: dict[str, str] | None = None
+        try:
+            row = self.db.query_one(
+                "SELECT files_hash, paths_json FROM session_project_baseline "
+                "WHERE session_id=?", (session_id,))
+            if row:
+                prev_hash = row["files_hash"]
+                try:
+                    prev_paths = json.loads(row["paths_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    prev_paths = {}
+        except Exception:  # noqa: BLE001
+            logger.debug("读取 session_project_baseline 失败", exc_info=True)
+        result = reconcile(prev_hash, prev_paths, files, truncated)
+        if result.kind == "empty":
+            return None, None
+        if result.kind == "unchanged":
+            return None, None
+        now = now_cst().isoformat(timespec="seconds")
+        paths_json = json.dumps(paths_hash_map(files), ensure_ascii=False,
+                                 sort_keys=True)
+        if result.kind == "initial":
+            payload = result.render_full()
+            try:
+                self.db.execute(
+                    "INSERT OR REPLACE INTO session_project_baseline("
+                    "session_id, project_id, files_hash, paths_json, "
+                    "payload, total_bytes, truncated, injected_at, updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (session_id, project_id, result.files_hash, paths_json,
+                     payload, result.total_bytes,
+                     1 if result.truncated else 0, now, now))
+            except Exception:  # noqa: BLE001
+                logger.debug("持久化 baseline 失败", exc_info=True)
+            return payload, None
+        # kind == "changes"
+        changes_payload = result.render_changes()
+        try:
+            self.db.execute(
+                "UPDATE session_project_baseline SET files_hash=?, "
+                "paths_json=?, payload=?, total_bytes=?, truncated=?, "
+                "updated_at=? WHERE session_id=?",
+                (result.files_hash, paths_json,
+                 result.render_full(), result.total_bytes,
+                 1 if result.truncated else 0, now, session_id))
+        except Exception:  # noqa: BLE001
+            logger.debug("更新 baseline 失败", exc_info=True)
+        return None, changes_payload
 
     @staticmethod
     def _compose_memory_context(hits: list[dict],
@@ -292,6 +420,14 @@ class AgentCore:
             PromptBlock("输出契约", "直接回答当前请求，保持清晰、准确、可执行；需要工具时先调用工具，工具完成后再给出结论。", 20),
             PromptBlock("工具运行规则", self.tool_prompts.build_rules(), 30),
         ]
+        # M3：fs 工具族的使用规则常驻 static rules（一次性击穿 KV cache）
+        try:
+            from infrastructure.prompt_loader import PROMPTS
+            fs_rules = PROMPTS.load_raw("app/prompts/base_rules_fs")
+            if fs_rules and fs_rules.strip():
+                static.append(PromptBlock("文件操作规则", fs_rules.strip(), 35))
+        except Exception:  # noqa: BLE001
+            logger.debug("加载 fs rules 失败", exc_info=True)
         if onboarding:
             static.append(PromptBlock("引导期人格", ONBOARDING_PERSONA, 40))
         else:

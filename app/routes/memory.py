@@ -45,6 +45,24 @@ async def memory_list(request: Request):
         params.append(confidence)
     if important_only:
         where.append("is_important=1")
+    # M2 §7.4：project_id 过滤参数
+    #   缺省或 "any"          → 所有（保留现有行为）
+    #   "global" 或 null      → 仅全局（project_id IS NULL）
+    #   具体 proj_xxx         → 该项目 + 全局（用户视图更实用）
+    #   具体 proj_xxx + only  → 仅该项目
+    project_filter = body.get("project_id")
+    project_scope = body.get("project_scope", "with_global")  # with_global / only
+    if project_filter in (None, "", "any"):
+        pass
+    elif project_filter in ("global", "null"):
+        where.append("project_id IS NULL")
+    else:
+        if project_scope == "only":
+            where.append("project_id=?")
+            params.append(project_filter)
+        else:
+            where.append("(project_id=? OR project_id IS NULL)")
+            params.append(project_filter)
     clause = " AND ".join(where)
 
     start = (page - 1) * page_size
@@ -352,25 +370,47 @@ async def delete(request: Request):
 
 
 @router.get("/memory/graph")
-async def graph(limit: int = None):
+async def graph(limit: int = None, project_id: str = None,
+                project_scope: str = "with_global"):
+    """M2：project_id 参数化。
+      缺省或 any    → 全部实体
+      global / null → 仅全局
+      具体 proj_xxx → 项目 + 全局 (with_global) 或 仅项目 (only)
+    """
     c = _c()
     from memory import _constants as _mem_const
     max_nodes = min(limit or _mem_const.GRAPH_MAX_NODES, 500)
     max_edges = _mem_const.GRAPH_MAX_EDGES
-    # 请求路径只做增量布点（O(新增实体数) 毫秒级），禁止全量重算阻塞事件循环；
-    # 全量力导向精排由夜间维护链在工作线程兑底刷新。
     from memory.graph_layout import place_missing
     try:
         place_missing(c.db)
     except Exception:  # noqa: BLE001
         logger.warning("知识图谱增量布点失败，回退无坐标", exc_info=True)
+
+    proj_where = ""
+    proj_params: list = []
+    if project_id in (None, "", "any"):
+        pass
+    elif project_id in ("global", "null"):
+        proj_where = " WHERE e.project_id IS NULL"
+    else:
+        if project_scope == "only":
+            proj_where = " WHERE e.project_id=?"
+            proj_params.append(project_id)
+        else:
+            proj_where = " WHERE (e.project_id=? OR e.project_id IS NULL)"
+            proj_params.append(project_id)
+
     total_count = c.db.query_one(
-        "SELECT COUNT(*) cnt FROM memory_entities")["cnt"]
+        "SELECT COUNT(*) cnt FROM memory_entities e" + proj_where,
+        proj_params)["cnt"]
     nodes = c.db.query_all(
         "SELECT e.entity_id,e.entity_name,e.entity_type,e.primary_domain,"
         "e.memory_count,g.x,g.y "
-        "FROM memory_entities e LEFT JOIN graph_layout g ON e.entity_id=g.entity_id "
-        "ORDER BY e.memory_count DESC LIMIT ?", (max_nodes,))
+        "FROM memory_entities e LEFT JOIN graph_layout g ON e.entity_id=g.entity_id"
+        + proj_where +
+        " ORDER BY e.memory_count DESC LIMIT ?",
+        (*proj_params, max_nodes))
     node_ids = {n["entity_id"] for n in nodes}
     edges = c.db.query_all(
         "SELECT a.entity_id src, b.entity_id tgt, COUNT(*) w "

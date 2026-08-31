@@ -10,7 +10,13 @@ export const useSessions = defineStore('sessions', {
     // currentSid 持久化到 localStorage：刷新后恢复当前会话视图，
     // 配合 ChatView.tryReattach 续播进行中的生成（刷新不中断）。
     // 所有 currentSid 变更必须走 setCurrent（唯一写入口，含持久化）
-    state: () => ({ list: [], currentSid: localStorage.getItem('sp_current_sid') || null }),
+    // pendingProjectId：M5.1 延迟建项目会话 —— 侧栏点「新建会话」不立即
+    // 落库，仅记项目 id；首条消息 send 时才 create_session(project_id=?)
+    state: () => ({
+        list: [],
+        currentSid: localStorage.getItem('sp_current_sid') || null,
+        pendingProjectId: null,
+    }),
     actions: {
         async load() {
             // 侧栏需展示全量会话：显式传大 page_size，避免后端默认 20 条截断
@@ -21,13 +27,18 @@ export const useSessions = defineStore('sessions', {
             this.currentSid = sid
             if (sid) localStorage.setItem('sp_current_sid', sid)
             else localStorage.removeItem('sp_current_sid')
+            // 切到已有会话 → 清空 pendingProjectId（否则会污染下一次新建）
+            if (sid) this.pendingProjectId = null
         },
+        setPendingProject(pid) { this.pendingProjectId = pid || null },
         // 新会话已在后端持久化，但列表请求有延迟。先插入占位项，避免首条消息后侧栏留白。
-        ensurePlaceholder(sid) {
+        // M5.1：projectId 可选 —— 项目下新建会话时传入，占位就挂到工作区段
+        ensurePlaceholder(sid, projectId = null) {
             if (!sid) return
             const existing = this.list.find(s => s.session_id === sid)
             if (existing) {
                 if (!existing.title) existing.title = DEFAULT_SESSION_TITLE
+                if (projectId && !existing.project_id) existing.project_id = projectId
                 return
             }
             this.list.unshift({
@@ -42,6 +53,10 @@ export const useSessions = defineStore('sessions', {
                 from_session: null,
                 handoff_status: null,
                 succeeded_by: null,
+                project_id: projectId,
+                archived: false,
+                archived_source: null,
+                sandbox_mode: null,
             })
         },
         // 标题由后台独立生成；调度与 ChatView 生命周期解耦，切换到其他页面后仍会刷新侧栏。

@@ -77,6 +77,15 @@ TASK_SLOTS: dict[str, TaskSlot] = {
         desc="用于知识库图片与文档内嵌图的文字解析，让图片内容可被检索与引用。",
         fallback=("agent", "chat"),
     ),
+    "retriever_refine": TaskSlot(
+        key="retriever_refine",
+        label="记忆精筛模型",
+        desc="每轮首步的记忆检索第 2 层 LLM 精筛（从候选池挑选与当前问题真正相关的记忆）。"
+             "这个调用直接影响首字延迟——推荐配一个更小/更快的模型（如 haiku / lite），"
+             "未配置时回退到系统 Agent。",
+        fallback=("agent", "chat"),
+        lightweight=True,
+    ),
 
 }
 

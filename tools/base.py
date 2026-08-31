@@ -33,6 +33,8 @@ class ToolSpec:
     source: str = "builtin"           # builtin / mcp
     connector_id: str | None = None
     parallel_safe: bool = True
+    # M3：需要在 ToolExecutor 里注入 WorkspaceContext 的工具（fs_* 家族）
+    needs_workspace: bool = False
 
 
 class BaseTool:
@@ -112,4 +114,22 @@ class ToolRegistry:
                 "parameters": tool.spec.parameters,
             },
         }) for tool in self._tools.values() if tool.spec.name in names]
+
+    def openai_schemas_excluding(self, denied: set[str] | None = None) -> list[dict]:
+        """Return all schemas except a host-declared denylist.
+
+        Denylist gating (vs. keyword allowlist) keeps the tools payload byte-
+        stable across turns whose only difference is the user message: only a
+        session-level policy change (sandbox mode, project attach/detach) shifts
+        the set, so the provider prefix cache reuses the same tools prefix.
+        """
+        denied = denied or set()
+        return [_canonical_schema({
+            "type": "function",
+            "function": {
+                "name": tool.spec.name,
+                "description": tool.spec.description,
+                "parameters": tool.spec.parameters,
+            },
+        }) for tool in self._tools.values() if tool.spec.name not in denied]
 

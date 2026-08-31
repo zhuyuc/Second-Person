@@ -194,10 +194,26 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             fp.write(content)
         return True
 
-    async def shell_exec(cmd: str, timeout: int = 30) -> dict:
+    async def shell_exec(cmd: str, timeout: int = 30,
+                          _ws_ctx=None) -> dict:
+        """执行 shell 命令。
+
+        `_ws_ctx` 由 ToolExecutor 注入（needs_workspace=True）：
+        - shell_enabled=False（read-only / workspace-write 档位）→ 直接拒
+        - shell_enabled=True （danger-full-access 档位）→ 用 ctx.shell_cwd 作 cwd
+        兼容缺 ctx 的老调用路径：退回全局 sandbox（历史行为）
+        """
+        if _ws_ctx is not None:
+            if not getattr(_ws_ctx, "shell_enabled", False):
+                mode = getattr(_ws_ctx, "sandbox_mode", "unknown")
+                return {"returncode": -1, "stdout": "",
+                        "stderr": f"SANDBOX_DENIED: 当前档位 {mode} 不允许 shell 执行"}
+            cwd = getattr(_ws_ctx, "shell_cwd", None) or sandbox.workspace
+        else:
+            cwd = sandbox.workspace
         sandbox.check_command(cmd)
         proc = await asyncio.create_subprocess_shell(
-            cmd, cwd=str(sandbox.workspace),
+            cmd, cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=sandbox.clean_env())
         try:
@@ -363,10 +379,11 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
          "required": ["path", "content"]}), file_write)
 
     registry.register_function(ToolSpec(
-        "shell_exec", "在工作区执行 shell 命令",
+        "shell_exec", "在工作区执行 shell 命令；仅在 danger-full-access 沙箱档位下可用",
         {"type": "object", "properties": {
             "cmd": {"type": "string"}, "timeout": {"type": "integer"}},
-         "required": ["cmd"]}), shell_exec)
+         "required": ["cmd"]},
+        needs_workspace=True), shell_exec)
 
     registry.register_function(ToolSpec(
         "web_fetch", "抓取网页正文",

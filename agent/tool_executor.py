@@ -12,17 +12,20 @@ logger = logging.getLogger("second_person.tool_exec")
 
 class ToolExecutor:
     def __init__(self, registry, config,
-                 notifier: Callable[[str, str], None] | None = None):
+                 notifier: Callable[[str, str], None] | None = None,
+                 workspace_resolver=None):
         self.registry = registry
         self.config = config
         self.notify = notifier or (lambda _topic, _message: None)
+        # M3：fs 工具族依赖此解析器；无解析器时 fs_* 工具不会被注册，无影响
+        self.workspace_resolver = workspace_resolver
 
     async def execute_tool(self, tool_name: str, params: dict, *,
                            intent_summary: str = "",
                            emit: Callable[[str, dict], Awaitable[None]] | None = None,
                            session_id: str = "") -> dict[str, Any]:
         """Validate, execute, redact, and return one tool result."""
-        del intent_summary, emit, session_id
+        del intent_summary, emit
         from langfuse.integration import get_tracer, mark_preview
         import json
 
@@ -41,6 +44,14 @@ class ToolExecutor:
         if error:
             span.end(level="ERROR", output={"ok": False, "error": error})
             return {"ok": False, "error": error}
+        # M3：需要工作区上下文的工具由 spec.needs_workspace 标注
+        if getattr(tool.spec, "needs_workspace", False):
+            if self.workspace_resolver is None:
+                error = "工具需要工作区上下文但未装配 WorkspaceResolver"
+                span.end(level="ERROR", output={"ok": False, "error": error})
+                return {"ok": False, "error": error}
+            ctx = self.workspace_resolver.resolve(session_id)
+            params = {**params, "_ws_ctx": ctx}
         result, error = await self._run_with_empty_retry(tool, params)
         if error:
             span.end(level="ERROR", output={"ok": False, "error": error})

@@ -109,6 +109,9 @@ class BasePlatformAdapter:
         async for evt in self.core.run(sid, text, images=images):
             if evt["event"] == "content_delta":
                 full.append(evt["data"]["text"])
+            elif evt["event"] == "content_reset":
+                # 工具步旁白撤回：正文只保留最终答案
+                full.clear()
         await self._send_reply(chat_id, "".join(full))
 
     async def handle_unsupported(self, platform_user_id: str, chat_id: str,
@@ -197,10 +200,14 @@ class BasePlatformAdapter:
                               now_cst().isoformat(timespec="seconds")))
 
     def _resolve_session(self, platform_user_id: str) -> str:
+        # M5 §八 8.6：若映射会话已归档（用户手动或项目联动），
+        # IM 侧下一条消息新建替代会话并更新映射，保证 IM 用户永远有响应
         row = self.db.query_one(
-            "SELECT session_id FROM platform_sessions WHERE platform=? AND platform_user_id=?",
+            "SELECT ps.session_id, s.archived FROM platform_sessions ps "
+            "LEFT JOIN sessions s ON ps.session_id=s.session_id "
+            "WHERE ps.platform=? AND ps.platform_user_id=?",
             (self.platform_type, platform_user_id))
-        if row:
+        if row and not row.get("archived"):
             return row["session_id"]
         sid = self.sessions.create_session(channel=self.platform_type)
         self._update_mapping(platform_user_id, sid)

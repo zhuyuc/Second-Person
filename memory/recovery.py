@@ -18,12 +18,84 @@ from infrastructure.timeutil import now_cst
 logger = logging.getLogger("second_person.recovery")
 
 
+def rebuild_projects_from_md(db, data_dir) -> int:
+    """M5：从 data/projects/*.md frontmatter 重建 projects 表。返回条数。
+
+    仅在 projects/ 目录存在时执行；空目录返回 0。frontmatter 缺关键字段的
+    md 会被跳过并记 warning，不阻塞主流程。
+    """
+    import json as _json
+    import re as _re
+    data_dir = Path(data_dir)
+    p_dir = data_dir / "projects"
+    if not p_dir.is_dir():
+        return 0
+    count = 0
+    with db.transaction() as conn:
+        for md in p_dir.glob("*.md"):
+            try:
+                text = md.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            # 解析简单 YAML frontmatter（key: value 逐行；避免引入 yaml 依赖）
+            m = _re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, _re.DOTALL)
+            if not m:
+                continue
+            fm: dict = {}
+            for line in m.group(1).splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if ":" not in line:
+                    continue
+                k, _, v = line.partition(":")
+                fm[k.strip()] = v.strip()
+            if not fm.get("id") or not fm.get("path"):
+                logger.warning("跳过项目 md（缺 id/path）：%s", md.name)
+                continue
+            try:
+                display_order = int(fm.get("display_order", 0))
+            except ValueError:
+                display_order = 0
+            ignore_extra = fm.get("ignore_extra", "[]")
+            try:
+                _json.loads(ignore_extra)
+            except (ValueError, TypeError):
+                ignore_extra = "[]"
+            path = fm["path"].replace("\\", "/")
+            path_key = path.lower()
+            archived_at = fm.get("archived_at")
+            if archived_at in (None, "null", "None", ""):
+                archived_at = None
+            conn.execute(
+                "INSERT OR REPLACE INTO projects(id, path, path_key, title, "
+                "display_order, sandbox_mode, ignore_extra, status, "
+                "archived_at, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (fm["id"], path, path_key, fm.get("title", md.stem),
+                 display_order,
+                 fm.get("sandbox_mode", "workspace-write"),
+                 ignore_extra,
+                 fm.get("status", "active"),
+                 archived_at,
+                 fm.get("created_at",
+                        now_cst().isoformat(timespec="seconds")),
+                 fm.get("updated_at",
+                        now_cst().isoformat(timespec="seconds"))))
+            count += 1
+    if count:
+        logger.info("--rebuild-index：从 md 重建 %d 条项目", count)
+    return count
+
+
 def rebuild_index(db, data_dir) -> dict:
     """从 md 文件重建全部 SQLite 索引。返回统计。"""
     data_dir = Path(data_dir)
     palace = Palace(db)
     mem_dir = data_dir / "memories"
     count = 0
+    # M5：先重建项目表（memory md frontmatter 的 project_id 需要 projects 存在）
+    project_count = rebuild_projects_from_md(db, data_dir)
     with db.transaction() as conn:
         # 清空派生索引（保留 vectors BLOB 以免重算，但状态需校验）
         # 白名单校验：表名不得拼接外部输入，仅允许下列固定派生索引表
@@ -75,7 +147,7 @@ def rebuild_index(db, data_dir) -> dict:
             "DELETE FROM citation_events WHERE memory_id NOT IN "
             "(SELECT id FROM memories)")
     logger.info("--rebuild-index 完成，重建 %d 条", count)
-    return {"rebuilt": count}
+    return {"rebuilt": count, "projects_rebuilt": project_count}
 
 
 async def recompile(db, data_dir, distiller, backup_manager=None) -> dict:

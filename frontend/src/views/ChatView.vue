@@ -7,6 +7,10 @@ import { useSSE } from '@/composables/useSSE'
 import { useLiveThroughput } from '@/composables/useLiveThroughput'
 import { useToast } from '@/stores/toast'
 import { useSessions } from '@/stores/sessions'
+import { useProjects } from '@/stores/projects'
+import { projectsApi } from '@/api/projects'
+import SandboxModeChip from '@/components/SandboxModeChip.vue'
+import FilePickerPanel from '@/components/FilePickerPanel.vue'
 import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
 import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 import BaseModal from '@/components/BaseModal.vue'
@@ -15,6 +19,7 @@ import MessageAnchorRail from '@/components/MessageAnchorRail.vue'
 import SessionMetricsLine from '@/components/SessionMetricsLine.vue'
 import SelectionActionBar from '@/components/SelectionActionBar.vue'
 import QuoteComposer from '@/components/QuoteComposer.vue'
+import ThinkingTimeline from '@/components/ThinkingTimeline.vue'
 import { useMessageSelection } from '@/composables/useMessageSelection'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
@@ -68,6 +73,87 @@ marked.setOptions({ renderer: mermaidRenderer })
 const toast = useToast()
 const sse = useSSE()
 const sessStore = useSessions()   // 会话列表/当前会话共享状态（侧栏在 SessionSidebar）
+const projStore = useProjects()   // 项目工作区（v5）
+
+const currentProject = computed(() => {
+  const sid = sessStore.currentSid
+  if (sid) {
+    const s = sessStore.list.find(x => x.session_id === sid)
+    if (s && s.project_id) return projStore.byId(s.project_id) || null
+    return null
+  }
+  // M5.1：未建库的「待建」项目会话，用 pendingProjectId 显示
+  if (sessStore.pendingProjectId) {
+    return projStore.byId(sessStore.pendingProjectId) || null
+  }
+  return null
+})
+
+// 新对话（会话未建）时的沙箱档位预选：chip 展示用 fallback，首条消息建会话后落库
+const pendingSandboxMode = ref(null)
+const sandboxFallback = computed(() =>
+  pendingSandboxMode.value || currentProject.value?.sandbox_mode || 'workspace-write')
+
+// M4：@文件面板
+const filePickerVisible = ref(false)
+const filePickerQuery = ref('')
+const filePickerRef = ref(null)
+
+function onComposerInput(e) {
+  // 复用原有 autoGrow；这里叠加 @ 触发面板逻辑
+  autoGrow()
+  const ta = e?.target || document.querySelector('textarea')
+  if (!ta || !currentProject.value) { filePickerVisible.value = false; return }
+  const val = ta.value || ''
+  const pos = ta.selectionStart || 0
+  // 找到光标前最近的 @，判定是否处于「@词」状态
+  const before = val.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  if (atIdx < 0 || (atIdx > 0 && !/\s/.test(before[atIdx - 1]))) {
+    filePickerVisible.value = false
+    return
+  }
+  const seg = before.slice(atIdx + 1)
+  if (/[\s\r\n]/.test(seg)) {
+    filePickerVisible.value = false
+    return
+  }
+  filePickerQuery.value = seg
+  filePickerVisible.value = true
+}
+
+function onFilePicked(f) {
+  const ta = document.querySelector('textarea')
+  if (!ta) return
+  const val = ta.value || ''
+  const pos = ta.selectionStart || 0
+  const before = val.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  if (atIdx < 0) return
+  const after = val.slice(pos)
+  const insertion = `@${f.path} `
+  input.value = val.slice(0, atIdx) + insertion + after
+  filePickerVisible.value = false
+  nextTick(() => {
+    const newPos = atIdx + insertion.length
+    ta.focus()
+    ta.setSelectionRange(newPos, newPos)
+  })
+}
+
+function onComposerKeyDown(e) {
+  if (filePickerVisible.value && filePickerRef.value) {
+    // 让面板先处理方向键/Enter/Esc
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) {
+      filePickerRef.value.onKey(e)
+      if (e.defaultPrevented) return
+    }
+  }
+  if (e.key === 'Enter' && !e.shiftKey && !filePickerVisible.value) {
+    e.preventDefault()
+    send()
+  }
+}
 // 消息气泡文字选中 → 悬浮 toolbar（复制/引用）
 const selection = useMessageSelection()
 const messages = ref([])
@@ -78,6 +164,8 @@ const thinkText = ref('')     // 安全分析摘要与进度，不展示模型�
 const reasoningText = ref('') // Provider 明确返回的 reasoning block
 const decisionNotices = ref([])
 const toolEvents = ref([])
+// v7 时间线（交错 reasoning + tool_call，按到达顺序合并/就地更新）
+const timeline = ref([])
 const thinkOpen = ref(true)   // 处理进度面板：生成中展开，正文首字出现后自动折叠
 const streamSrcOpen = ref(false)  // 流式回复的联网来源面板：默认收起
 const streamSid = ref(null)   // 流式回复所属会话：切换会话后不再渲染/插入到其他会话
@@ -279,6 +367,7 @@ async function tryReattach(sid) {
     reasoningText.value = ''
     decisionNotices.value = []
     toolEvents.value = []
+    timeline.value = []
     thinkOpen.value = true
     // 重挂后删掉尾部尚未完成的那轮用户消息渲染冗余风险低：回放事件仅重建流式区
     await sse.send({
@@ -598,10 +687,19 @@ async function send() {
   // 无当前会话（新对话/欢迎页）：新建一条全新会话，不复用旧空会话，
   // 避免消息落进以前的会话记录
   if (!sessStore.currentSid) {
-    const d = await api.post('/chat/session/create', {})
-    sessStore.setCurrent(d.session_id)
-    sessStore.ensurePlaceholder(d.session_id)
+    // M5.1：若来自「+ 新建会话」项目挂载，此时 pendingProjectId 有值
+    const pendingPid = sessStore.pendingProjectId
+    const body = pendingPid ? { project_id: pendingPid } : {}
+    const d = await api.post('/chat/session/create', body)
+    // 占位挂到正确的项目下，避免侧栏先出现在「最近」再跳到工作区
+    sessStore.ensurePlaceholder(d.session_id, pendingPid)
+    if (pendingSandboxMode.value) {
+      try { await projectsApi.setSandboxMode(d.session_id, pendingSandboxMode.value) } catch { /* toast 已弹 */ }
+      pendingSandboxMode.value = null
+    }
+    sessStore.setCurrent(d.session_id)  // 内部会自动清空 pendingProjectId
     sessStore.scheduleTitleRefresh(d.session_id)
+    sessStore.load()  // 后台同步真实数据
     messages.value = []
   }
   // handoff 附件路径：新会话首条消息携带
@@ -655,7 +753,10 @@ async function send() {
   scrollBottom()
 
   await sse.send({
-    sessionId: sessStore.currentSid, message: backendMsg,
+    sessionId: sessStore.currentSid,
+    // M5.1：无 sessionId + pendingProjectId 时，后端会带项目建库
+    projectId: sessStore.currentSid ? undefined : sessStore.pendingProjectId,
+    message: backendMsg,
     images: imgs.length ? imgs : undefined,
     location: geoEnabled.value ? cachedLocation() : undefined,
     handoffPath: hPath,
@@ -693,24 +794,82 @@ function pushStreamText(text) {
   if (!streamRaf) streamRaf = requestAnimationFrame(flushStreamText)
 }
 
+// ---- 工具步旁白按步缓冲（对齐 deepseek-harness）----
+// 正文增量先进 pendingBody 缓冲：若本步是工具步（随后收到 content_reset），
+// 缓冲整体转入思考面板（旁白不进正文）；否则等待 BODY_COMMIT_MS 无 reset 后
+// 确认为最终答案，转入正文流式。这样工具步旁白永远不会出现在正文里。
+let pendingBody = ''
+let bodyCommitTimer = 0
+let bodyCommitted = false
+const BODY_COMMIT_MS = 1000
+function commitPendingToBody() {
+  if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
+  if (pendingBody) { pushStreamText(pendingBody); pendingBody = '' }
+  bodyCommitted = true
+}
+
 function handleEvent(ev, data) {
   if (ev === 'reasoning_delta') {
     reasoningText.value += data.text || ''
+    // v7 timeline：合并到末尾同类段
+    const last = timeline.value[timeline.value.length - 1]
+    if (last && last.kind === 'reasoning') {
+      last.text = (last.text || '') + (data.text || '')
+    } else {
+      timeline.value.push({ kind: 'reasoning', text: data.text || '' })
+    }
     liveThroughput.record(data.text)
     maybeScroll(); scrollThink()
   }
   else if (ev === 'content_delta') {
     liveThroughput.record(data.text)
-    pushStreamText(data.text)
+    if (bodyCommitted) {
+      pushStreamText(data.text)
+    } else {
+      pendingBody += data.text
+      if (!bodyCommitTimer) bodyCommitTimer = setTimeout(commitPendingToBody, BODY_COMMIT_MS)
+    }
+  }
+  else if (ev === 'content_reset') {
+    // 本步确认为工具步：缓冲里的旁白转入思考面板，绝不进正文
+    if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
+    if (pendingBody) {
+      timeline.value.push({ kind: 'narration', text: pendingBody })
+      pendingBody = ''
+    }
+    bodyCommitted = false
+    thinkOpen.value = true
+    maybeScroll(); scrollThink()
   }
   // turn_started / step_started 仍作为事件对下游可见（回放、可观测性），
   // 但不再作为文案追加到思考面板：对读者零信息量，与后端持久化对齐。
   else if (ev === 'tool_executing') {
     toolEvents.value.push({ type: ev, ...data })
+    // v7 timeline：push 一张 running 卡片
+    timeline.value.push({
+      kind: 'tool_call',
+      call_id: data.call_id || '',
+      name: data.tool_name || '',
+      arguments: data.arguments || '',
+      status: 'running',
+    })
     maybeScroll(); scrollThink()
   }
   else if (ev === 'tool_result') {
     toolEvents.value.push({ type: ev, ...data })
+    // v7 timeline：找到对应 running 项就地更新（call_id + name 匹配）
+    for (let i = timeline.value.length - 1; i >= 0; i--) {
+      const it = timeline.value[i]
+      if (it.kind === 'tool_call'
+          && (it.call_id === data.call_id || !data.call_id)
+          && it.name === (data.tool_name || '')
+          && it.status === 'running') {
+        it.status = data.ok ? 'ok' : 'fail'
+        if (data.summary) it.result_preview = data.summary.slice(0, 400)
+        if (data.error) it.error = String(data.error).slice(0, 400)
+        break
+      }
+    }
     maybeScroll(); scrollThink()
   }
   else if (ev === 'decision_notice') {
@@ -767,7 +926,8 @@ function handleThreshold(threshold) {
 let lastCitations = []
 let streamAnalysisMetadata = null
 function finishStream(msgId) {
-  // 先合并节流缓冲中尚未渲染的正文，避免中断/结束时丢失尾段
+  // 先提交按步缓冲里尚未确认的正文（最终答案尾段），再合并节流缓冲，避免丢失
+  commitPendingToBody()
   flushStreamText()
   // 跨会话保护：用户已切到其他会话时不把回复插进当前列表
   //（回复已按 session 落库，切回原会话时 openSession 会重新加载）
@@ -775,7 +935,7 @@ function finishStream(msgId) {
   const sameSession = finishedSid === sessStore.currentSid
   // 中断终止（停止/出错/断连，无 msgId）时已输出的内容必须保留：
   // 哪怕只输出了处理进度也要留下，否则流式区一清空内容就全部丢失
-  if ((streamText.value || thinkText.value || reasoningText.value || decisionNotices.value.length || toolEvents.value.length) && sameSession) {
+  if ((streamText.value || thinkText.value || reasoningText.value || decisionNotices.value.length || toolEvents.value.length || timeline.value.length) && sameSession) {
     const body = stripTail(streamText.value, streamVisuals.value)
     const m = {
       id: msgId, role: 'assistant',
@@ -787,6 +947,7 @@ function finishStream(msgId) {
         schema_version: 'agent-analysis-v1', reasoning_text: reasoningText.value,
         system_progress: thinkText.value, decision_notices: decisionNotices.value,
         tool_events: toolEvents.value, reasoning_available: !!reasoningText.value,
+        timeline: [...timeline.value],   // v7 交错时间线
       },
       visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined
     }
@@ -797,8 +958,12 @@ function finishStream(msgId) {
   reasoningText.value = ''
   decisionNotices.value = []
   toolEvents.value = []
+  timeline.value = []
   streamVisuals.value = []
   thinkOpen.value = true
+  pendingBody = ''
+  if (bodyCommitTimer) { clearTimeout(bodyCommitTimer); bodyCommitTimer = 0 }
+  bodyCommitted = false
   lastCitations = []
   streamAnalysisMetadata = null
   degraded.value = false
@@ -918,6 +1083,7 @@ async function submitEdit(msg) {
   reasoningText.value = ''
   decisionNotices.value = []
   toolEvents.value = []
+  timeline.value = []
   thinkOpen.value = true
   maybeScroll()
   await sse.send({
@@ -989,6 +1155,7 @@ async function regenerate(msg) {
   reasoningText.value = ''
   decisionNotices.value = []
   toolEvents.value = []
+  timeline.value = []
   thinkOpen.value = true
   maybeScroll()
   await sse.send({
@@ -1230,11 +1397,14 @@ function resetToHome() {
   reasoningText.value = ''
   decisionNotices.value = []
   toolEvents.value = []
+  timeline.value = []
   streamVisuals.value = []
   input.value = ''
   clearAttachments()
   generating.value = false
+  pendingSandboxMode.value = null
   sessStore.load()
+  nextTick(() => ta.value?.focus())
 }
 
 // 侧栏点击历史会话 → 加载消息
@@ -1464,16 +1634,21 @@ onUnmounted(() => {
                   </div>
                   <div v-show="m.thinkOpen" class="think-body">{{ m.thinking }}</div>
                 </div>
-                <div v-if="m.analysis_metadata?.schema_version === 'agent-analysis-v1' && (m.analysis_metadata.reasoning_text || m.analysis_metadata.system_progress || m.analysis_metadata.decision_notices?.length || m.analysis_metadata.tool_events?.length)" class="think-panel">
+                <div v-if="m.analysis_metadata?.schema_version === 'agent-analysis-v1' && (m.analysis_metadata.timeline?.length || m.analysis_metadata.reasoning_text || m.analysis_metadata.system_progress || m.analysis_metadata.decision_notices?.length || m.analysis_metadata.tool_events?.length)" class="think-panel">
                   <div class="think-head" @click="m.thinkOpen = !m.thinkOpen">
                     <i class="ti ti-bulb"></i><span>处理进度</span>
                     <i class="ti" :class="m.thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                   </div>
-                  <div v-show="m.thinkOpen" class="think-body structured-think">
-                    <div v-if="m.analysis_metadata.reasoning_text" class="think-lane"><strong>模型 reasoning</strong><span>{{ m.analysis_metadata.reasoning_text }}</span></div>
-                    <div v-if="m.analysis_metadata.system_progress" class="think-lane"><strong>系统进度</strong><span>{{ m.analysis_metadata.system_progress }}</span></div>
-                    <div v-if="m.analysis_metadata.decision_notices?.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in m.analysis_metadata.decision_notices" :key="ni">{{ n.summary }}</span></div>
-                    <div v-if="m.analysis_metadata.tool_events?.length" class="think-lane"><strong>工具执行</strong><span v-for="(t, ti) in m.analysis_metadata.tool_events" :key="ti">{{ t.tool_name }}：{{ t.type === 'tool_result' ? (t.ok ? '已完成' : '未完成') : '执行中' }}</span></div>
+                  <div v-show="m.thinkOpen" class="think-body">
+                    <!-- v7 优先按时间线渲染，历史消息无 timeline 时降级 -->
+                    <ThinkingTimeline v-if="m.analysis_metadata.timeline?.length"
+                                      :items="m.analysis_metadata.timeline" />
+                    <template v-else>
+                      <div v-if="m.analysis_metadata.reasoning_text" class="think-lane"><strong>模型 reasoning</strong><span>{{ m.analysis_metadata.reasoning_text }}</span></div>
+                      <div v-if="m.analysis_metadata.system_progress" class="think-lane"><strong>系统进度</strong><span>{{ m.analysis_metadata.system_progress }}</span></div>
+                      <div v-if="m.analysis_metadata.decision_notices?.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in m.analysis_metadata.decision_notices" :key="ni">{{ n.summary }}</span></div>
+                      <div v-if="m.analysis_metadata.tool_events?.length" class="think-lane"><strong>工具执行</strong><span v-for="(t, ti) in m.analysis_metadata.tool_events" :key="ti">{{ t.tool_name }}：{{ t.type === 'tool_result' ? (t.ok ? '已完成' : '未完成') : '执行中' }}</span></div>
+                    </template>
                   </div>
                 </div>
                 <DiagramRenderer v-for="(v, vi) in (m.visuals || [])" :key="'hv' + vi" :type="v.type" :data="v.data" />
@@ -1527,18 +1702,22 @@ onUnmounted(() => {
           <div v-if="(generating || streamText) && streamSid === sessStore.currentSid" class="msg-ai">
             <div class="avatar"><i class="ti ti-brain"></i></div>
             <div class="body">
-              <div v-if="thinkText || reasoningText || decisionNotices.length || toolEvents.length" class="think-panel">
+              <div v-if="thinkText || reasoningText || decisionNotices.length || toolEvents.length || timeline.length" class="think-panel">
                 <div class="think-head" @click="thinkOpen = !thinkOpen">
                   <i class="ti ti-bulb"></i><span>处理进度</span>
                   <span v-if="!streamText" class="think-live"><span
                       class="think-dots"><span></span><span></span><span></span></span></span>
                   <i class="ti" :class="thinkOpen ? 'ti-chevron-up' : 'ti-chevron-down'"></i>
                 </div>
-                <div v-show="thinkOpen" ref="liveThink" class="think-body structured-think">
-                  <div v-if="reasoningText" class="think-lane"><strong>模型 reasoning</strong><span>{{ reasoningText }}</span></div>
-                  <div v-if="thinkText" class="think-lane"><strong>系统进度</strong><span>{{ thinkText }}</span></div>
-                  <div v-if="decisionNotices.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in decisionNotices" :key="ni">{{ n.summary }}</span></div>
-                  <div v-if="toolEvents.length" class="think-lane"><strong>工具执行</strong><span v-for="(t, ti) in toolEvents" :key="ti">{{ t.tool_name }}：{{ t.type === 'tool_result' ? (t.ok ? '已完成' : '未完成') : '执行中' }}</span></div>
+                <div v-show="thinkOpen" ref="liveThink" class="think-body">
+                  <!-- v7 时间线视图：交错渲染 reasoning + tool_call；吸底跟随最新 -->
+                  <ThinkingTimeline v-if="timeline.length" :items="timeline" :live="true" />
+                  <!-- 不含 timeline 的降级：老的分区结构 -->
+                  <template v-else>
+                    <div v-if="reasoningText" class="think-lane"><strong>模型 reasoning</strong><span>{{ reasoningText }}</span></div>
+                    <div v-if="thinkText" class="think-lane"><strong>系统进度</strong><span>{{ thinkText }}</span></div>
+                    <div v-if="decisionNotices.length" class="think-lane"><strong>决策摘要</strong><span v-for="(n, ni) in decisionNotices" :key="ni">{{ n.summary }}</span></div>
+                  </template>
                 </div>
               </div>
               <!-- 尚无任何输出：处理中占位 -->
@@ -1608,10 +1787,16 @@ onUnmounted(() => {
             </span>
           </div>
           <textarea ref="ta" v-model="input"
-            :placeholder="thresholdBreached === 'hard' ? '已达容量上限，请开启新会话' : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件）'"
-            rows="1" @input="autoGrow" @keydown.enter.exact.prevent="send" @paste="onPaste"
+            :placeholder="thresholdBreached === 'hard' ? '已达容量上限，请开启新会话' : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件；项目会话内输入 @ 可插入文件）'"
+            rows="1" @input="onComposerInput" @keydown="onComposerKeyDown" @paste="onPaste"
             @dragenter.prevent="dragOver = true" @dragover.prevent="dragOver = true" @drop.prevent.stop="onDrop"
             :disabled="thresholdBreached === 'hard'"></textarea>
+          <FilePickerPanel v-if="currentProject" ref="filePickerRef"
+                           :project-id="currentProject.id"
+                           :visible="filePickerVisible"
+                           :query="filePickerQuery"
+                           @pick="onFilePicked"
+                           @close="filePickerVisible = false" />
           <!-- 表情选择面板（absolute 定位在 composer 上方，选择后保持打开可连续插入） -->
           <div v-if="emojiOpen" class="emoji-panel" @click.stop>
             <div v-for="g in EMOJI_GROUPS" :key="g.name" class="emoji-group">
@@ -1622,7 +1807,7 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
-          <div class="row" style="margin-top:10px">
+          <div class="row" style="margin-top:24px">
             <div class="fg" style="gap:8px">
               <i class="ti ti-paperclip" style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="上传文件"
                 @click="triggerFile"></i>
@@ -1630,6 +1815,10 @@ onUnmounted(() => {
               <i class="ti ti-mood-smile emoji-toggle"
                 style="cursor:pointer;color:var(--muted);font-size:var(--icon-sm)" title="表情" @mousedown.prevent
                 @click.stop="emojiOpen = !emojiOpen"></i>
+              <SandboxModeChip :session-id="sessStore.currentSid"
+                               :has-project="!!currentProject"
+                               :fallback-mode="sandboxFallback"
+                               @pending-change="m => pendingSandboxMode = m" />
             </div>
             <div class="composer-actions">
               <input ref="fileInput" type="file" multiple style="display:none" @change="onFilePick" />
@@ -1820,3 +2009,30 @@ onUnmounted(() => {
     </div>
   </transition>
 </template>
+
+<style scoped>
+.chat-project-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px;
+  background: var(--bg-input, rgba(127,127,127,0.08));
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  font-size: 12px; color: var(--muted);
+  align-self: flex-start;
+  max-width: fit-content;
+}
+.chat-project-chip {
+  padding: 4px 10px;
+  background: var(--bg-input, rgba(127,127,127,0.08));
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  font-size: 12px; color: var(--muted);
+}
+.chat-project-chip .ti-folder { color: var(--acctx); }
+.chat-project-chip .chip-title { color: var(--fg); font-weight: 500; }
+.chat-project-chip .chip-badge-miss {
+  padding: 1px 6px; border-radius: 3px;
+  background: var(--warntx-bg, rgba(200,120,0,0.15));
+  color: var(--warntx, #c87800); font-size: 10px;
+}
+</style>

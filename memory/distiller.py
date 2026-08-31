@@ -33,6 +33,28 @@ ATTRIBUTION_CONFIDENCE = {"inferred": "low",
 BM25_MERGE_THRESHOLD = 0.75
 BM25_LINK_THRESHOLD = 0.5
 
+# M2 §5.2：跨项目通用的 domain 归属为「全局」（project_id=NULL），其余跟随会话项目
+GLOBAL_DOMAINS = {
+    "preference", "profile", "style", "output_format",
+    "interaction_habit", "general_knowledge",
+}
+
+
+def resolve_memory_project_id(item: dict, session_project_id: str | None) -> str | None:
+    """判定单条记忆的归属：显式 scope 覆盖 > domain 白名单 > 跟随会话。
+
+    返回 None 表示全局；返回 proj_xxx 表示归属该项目。
+    """
+    scope = (item.get("scope") or "").strip().lower()
+    if scope == "global":
+        return None
+    if scope == "project" and session_project_id:
+        return session_project_id
+    domain = (item.get("domain") or "").strip().lower()
+    if domain in GLOBAL_DOMAINS:
+        return None
+    return session_project_id
+
 
 def normalize_entities(raw: list) -> tuple[list[str], dict[str, str]]:
     """实体归一：兼容 ["名称"] 与 [{"name":..,"type":..}] 两种输出。
@@ -80,10 +102,12 @@ class Distiller:
         # 删除未落库前 palace.get 仍可返回行，靠此集合避免重复处理）。
         self._rededup_deleted: set[str] = set()
 
-    async def distill(self, text: str, source_type: str = "memory") -> list[str]:
+    async def distill(self, text: str, source_type: str = "memory",
+                      *, project_id: str | None = None) -> list[str]:
         """提炼一段文本，返回新建/更新的 memory_id 列表。
 
-        P4-D：单次 items cap（默认 8），避免 LLM 一句话吐 20 条候选淹没候选池。
+        project_id：当前会话所在项目（M2）；None = 无项目/IM 会话，写入的
+        非全局 domain 记忆保持 project_id=NULL（等于全局，向后兼容）。
         """
         result = await self.extract_fn(text, source_type)
         items = result.get("items", []) if isinstance(result, dict) else []
@@ -95,10 +119,11 @@ class Distiller:
             items = items[:cap]
         written: list[str] = []
         for item in items:
-            # 文档/知识导入统一按外部知识入库，避免被误判为
-            # session_fact/skill 而丢弃（参见 project_tech_stack 记忆）
+            # 文档/知识导入统一按外部知识入库
             if source_type == "knowledge":
                 item["attribution"] = "imported"
+            # M2：确定该条记忆的项目归属并塞回 item，供 _write_memory / _create 使用
+            item["_project_id"] = resolve_memory_project_id(item, project_id)
             # 非显式对话提炼只生成候选，不允许绕过候选池直接进入 L3。
             if source_type == "memory" and item.get("attribution", "verified") \
                     in {"verified", "inferred"}:
@@ -382,6 +407,8 @@ class Distiller:
             "expires_at": item.get("expires_at"),
             "sensitivity_level": item.get("sensitivity_level", "none"),
             "evidence_refs": item.get("evidence_refs", []),
+            # M2 §5.2：项目归属由 distill() 层判定后塞入 item._project_id
+            "project_id": item.get("_project_id"),
         }
         await self.fw.submit("memory", {
             "op": "create", "frontmatter": fm,

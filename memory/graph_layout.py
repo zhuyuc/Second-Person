@@ -101,8 +101,9 @@ def place_missing(db) -> int:
                 y = cy + ring_r * math.sin(a)
             rows.append((eid, round(x, 2), round(y, 2), now))
         conn.executemany(
-            "INSERT OR REPLACE INTO graph_layout(entity_id,x,y,updated_at) "
-            "VALUES(?,?,?,?)", rows)
+            "INSERT OR REPLACE INTO graph_layout(entity_id,x,y,updated_at,project_id) "
+            "VALUES(?,?,?,?,(SELECT project_id FROM memory_entities WHERE entity_id=?))",
+            [(r[0], r[1], r[2], r[3], r[0]) for r in rows])
     logger.info("图谱增量布点：%d 个新实体", len(rows))
     return len(rows)
 
@@ -227,8 +228,12 @@ def compute_layout(db) -> int:
         conn.execute("DELETE FROM graph_layout")
         for i in range(0, len(rows), WRITE_CHUNK):
             conn.executemany(
-                "INSERT INTO graph_layout(entity_id,x,y,updated_at) VALUES(?,?,?,?)",
-                rows[i:i + WRITE_CHUNK])
+                "INSERT INTO graph_layout(entity_id,x,y,updated_at) "
+                "VALUES(?,?,?,?)", rows[i:i + WRITE_CHUNK])
+        # M2：从 memory_entities 同步 project_id，供按项目过滤图谱视图
+        conn.execute(
+            "UPDATE graph_layout SET project_id="
+            "(SELECT project_id FROM memory_entities e WHERE e.entity_id=graph_layout.entity_id)")
     logger.info("知识图谱全量精排完成：%d 节点，耗时 %.2fs",
                 n, time.perf_counter() - t0)
     return n

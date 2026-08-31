@@ -157,7 +157,14 @@ async def chat_send(request: Request):
         return EventSourceResponse(_follow(_BUFFERS[crid]), ping=5)
 
     if not sid:
-        sid = c.sessions.create_session()
+        # M5.1：project_id 从请求带入，实现「新建项目会话」延迟创建
+        # （避免用户点了「+ 新建会话」但没输入内容就切走，留一堆空会话）
+        pid = payload.project_id
+        if pid:
+            proj = c.projects.get(pid)
+            if not proj or proj.status != "active":
+                pid = None      # 静默降级，不阻塞对话
+        sid = c.sessions.create_session(project_id=pid)
         c.notifications.flush_pending()
 
     buf = {"events": [], "dropped": 0, "done": False, "started": time.time(),
@@ -566,9 +573,38 @@ async def rename(body: SessionRenameRequest):
     return {"code": 200, "data": {}}
 
 
+class SessionCreateRequest(BaseModel):
+    project_id: str | None = None
+
+
 @router.post("/chat/session/create")
-async def create():
-    return {"code": 200, "data": {"session_id": _c().sessions.create_session()}}
+async def create(body: SessionCreateRequest | None = None):
+    c = _c()
+    project_id = body.project_id if body else None
+    if project_id:
+        proj = c.projects.get(project_id)
+        if not proj:
+            raise HTTPException(404, f"项目不存在：{project_id}")
+        if proj.status != "active":
+            raise HTTPException(409, f"项目已归档：{project_id}")
+    return {"code": 200, "data": {
+        "session_id": c.sessions.create_session(project_id=project_id)}}
+
+
+class SessionArchiveRequest(BaseModel):
+    session_id: str
+
+
+@router.post("/chat/session/archive")
+async def archive_session(body: SessionArchiveRequest):
+    _c().sessions.archive_session(body.session_id, source="manual")
+    return {"code": 200, "data": {}}
+
+
+@router.post("/chat/session/unarchive")
+async def unarchive_session(body: SessionArchiveRequest):
+    _c().sessions.unarchive_session(body.session_id)
+    return {"code": 200, "data": {}}
 
 
 @router.post("/chat/session/handoff")

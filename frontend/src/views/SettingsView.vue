@@ -14,7 +14,39 @@ const toast = useToast()
 const confirm = useConfirm()
 const { busy, run } = useBusy()
 const tab = ref(0)
-const tabs = ['模型配置', '连接器', '接入渠道', '参数', '用量统计', '备份', '状态']
+const tabs = ['模型配置', '连接器', '接入渠道', '参数', '用量统计', '备份', '状态', '已归档项目']
+import { projectsApi } from '@/api/projects'
+const archivedProjects = ref([])
+const archivedLoading = ref(false)
+async function loadArchivedProjects() {
+  archivedLoading.value = true
+  try { archivedProjects.value = await projectsApi.list('archived') }
+  finally { archivedLoading.value = false }
+}
+async function unarchiveProject(p) {
+  try {
+    const r = await projectsApi.unarchive(p.id)
+    toast.push('success', `已恢复项目「${p.title}」，同步恢复 ${r.restored_sessions} 个会话`)
+    await loadArchivedProjects()
+    window.dispatchEvent(new CustomEvent('sp-projects-changed'))
+  } catch { /* toast 已弹 */ }
+}
+const purgeCheckbox = ref(false)
+const purgeTarget = ref(null)
+function openPurge(p) { purgeTarget.value = p; purgeCheckbox.value = false }
+async function confirmPurge() {
+  if (!purgeCheckbox.value || !purgeTarget.value) return
+  const p = purgeTarget.value
+  purgeTarget.value = null
+  try {
+    const r = await projectsApi.purge(p.id)
+    toast.push('success', `项目「${p.title}」已永久删除：` +
+      `${r.deleted_sessions} 会话/${r.deleted_messages} 消息/` +
+      `${r.deleted_memories} 记忆/${r.deleted_docs} 文档`)
+    await loadArchivedProjects()
+    window.dispatchEvent(new CustomEvent('sp-projects-changed'))
+  } catch { /* toast 已弹 */ }
+}
 
 const providers = ref([])
 const assignment = ref({})
@@ -531,6 +563,7 @@ function overallStyle(s) {
 
 function selectTab(i) {
   tab.value = i
+  if (i === 7) loadArchivedProjects()
   const loaders = [loadProviders, loadConnectors, loadPlatforms, loadParams, loadUsage, loadBackups, loadStatus]
   loaders[i]()
 }
@@ -886,6 +919,63 @@ onActivated(() => selectTab(tab.value))
       </div>
     </div>
   </div>
+
+  <!-- 已归档项目 -->
+  <div v-else-if="tab === 7">
+    <div class="section-title">已归档项目</div>
+    <div v-if="archivedLoading" class="muted" style="padding:20px">加载中…</div>
+    <div v-else-if="!archivedProjects.length" class="empty">
+      <i class="ti ti-archive"></i>没有已归档项目<br>
+      在侧栏项目菜单选择「归档项目」可将项目移到此处
+    </div>
+    <div v-for="p in archivedProjects" :key="p.id" class="cw" style="margin-bottom:12px;padding:14px">
+      <div class="row" style="align-items:flex-start">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px">
+            <i class="ti ti-folder" style="color:var(--muted)"></i>
+            <b>{{ p.title }}</b>
+            <span v-if="p.path_missing" class="badge badge-r">目录已丢失</span>
+          </div>
+          <div class="muted" style="font-size:12px;margin-top:4px">路径：{{ p.path }}</div>
+          <div class="muted" style="font-size:12px">归档于：{{ p.archived_at || '—' }}</div>
+        </div>
+        <div class="fg" style="gap:8px;flex-shrink:0">
+          <button class="btn-xs" @click="unarchiveProject(p)">
+            <i class="ti ti-restore"></i> 恢复到工作区
+          </button>
+          <button class="btn-xs btn-danger" @click="openPurge(p)">
+            <i class="ti ti-trash"></i> 永久删除…
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 永久删除二次确认 -->
+  <BaseModal v-if="purgeTarget" title="永久删除项目" size="md" @close="purgeTarget = null">
+    <div style="line-height:1.7">
+      <div style="margin-bottom:12px"><b>{{ purgeTarget.title }}</b></div>
+      <p>将永久删除以下数据，<b style="color:var(--dangtx)">不可恢复</b>：</p>
+      <ul style="margin:8px 0;padding-left:24px;color:var(--muted)">
+        <li>该项目所有会话及其对话历史</li>
+        <li>该项目所有记忆及其向量、图谱、关联索引</li>
+        <li>该项目所有知识库文档与本地目录扫描配置</li>
+      </ul>
+      <div class="muted" style="margin-top:8px;padding:8px;background:var(--bg-input,rgba(127,127,127,0.08));border-radius:4px;font-size:12px">
+        ⚠ 本地项目目录（<code>{{ purgeTarget.path }}</code>）本身不会被删除。
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin-top:16px">
+        <input type="checkbox" v-model="purgeCheckbox" />
+        <span>我已理解，确认永久删除该项目及所有相关数据</span>
+      </label>
+    </div>
+    <template #footer>
+      <button type="button" @click="purgeTarget = null">取消</button>
+      <button type="button" class="dang" :disabled="!purgeCheckbox" @click="confirmPurge">
+        永久删除
+      </button>
+    </template>
+  </BaseModal>
 
   <!-- 添加 Provider 弹窗 -->
   <BaseModal v-if="showAddProvider" title="添加 LLM Provider" @close="showAddProvider = false">

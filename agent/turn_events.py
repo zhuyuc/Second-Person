@@ -119,10 +119,24 @@ class TurnEventStore:
             if event["type"] == "user.message":
                 messages.append({"role": "user", "content": payload.get("content", "")})
             elif event["type"] == "assistant.message":
-                messages.append({"role": "assistant", "content": payload.get("content", "")})
+                msg = {"role": "assistant", "content": payload.get("content", "")}
+                rc = payload.get("reasoning_content") or ""
+                if rc:
+                    msg["reasoning_content"] = rc
+                messages.append(msg)
             elif event["type"] == "assistant.tool_calls":
-                messages.append({"role": "assistant", "content": payload.get("content", ""),
-                                 "tool_calls": payload.get("tool_calls", [])})
+                # 对齐 deepseek-harness 的 CoT 回传：工具轮正文置空，把本步推理与
+                # 旁白（模型调工具前发出的 content）一并并入 reasoning_content 回传，
+                # 让模型在多步里持续把旁白留在推理通道，而不是漏进正文。
+                narration = payload.get("content", "") or ""
+                rc = payload.get("reasoning_content") or ""
+                if narration:
+                    rc = f"{rc}\n{narration}" if rc else narration
+                msg = {"role": "assistant", "content": "",
+                       "tool_calls": payload.get("tool_calls", [])}
+                if rc:
+                    msg["reasoning_content"] = rc
+                messages.append(msg)
             elif event["type"] == "tool.result":
                 messages.append({"role": "tool", "tool_call_id": event["call_id"],
                                  "content": payload.get("model_content", "")})

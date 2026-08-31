@@ -7,7 +7,7 @@ import { normalizeReasoningEffort } from '@/utils/chatContract'
 export function useSSE() {
     let controller = null
 
-    async function send({ sessionId, message, images, clientRequestId, regenerateMessageId, editMessageId, location, onEvent, onError, handoffPath, reasoningEffort = 'high' }) {
+    async function send({ sessionId, projectId, message, images, clientRequestId, regenerateMessageId, editMessageId, location, onEvent, onError, handoffPath, reasoningEffort = 'high' }) {
         const crid = clientRequestId || genId()
         sessionStorage.setItem('sp_active_crid', crid)
         // 首次发送携带 message；断线重连时同 crid 重推（服务端缓冲区断点续推）
@@ -23,6 +23,7 @@ export function useSSE() {
             try {
                 const resp = await postJsonStream('/chat/send', {
                     session_id: sessionId,
+                    project_id: projectId || undefined,
                     message,
                     images,
                     client_request_id: crid,

@@ -44,6 +44,7 @@ from scheduler.backup import BackupManager
 from scheduler.folder_scan import FolderScanner
 from scheduler.ingest import IngestManager
 from scheduler.scheduler import TaskScheduler
+from agent.projects import ProjectStore
 from agent.session_context import SessionStore
 from agent.response_signals import SignalCollector
 from soul.skill_manager import SkillManager
@@ -56,6 +57,10 @@ from soul.profile_conflict_scanner import ProfileConflictScanner
 from soul.profile_review_scanner import ProfileReviewScanner
 from tools.base import ToolRegistry
 from tools.builtin import register_builtins
+from tools.fs import register_fs_tools
+from tools.fs.observation import FsObservationStore
+from tools.fs.policy import PolicyStore
+from tools.fs.workspace import WorkspaceResolver
 from tools.sandbox import Sandbox
 from infrastructure.timeutil import now_cst
 
@@ -132,6 +137,7 @@ class AppContainer:
         self.index_builder = IndexBuilder(self.db, self.palace, d)
         self.ctx_entry = ContextEntryManager(d)
         self.sessions = SessionStore(self.db, d)
+        self.projects = ProjectStore(self.db, d)
         self.notifications = NotificationManager(self.db, self.sessions)
 
         def notifier(ntype: str, msg: str) -> None:
@@ -222,11 +228,13 @@ class AppContainer:
         async def llm_refine(query: str, candidates: list[dict],
                              session_id: str | None = None,
                              context_text: str | None = None) -> list[str]:
-            snap = self.providers.snapshot_for("agent")
+            # v7 精筛提速：优先用精筛专属槽位（一般配 haiku/lite 等小模型），
+            # 未配置时按 TaskSlot.fallback 链自动回退到 agent → chat
+            snap = self.providers.snapshot_for("retriever_refine")
             if snap is None:
                 # 精筛不可用：抛出令 Retriever 走其基于得分的降级挑选（过滤弱尾），
                 # 而非盲目返回 top-3 引入噪声
-                raise RuntimeError("agent 槽位未配置，第 2 层精筛不可用")
+                raise RuntimeError("retriever_refine / agent 槽位均未配置，第 2 层精筛不可用")
             listing = "\n".join(f"{c['id']}: {c['title']} - {c['summary']}"
                                 for c in candidates)
             ctx_part = f"最近对话：\n{context_text}\n\n" if context_text else ""
@@ -453,10 +461,38 @@ class AppContainer:
                           file_writer=self.fw, sandbox=self.sandbox, data_dir=d,
                           config=self.config, llm=self.llm, providers=self.providers,
                           memory_gate=self.memory_gate)
+        # ---- M3：fs 工具族 + 沙箱四档 -------------------------------------
+        self.fs_observations = FsObservationStore(self.db)
+        self.policy_store = PolicyStore(
+            self.db, self.projects, self.config,
+            legacy_workspace=self.sandbox.workspace,
+            legacy_whitelist=self.sandbox.whitelist)
+        self.workspace_resolver = WorkspaceResolver(self.policy_store)
+        register_fs_tools(self.registry,
+                          observation_store=self.fs_observations,
+                          config=self.config)
         self.connectors = ConnectorManager(self.db, self.creds, self.registry)
 
+        # ---- v7：token 度量 + 自动压缩 --------------------------------------
+        from agent.token_meter import TokenMeter
+        from agent.compaction_engine import CompactionEngine
+        from memory import _constants as _mem_const
+        self.token_meter = TokenMeter()
+        self.compaction_engine = CompactionEngine(
+            db=self.db, sessions=self.sessions, llm=self.llm,
+            providers=self.providers, meter=self.token_meter,
+            threshold_ratio=self.config.get(
+                "compaction_threshold_ratio", _mem_const.COMPACTION_THRESHOLD_RATIO),
+            retain_ratio=self.config.get(
+                "compaction_retain_ratio", _mem_const.COMPACTION_RETAIN_RATIO),
+            max_retries=self.config.get(
+                "compaction_max_retries", _mem_const.COMPACTION_MAX_RETRIES),
+        )
+
         # ---- Agent Core ----
-        self.tool_executor = ToolExecutor(self.registry, self.config, notifier)
+        self.tool_executor = ToolExecutor(
+            self.registry, self.config, notifier,
+            workspace_resolver=self.workspace_resolver)
         self.signals = SignalCollector(self.db)
         self.core = AgentCore(
             db=self.db, config=self.config, session_store=self.sessions,
@@ -469,7 +505,11 @@ class AppContainer:
             notifier=notifier, mood_manager=self.mood,
             mood_trigger=self.mood_trigger,
             mood_action_dispatcher=self.mood_action_dispatcher,
-            memory_gate=self.memory_gate)
+            memory_gate=self.memory_gate,
+            projects=self.projects,
+            workspace_resolver=self.workspace_resolver,
+            token_meter=self.token_meter,
+            compaction_engine=self.compaction_engine)
 
         # ---- 系统 Agent ----
         self.reviewer = ReviewAgent(self.db, self.distiller, self.config, d,
@@ -614,6 +654,11 @@ class AppContainer:
                         lambda: asyncio.run(
                             self.mood_pattern_extractor.extract()),
                         "每周一 04:00")
+        # 项目目录丢失检测（每小时轻量扫描；命中推 project_dir_missing 通知）
+        s.register_task("project_dir_missing_scan", "项目目录丢失检测",
+                        lambda: self.projects.scan_missing_dirs(
+                            notifier=self.notifier),
+                        "每 1 小时")
         # 画像审核队列维护：每日 04:30 清理 + 通知
         s.register_task("profile_review_scan", "画像审核队列维护",
                         lambda: self.profile_review_scanner.daily_scan(),

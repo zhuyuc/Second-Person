@@ -478,6 +478,10 @@ class LLMClient:
                         elif kind == "annotations":
                             yield "annotations", chunk
                         elif kind == "tool_call":
+                            if not tool_calls_acc:
+                                # 首个 tool_call 增量 → 立即告知调用方"本步是工具步"，
+                                # 不必等整步结束，便于尽早撤回旁白/定性。
+                                yield "tool_start", True
                             _merge_tool_call_delta(tool_calls_acc, chunk)
                     if not content_parts and not tool_calls_acc:
                         # 空返回护栏：走退避重试；不带 response 属性，

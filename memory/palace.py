@@ -49,14 +49,14 @@ class Palace:
                  created_at,updated_at,verification_state,freshness_state,
                  usefulness_score,valid_from,review_after,superseded_by,
                  retrieval_negative_count,write_channel,write_score,evidence_count,
-                 last_verified_at,expires_at,sensitivity_level)
+                 last_verified_at,expires_at,sensitivity_level,project_id)
                VALUES(:id,:title,:summary,:domain,:confidence,:lifecycle,:source_type,
                  :access_count,:last_accessed,:is_important,:implicit_use_count,
                  :md_missing,:user_marked_stale,:dedup_pending,:created_by,:md_path,
                  :created_at,:updated_at,:verification_state,:freshness_state,
                  :usefulness_score,:valid_from,:review_after,:superseded_by,
                  :retrieval_negative_count,:write_channel,:write_score,:evidence_count,
-                 :last_verified_at,:expires_at,:sensitivity_level)
+                 :last_verified_at,:expires_at,:sensitivity_level,:project_id)
                ON CONFLICT(id) DO UPDATE SET
                  title=excluded.title, summary=excluded.summary, domain=excluded.domain,
                  confidence=excluded.confidence, lifecycle=excluded.lifecycle,
@@ -76,9 +76,11 @@ class Palace:
                  evidence_count=excluded.evidence_count,
                  last_verified_at=excluded.last_verified_at,
                  expires_at=excluded.expires_at,
-                 sensitivity_level=excluded.sensitivity_level""",
+                 sensitivity_level=excluded.sensitivity_level,
+                 project_id=excluded.project_id""",
             {
                 "id": fm["id"], "title": fm.get("title", "") or "untitled", "summary": summary,
+                "project_id": fm.get("project_id"),  # M2 项目归属；None = 全局
                 "domain": fm.get("domain", "general"),
                 "confidence": fm.get("confidence", "medium"),
                 "lifecycle": fm.get("lifecycle", "active"),
@@ -111,16 +113,19 @@ class Palace:
         )
 
     def sync_fts(self, conn: sqlite3.Connection, memory_id: str, title: str,
-                 summary: str, detail: str, domain: str) -> None:
+                 summary: str, detail: str, domain: str,
+                 project_id: str | None = None) -> None:
         conn.execute(
             "DELETE FROM memories_fts WHERE memory_id=?", (memory_id,))
         conn.execute(
-            "INSERT INTO memories_fts(memory_id,title,summary,detail,domain) "
-            "VALUES(?,?,?,?,?)", (memory_id, title, summary, detail, domain))
+            "INSERT INTO memories_fts(memory_id,project_id,title,summary,detail,domain) "
+            "VALUES(?,?,?,?,?,?)",
+            (memory_id, project_id, title, summary, detail, domain))
 
     # ---- 交叉引用 ---------------------------------------------------------
     def replace_links(self, conn: sqlite3.Connection, source_id: str,
-                      links: list[dict[str, str]]) -> None:
+                      links: list[dict[str, str]],
+                      project_id: str | None = None) -> None:
         conn.execute(
             "DELETE FROM memory_links WHERE source_id=?", (source_id,))
         for lk in links or []:
@@ -130,14 +135,14 @@ class Palace:
             target, ltype = lk.get("target"), lk.get("type", "related")
             if target:
                 conn.execute(
-                    "INSERT OR IGNORE INTO memory_links(source_id,target_id,link_type) "
-                    "VALUES(?,?,?)", (source_id, target, ltype))
+                    "INSERT OR IGNORE INTO memory_links(source_id,target_id,link_type,project_id) "
+                    "VALUES(?,?,?,?)", (source_id, target, ltype, project_id))
 
     def add_link(self, conn: sqlite3.Connection, source: str, target: str,
-                 link_type: str) -> None:
+                 link_type: str, project_id: str | None = None) -> None:
         conn.execute(
-            "INSERT OR REPLACE INTO memory_links(source_id,target_id,link_type) "
-            "VALUES(?,?,?)", (source, target, link_type))
+            "INSERT OR REPLACE INTO memory_links(source_id,target_id,link_type,project_id) "
+            "VALUES(?,?,?,?)", (source, target, link_type, project_id))
 
     def backlinks(self, memory_id: str) -> list[sqlite3.Row]:
         """反向边：所有指向 memory_id 的记忆。"""
@@ -154,7 +159,8 @@ class Palace:
     def sync_entities(self, conn: sqlite3.Connection, memory_id: str,
                       entities: list[str],
                       entity_types: dict[str, str] | None = None,
-                      entity_disambiguators: dict[str, str] | None = None) -> None:
+                      entity_disambiguators: dict[str, str] | None = None,
+                      project_id: str | None = None) -> None:
         """重建该记忆的实体关联，并重算受影响实体的 memory_count/primary_domain。
 
         entity_types 提供时同步写入 AI 分类的 entity_type。
@@ -173,7 +179,8 @@ class Palace:
             if not name or not name.strip():
                 continue
             disamb = entity_disambiguators.get(name, "")
-            eid = make_entity_id(name, disamb)
+            # M2：project_id 参与 entity_id 哈希，同名不同项目自然独立成两条记录
+            eid = make_entity_id(name, disamb, project_id=project_id)
             affected.add(eid)
             etype = entity_types.get(name)
             exists = conn.execute(
@@ -182,17 +189,17 @@ class Palace:
             if not exists:
                 conn.execute(
                     "INSERT INTO memory_entities(entity_id,entity_name,entity_type,"
-                    "first_seen,memory_count,primary_domain,disambiguator) "
-                    "VALUES(?,?,?,?,0,NULL,?)",
-                    (eid, normalize_entity_name(name), etype, _now(), disamb))
+                    "first_seen,memory_count,primary_domain,disambiguator,project_id) "
+                    "VALUES(?,?,?,?,0,NULL,?,?)",
+                    (eid, normalize_entity_name(name), etype, _now(), disamb, project_id))
             elif etype and not exists["entity_type"]:
                 # 已有实体无分类时补写，不覆盖已有分类
                 conn.execute(
                     "UPDATE memory_entities SET entity_type=? WHERE entity_id=?",
                     (etype, eid))
             conn.execute(
-                "INSERT OR IGNORE INTO memory_entity_links(memory_id,entity_id) "
-                "VALUES(?,?)", (memory_id, eid))
+                "INSERT OR IGNORE INTO memory_entity_links(memory_id,entity_id,project_id) "
+                "VALUES(?,?,?)", (memory_id, eid, project_id))
 
         for eid in affected:
             self._recount_entity(conn, eid)

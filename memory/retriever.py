@@ -19,9 +19,11 @@ Retriever —— 图谱检索（重构后：无开关分支，一条直路）。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import re
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -111,10 +113,56 @@ class Retriever:
         self.data_dir = Path(data_dir)
         self.embed_fn = embed_fn
         self.llm_refine_fn = llm_refine_fn
+        # v7 精筛 LRU cache：key=(session_id, query, candidate_ids_hash) → (ids, ts)
+        # 覆盖重生成/异常重试场景，一 turn 内重复调用直接命中省 2-3s LLM 精筛。
+        self._refine_cache: OrderedDict[tuple, tuple[list[str], float]] = OrderedDict()
+
+    def _refine_cache_key(self, session_id: str | None, query: str,
+                          candidate_ids: list[str]) -> tuple:
+        """Stable key across attempts: candidate order can shift so we sort ids."""
+        ids_hash = hashlib.sha1(
+            ",".join(sorted(candidate_ids)).encode("utf-8")).hexdigest()[:16]
+        return (session_id or "", query, ids_hash)
+
+    def _refine_cache_get(self, key: tuple) -> list[str] | None:
+        from . import _constants as _mem_const
+        ttl = int(self.config.get(
+            "retriever_refine_cache_ttl_seconds",
+            _mem_const.RETRIEVER_REFINE_CACHE_TTL_SECONDS))
+        entry = self._refine_cache.get(key)
+        if entry is None:
+            return None
+        ids, ts = entry
+        if time.monotonic() - ts > ttl:
+            # 过期：drop 后视同 miss
+            self._refine_cache.pop(key, None)
+            return None
+        # LRU 移到末尾
+        self._refine_cache.move_to_end(key)
+        return list(ids)
+
+    def _refine_cache_put(self, key: tuple, ids: list[str]) -> None:
+        from . import _constants as _mem_const
+        size = int(self.config.get(
+            "retriever_refine_cache_size",
+            _mem_const.RETRIEVER_REFINE_CACHE_SIZE))
+        self._refine_cache[key] = (list(ids), time.monotonic())
+        self._refine_cache.move_to_end(key)
+        while len(self._refine_cache) > max(1, size):
+            self._refine_cache.popitem(last=False)
+
+    def _archived_project_ids(self) -> set[str]:
+        """归档项目的 id 集合，用于 M2 硬过滤。"""
+        try:
+            return {r["id"] for r in self.db.query_all(
+                "SELECT id FROM projects WHERE status='archived'")}
+        except Exception:  # noqa: BLE001 - 老库无此表时降级
+            return set()
 
     # ---- 第 1 层 Hybrid 预筛 -------------------------------------------------
     async def hybrid_presearch(self, query: str, query_vec=None,
-                               fallback: bool = False) -> _PresearchResult:
+                               fallback: bool = False,
+                               project_id: str | None = None) -> _PresearchResult:
         cfg = self.config
         from . import _constants as _mem_const
         vthr = _mem_const.RECALL_FALLBACK_THRESHOLD if fallback \
@@ -162,7 +210,10 @@ class Retriever:
         # 补齐元数据；只做**硬合规**过滤（archived/missing/disputed），
         # 软状态（inferred/expired/review_due）改为温和降权 + 打标签，交给 LLM 精筛
         rows_map = self.palace.get_many(list(scores.keys()))
-        out, disputed = self._score_candidates(query, scores, rows_map)
+        out, disputed = self._score_candidates(
+            query, scores, rows_map,
+            project_id=project_id,
+            archived_project_ids=self._archived_project_ids())
         out.sort(key=lambda x: -x.final_score)
         return _PresearchResult(candidates=out, disputed=disputed,
                                 vector_hits=n_vec, fts_hits=n_fts,
@@ -170,7 +221,11 @@ class Retriever:
 
     def _score_candidates(self, query: str,
                           scores: dict[str, Candidate],
-                          rows_map: dict) -> tuple[list[Candidate], list[dict]]:
+                          rows_map: dict,
+                          *,
+                          project_id: str | None = None,
+                          archived_project_ids: set | None = None,
+                          ) -> tuple[list[Candidate], list[dict]]:
         """把 RRF 融合得分转成 final_score，含来源/重要/新鲜/负反馈/软状态权重。
 
         软状态（inferred/expired/review_due）改为**降权**而非静默过滤，
@@ -192,10 +247,25 @@ class Retriever:
 
         out: list[Candidate] = []
         disputed: list[dict] = []
+        archived_project_ids = archived_project_ids or set()
         for mid, c in scores.items():
             row = rows_map.get(mid)
             if not row or row["lifecycle"] in ("archived", "missing"):
                 continue
+            # M2 硬过滤：项目会话只见本项目 + 全局；无项目会话只见全局；
+            # 归档项目的记忆一律不可见（冷藏）
+            try:
+                row_proj = row["project_id"]
+            except (IndexError, KeyError):
+                row_proj = None
+            if row_proj and row_proj in archived_project_ids:
+                continue
+            if project_id is None:
+                if row_proj is not None:
+                    continue
+            else:
+                if row_proj is not None and row_proj != project_id:
+                    continue
             c.title, c.summary, c.lifecycle = row["title"], row["summary"], row["lifecycle"]
             c.source_type = row["source_type"] or "memory"
             c.confidence = row["confidence"] or "medium"
@@ -261,7 +331,8 @@ class Retriever:
 
     async def retrieve(self, query: str,
                        session_id: str | None = None,
-                       context_text: str | None = None) -> RetrievalResult:
+                       context_text: str | None = None,
+                       project_id: str | None = None) -> RetrievalResult:
         """检索入口 —— 无开关分支，一条直路。
 
         流程：embed 线索 → hybrid 预筛 → 图扩展（links + entities）→
@@ -298,12 +369,13 @@ class Retriever:
                 result.degraded = "Embedding 不可用，检索降级 FTS5 单路"
                 logger.info(result.degraded)
 
-        # 2) 预筛
-        pre = await self.hybrid_presearch(query, query_vec)
+        # 2) 预筛（M2：project_id 硬过滤：本项目 + 全局；无项目会话仅全局）
+        pre = await self.hybrid_presearch(query, query_vec, project_id=project_id)
         candidates = pre.candidates
         # 未命中且明确回忆 → 调低阈值再跑一次
         if not candidates and has_recall_intent(query):
-            pre = await self.hybrid_presearch(query, query_vec, fallback=True)
+            pre = await self.hybrid_presearch(query, query_vec, fallback=True,
+                                              project_id=project_id)
             candidates = pre.candidates
         # F3：把本轮候选池里被硬砍的争议记忆带回来，供上层提示
         if pre.disputed:
@@ -429,6 +501,16 @@ class Retriever:
                 _mem_const.RETRIEVAL_REFINE_TIMEOUT_SECONDS)
             pool_cap = int(self.config.get(
                 "candidate_pool_hard_cap", _mem_const.CANDIDATE_POOL_HARD_CAP))
+            picked = candidates[:pool_cap]
+            # v7 精筛 cache：同 session + 同 query + 同候选池 → 直接复用
+            cache_key = self._refine_cache_key(
+                session_id, query, [c.memory_id for c in picked])
+            cached = self._refine_cache_get(cache_key)
+            if cached is not None:
+                result.degraded = "第 2 层精筛 cache 命中"
+                logger.debug("refine cache hit sid=%s query=%r", session_id, query[:40])
+                return cached[:int(self.config.get(
+                    "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
             payload = [{"id": c.memory_id, "title": c.title,
                         "summary": c.summary, "source_type": c.source_type,
                         "confidence": c.confidence,
@@ -436,13 +518,16 @@ class Retriever:
                         "freshness_state": c.freshness_state,
                         "relation": c.relation or "primary",
                         "from_seed": c.from_seed}
-                       for c in candidates[:pool_cap]]
+                       for c in picked]
             chosen = await asyncio.wait_for(
                 self.llm_refine_fn(query, payload,
                                    session_id=session_id,
                                    context_text=context_text),
                 timeout=timeout)
-            return list(chosen)[:int(self.config.get(
+            chosen_list = list(chosen)
+            # 落 cache（LRU + TTL）——精度、超时、异常路径都不落，只落成功结果
+            self._refine_cache_put(cache_key, chosen_list)
+            return chosen_list[:int(self.config.get(
                 "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
         except asyncio.TimeoutError:
             result.degraded = "第 2 层精筛超时，按得分兜底"

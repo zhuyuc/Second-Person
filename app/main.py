@@ -79,9 +79,23 @@ def create_app(data_dir: str | Path) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def _validation_err(request: Request, exc: RequestValidationError):
+        # pydantic v2 的 errors() 会把 ctx 里塞进原始 ValueError 对象，
+        # 直接进 JSONResponse 会 500。深度归一化到 JSON-safe 值。
+        def _safe(obj):
+            if isinstance(obj, (str, int, float, bool)) or obj is None:
+                return obj
+            if isinstance(obj, dict):
+                return {str(k): _safe(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple, set)):
+                return [_safe(v) for v in obj]
+            return str(obj)
+        try:
+            raw = exc.errors(include_context=False)
+        except TypeError:
+            raw = exc.errors()
         return JSONResponse(status_code=422, content={
             "code": 422, "message": "请求参数校验失败",
-            "trace_id": get_trace_id(), "details": exc.errors()})
+            "trace_id": get_trace_id(), "details": _safe(raw)})
 
     @app.exception_handler(KeyError)
     async def _key_err(request: Request, exc: KeyError):
@@ -104,8 +118,8 @@ def create_app(data_dir: str | Path) -> FastAPI:
             "trace_id": tid, "details": None})
 
     # 路由注册
-    from .routes import chat, memory, settings, soul, misc
-    for mod in (chat, memory, settings, soul, misc):
+    from .routes import chat, memory, settings, soul, misc, projects
+    for mod in (chat, memory, settings, soul, misc, projects):
         app.include_router(mod.router, prefix="/api")
 
     # 对话图片（用户消息携带的图片持久化目录，历史消息回看）

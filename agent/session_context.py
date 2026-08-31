@@ -35,9 +35,11 @@ class SessionStore:
         self.data_dir = Path(data_dir)
 
     # ---- 会话 CRUD --------------------------------------------------------
-    def create_session(self, channel: str = None, from_session: str = None) -> str:
+    def create_session(self, channel: str = None, from_session: str = None,
+                       project_id: str = None) -> str:
         """channel：IM 渠道会话记录来源平台（feishu/telegram 等），Web 端为 None。
-        from_session：handoff 前驱会话 ID（null 表示无前驱）。"""
+        from_session：handoff 前驱会话 ID（null 表示无前驱）。
+        project_id：项目工作区归属（v5 §四）；NULL 表示无项目会话（含 IM）。"""
         row = self.db.query_one(
             "SELECT MAX(CAST(SUBSTR(session_id,6) AS INTEGER)) m"
             " FROM sessions WHERE session_id LIKE 'sess_%'")
@@ -50,9 +52,21 @@ class SessionStore:
         now = _now()
         self.db.execute(
             "INSERT INTO sessions(session_id,title,title_source,last_active,"
-            "message_count,channel,from_session,created_at) VALUES(?,?,'auto',?,0,?,?,?)",
-            (sid, "新对话", now, channel, from_session, now))
+            "message_count,channel,from_session,created_at,project_id) "
+            "VALUES(?,?,'auto',?,0,?,?,?,?)",
+            (sid, "新对话", now, channel, from_session, now, project_id))
         return sid
+
+    def archive_session(self, sid: str, source: str = "manual") -> None:
+        """手动归档单个会话；source ∈ manual / project（项目联动由 ProjectStore 触发）。"""
+        self.db.execute(
+            "UPDATE sessions SET archived=1, archived_source=?, archived_at=? "
+            "WHERE session_id=?", (source, _now(), sid))
+
+    def unarchive_session(self, sid: str) -> None:
+        self.db.execute(
+            "UPDATE sessions SET archived=0, archived_source=NULL, "
+            "archived_at=NULL WHERE session_id=?", (sid,))
 
     def rename(self, sid: str, title: str) -> None:
         self.db.execute(
@@ -69,7 +83,26 @@ class SessionStore:
             "UPDATE sessions SET title=? WHERE session_id=?", (title[:50], sid))
 
     def list_sessions(self, keyword: str = None, page: int = 1,
-                      page_size: int = 20) -> dict:
+                      page_size: int = 20, *,
+                      project_id: str | object = _UNSET,
+                      include_archived: bool = False) -> dict:
+        """
+        project_id:
+          _UNSET（默认）→ 不按 project 过滤（返回所有）
+          None          → 仅无项目会话
+          "proj_xxx"    → 仅该项目
+        include_archived: False → 排除 archived=1；True → 全返
+        """
+        where = []
+        params: list = []
+        if not include_archived:
+            where.append("archived=0")
+        if project_id is None:
+            where.append("project_id IS NULL")
+        elif project_id is not _UNSET:
+            where.append("project_id=?")
+            params.append(project_id)
+        base_where = (" WHERE " + " AND ".join(where)) if where else ""
         if keyword:
             match_expr = fts_escape(keyword)
             if not match_expr:
@@ -81,12 +114,17 @@ class SessionStore:
             if not ids:
                 return {"total": 0, "list": []}
             ph = ",".join("?" * len(ids))
+            id_cond = f"session_id IN ({ph})"
+            full_where = f" WHERE {id_cond}" + (
+                " AND " + " AND ".join(where) if where else "")
             rows = self.db.query_all(
-                f"SELECT * FROM sessions WHERE session_id IN ({ph}) "
-                f"ORDER BY pinned DESC, last_active DESC", ids)
+                f"SELECT * FROM sessions{full_where} "
+                f"ORDER BY pinned DESC, last_active DESC",
+                list(ids) + params)
         else:
             rows = self.db.query_all(
-                "SELECT * FROM sessions ORDER BY pinned DESC, last_active DESC")
+                f"SELECT * FROM sessions{base_where} "
+                f"ORDER BY pinned DESC, last_active DESC", params)
         total = len(rows)
         start = (page - 1) * page_size
         page_rows = rows[start:start + page_size]
@@ -101,6 +139,10 @@ class SessionStore:
             "from_session": r["from_session"],
             "handoff_status": _handoff_status_from_row(r),
             "succeeded_by": r["succeeded_by"],
+            "project_id": r["project_id"] if "project_id" in r.keys() else None,
+            "archived": bool(r["archived"]) if "archived" in r.keys() else False,
+            "archived_source": r["archived_source"] if "archived_source" in r.keys() else None,
+            "sandbox_mode": r["sandbox_mode"] if "sandbox_mode" in r.keys() else None,
         } for r in page_rows]}
 
     def set_pinned(self, sid: str, pinned: bool) -> None:

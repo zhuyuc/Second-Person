@@ -190,6 +190,75 @@ def test_provider_reasoning_is_separate_from_tool_progress_and_persisted(tmp_pat
     asyncio.run(scenario())
 
 
+def test_tool_step_narration_is_retracted_from_body(tmp_path: Path):
+    """工具步里模型"边说边调工具"的旁白会实时进正文；步结束确认带 tool_calls
+    后必须下发 content_reset 撤回，保证正文只留最终答案，不出现"思考先写进
+    正文、最后又消失"的观感。"""
+    async def scenario():
+        db = _db(tmp_path)
+        try:
+            config = _Config(agent_max_steps=4)
+            registry = ToolRegistry()
+            registry.register_function(ToolSpec(
+                "lookup", "read a value", {"type": "object", "properties": {
+                    "key": {"type": "string"}}, "required": ["key"]}),
+                lambda **_kwargs: None)
+
+            class NarratingLLM:
+                async def stream_chat(self, _snap, _messages, **_kwargs):
+                    # 第一次调用：先吐旁白，再调工具（工具步）
+                    yield "content", "先查一下。"
+                    yield "done", {"content": "先查一下。", "tool_calls": [{
+                        "id": "call_lookup", "type": "function",
+                        "function": {"name": "lookup", "arguments": '{"key":"A"}'}}],
+                        "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+            calls = {"n": 0}
+            inner = NarratingLLM()
+
+            class TwoStepLLM:
+                async def stream_chat(self, snap, messages, **kwargs):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        async for item in inner.stream_chat(snap, messages, **kwargs):
+                            yield item
+                    else:
+                        yield "content", "结果是 42。"
+                        yield "done", {"content": "结果是 42。", "tool_calls": [],
+                                       "usage": {"input_tokens": 0, "output_tokens": 0}}
+
+            events: list[tuple[str, dict]] = []
+
+            async def context_loader(**_kwargs):
+                return {"snap": _Provider(), "history": [], "memory_count": 0}
+
+            async def emit(name, data):
+                events.append((name, data))
+
+            runtime = TurnRuntime(
+                db=db, config=config, sessions=_Sessions(), registry=registry,
+                executor=_Executor(), llm=TwoStepLLM(), providers=_Providers(),
+                system_prompt=lambda *_args: "system", context_loader=context_loader)
+            outcome = await runtime.run(
+                session_id="sess_retract", message="查询 A", reasoning_effort="high", emit=emit)
+
+            names = [name for name, _data in events]
+            # 工具步旁白已流式进正文（content_delta），随后被 content_reset 撤回
+            assert "content_reset" in names
+            assert names.index("content_reset") < names.index("turn_completed")
+            # 最终正文只保留末步答案
+            assert outcome["content"] == "结果是 42。"
+            assert runtime.sessions.messages[-1]["content"] == "结果是 42。"
+            # 旁白不丢失：被撤回出正文后记入 timeline 留存
+            saved_timeline = runtime.sessions.messages[-1]["analysis_metadata"]["timeline"]
+            narration_items = [it for it in saved_timeline if it.get("kind") == "narration"]
+            assert narration_items and narration_items[0]["text"] == "先查一下。"
+        finally:
+            db.close()
+
+    asyncio.run(scenario())
+
+
 def test_reasoning_effort_switch_keeps_messages_and_tools_stable(tmp_path: Path):
     """N7 回归：同一 session 同一 message 切换 reasoning_effort 时，
     送到 LLM 的 messages 和 tools 应该字节完全相同——effort 只走 extra_body，

@@ -30,9 +30,6 @@ const SCOPES = [
   { key: 'assistant', label: 'AI 回复' },
 ]
 
-const CHANNEL_NAMES = { feishu: '飞书', dingtalk: '钉钉', telegram: 'Telegram', wecom: '企业微信', weixin: '微信' }
-function channelName(ch) { return CHANNEL_NAMES[ch] || ch }
-
 // 防抖 250ms；空查询清空结果、不发请求
 let debounceTimer = null
 function scheduleFetch() {
@@ -161,7 +158,6 @@ defineExpose({ focus: () => inputRef.value?.focus() })
               :class="r.pinned ? 'ti-pin' : 'ti-message'"></i>
             <ChannelIcon v-else :platform="r.channel" :size="16" class="sess-icon" />
             <div class="sess-search-title" v-html="renderHtml(r.title_html)"></div>
-            <span v-if="r.channel" class="sess-channel-badge">{{ channelName(r.channel) }}</span>
             <span v-if="r.readonly" class="sess-readonly-badge">已结束</span>
             <span class="sess-search-count" v-if="r.hit_count">{{ r.hit_count }} 处</span>
           </div>

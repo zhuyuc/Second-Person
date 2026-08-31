@@ -33,6 +33,7 @@ SSE_EVENT_SPECS: dict[str, SSEEventSpec] = {
     "tool_result": SSEEventSpec("工具执行结果摘要", frozenset({"turn_id", "tool_name", "ok"})),
     "tool_visual": SSEEventSpec("工具生成的可视化", frozenset({"type", "data"})),
     "content_delta": SSEEventSpec("回复正文增量", frozenset({"text"})),
+    "content_reset": SSEEventSpec("撤回工具步旁白：清空已流式的正文，仅保留最终答案", frozenset({"turn_id"})),
     "citations": SSEEventSpec("回复引用", frozenset({"refs"})),
     "handoff_ready": SSEEventSpec("会话交接摘要状态", frozenset({"status"})),
     "mood_updated": SSEEventSpec("人格情绪快照", frozenset({"ai_mood"})),

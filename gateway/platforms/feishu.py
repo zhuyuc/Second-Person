@@ -410,6 +410,10 @@ class FeishuAdapter(BasePlatformAdapter):
                 elif evt["event"] == "content_delta":
                     content.append(evt["data"].get("text", ""))
                     dirty = True
+                elif evt["event"] == "content_reset":
+                    # 工具步旁白撤回：卡片正文只保留最终答案
+                    content.clear()
+                    dirty = True
                 elif evt["event"] == "error":
                     err_msg = evt["data"].get("message", "处理失败")
                 now = time.monotonic()

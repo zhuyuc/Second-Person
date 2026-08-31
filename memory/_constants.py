@@ -40,7 +40,18 @@ SESSION_QUEUE_LIMIT = 3
 INGEST_CHUNK_TOKENS = 6000
 
 # ---- 边缘工程参数（收敛自 CFG-I）---------------------------------------
-AGENT_MAX_STEPS = 8
+# v7 沙箱统一化 + 自动压缩后：AGENT_MAX_STEPS 由"正常路径截断"降为"防死循环兜底"。
+# 深度 agentic 探索（读多个文件、跨模块综合回答）会自然跨 20+ 步，压力管控交给
+# CompactionEngine（token 阈值触发），这里保留一个较高上限只防止真的失控循环。
+AGENT_MAX_STEPS = 64
+
+# ---- 自动压缩阈值（v7 CompactionEngine，对齐 dsh-compaction-basic）----------
+# thresholdRatio：请求的 uncached_tokens 超过 context_window × 此比例时触发压缩
+COMPACTION_THRESHOLD_RATIO = 0.8
+# retainRatio：压缩时保留最近对话的 tokens 占 context_window 的比例
+COMPACTION_RETAIN_RATIO = 0.2
+# 一次压缩后若仍超阈值最多再压 N 次
+COMPACTION_MAX_RETRIES = 1
 HANDOFF_SUMMARY_TOKEN_LIMIT = 10000
 OUTPUT_STYLE_REVIEW_INTERVAL_DAYS = 7
 OUTPUT_STYLE_SIGNAL_RETENTION_DAYS = 90
@@ -75,8 +86,10 @@ GRAPH_CITATION_WINDOW_DAYS = 30
 GRAPH_NEIGHBOR_HARD_CAP = 15
 # 无向量的邻居（迁移期/老库）按 rrf_score 排序保留的最大条数
 GRAPH_UNCOMPUTABLE_KEEP = 2
-# 候选池送入 LLM 精筛的硬帽（原代码硬编码 20）
-CANDIDATE_POOL_HARD_CAP = 20
+# 候选池送入 LLM 精筛的硬帽（v7 精筛提速：20→10）
+# hybrid 预筛已经按 BM25/vector 分数排序，尾部（11-20 位）与用户 query 相关性显著低于头部，
+# 送去精筛只会拖长 input tokens 与首字延迟；10 条已经覆盖强相关候选。
+CANDIDATE_POOL_HARD_CAP = 10
 # 候选池小于该数量时跳过 LLM 精筛，走 degrade_pick 兜底
 # 设为 2 意味着"仅 1 个候选时才跳过"——省下 1 次 refine 调用，同时保留
 # ≥2 个候选场景下 LLM 判断的契约（对齐 test_retriever_gates 期望）
@@ -85,6 +98,11 @@ RETRIEVAL_REFINE_MIN_CANDIDATES = 2
 MIN_QUERY_CHARS_FOR_CONTEXT = 3
 # 精筛超时秒数
 RETRIEVAL_REFINE_TIMEOUT_SECONDS = 10
+
+# ---- v7 精筛结果 LRU cache（对齐"重生成/异常重试"场景省一次 LLM 调用）------
+# key = (session_id, query, tuple(sorted(candidate_ids)))
+RETRIEVER_REFINE_CACHE_SIZE = 128
+RETRIEVER_REFINE_CACHE_TTL_SECONDS = 300   # 5 分钟：覆盖典型重生成窗口
 # LLM 精筛判空时按候选池 top-K 写入 retrieval_negative_count（负样本反馈）
 REFINE_NEGATIVE_FEEDBACK_TOP_K = 3
 # LLM 精筛不可用时的相对得分兜底比例

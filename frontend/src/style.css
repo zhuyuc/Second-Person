@@ -391,7 +391,7 @@ a:hover {
     align-items: center;
     gap: 10px;
     cursor: pointer;
-    padding: 4px 6px 14px;
+    padding: 4px 6px 9px;
     user-select: none
 }
 
@@ -431,16 +431,16 @@ a:hover {
     display: flex;
     flex-direction: column;
     gap: 2px;
-    margin-bottom: 10px;
-    padding-bottom: 10px;
+    margin-bottom: 7px;
+    padding-bottom: 7px;
     border-bottom: 1px solid var(--bd)
 }
 
 /* 顶部动作组（新建/搜索）：与 nav 同风格，仅去掉底部边框，靠下一组 side-nav 的 border 分隔 */
 .side-nav.side-nav-top {
     border-bottom: none;
-    padding-bottom: 4px;
-    margin-bottom: 4px
+    padding-bottom: 1px;
+    margin-bottom: 1px
 }
 
 .side-nav-kbd {
@@ -457,7 +457,7 @@ a:hover {
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 36px;
+    height: 30px;
     padding: 0 10px;
     border-radius: 10px;
     cursor: pointer;
@@ -1605,10 +1605,16 @@ code {
 .composer {
     border: 1px solid var(--bd);
     border-radius: 16px;
-    padding: 14px 18px;
+    padding: 14px 18px 10px;
     background: var(--surface);
     box-shadow: var(--shadow-1);
     transition: border-color .18s, box-shadow .18s
+}
+
+.composer .row .fg > .ti {
+    height: 28px;
+    display: inline-flex;
+    align-items: center
 }
 
 .composer:focus-within {
@@ -1960,10 +1966,76 @@ code {
     min-width: 0
 }
 
-.structured-think { display: grid; gap: 8px; }
+.structured-think { display: grid; gap: 10px; }
 .think-lane { display: grid; gap: 3px; }
 .think-lane strong { color: var(--muted); font-size: 12px; font-weight: 600; }
 .think-lane span { white-space: pre-wrap; }
+
+/* 静态状态区：工具/决策/系统进度作为紧凑 chip 集合停留在顶部，reasoning
+   一直流在下方——auto-scroll 吸底自然展示最新思考。*/
+.think-status {
+    display: grid;
+    gap: 6px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed var(--bd);
+}
+.think-chip-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
+}
+.think-chip-row strong {
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    margin-right: 2px;
+}
+.think-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    font-size: 11.5px;
+    line-height: 1.4;
+    border-radius: 10px;
+    background: var(--bg-input, rgba(127, 127, 127, 0.08));
+    color: var(--fg);
+    white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.think-chip.is-neutral { color: var(--muted); }
+.think-chip.is-run {
+    background: rgba(60, 120, 220, 0.12);
+    color: var(--acctx, #3c78dc);
+}
+.think-chip.is-ok {
+    background: rgba(40, 180, 120, 0.12);
+    color: var(--succtx, #28b478);
+}
+.think-chip.is-fail {
+    background: rgba(200, 60, 60, 0.12);
+    color: var(--dangtx, #c83c3c);
+}
+.think-chip-status { margin-left: 2px; font-weight: 600; }
+.think-lane.compact { font-size: 12px; color: var(--muted); }
+.think-lane.compact strong { font-size: 11.5px; }
+
+/* Reasoning 主区：流式增长的主内容 */
+.think-lane-primary strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+}
+.think-lane-primary span {
+    display: block;
+    color: var(--fg);
+    font-size: 12.5px;
+    line-height: 1.7;
+}
 
 .model-control-wrap {
     position: relative;
@@ -1975,7 +2047,7 @@ code {
     align-items: center;
     gap: 6px;
     max-width: min(240px, 36vw);
-    height: 38px;
+    height: 28px;
     padding: 0 9px;
     border: none;
     border-radius: var(--radius-pill);
@@ -2106,8 +2178,8 @@ code {
 }
 
 .send-btn {
-    width: 38px;
-    height: 38px;
+    width: 28px;
+    height: 28px;
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -2115,7 +2187,8 @@ code {
     background: var(--brand-grad);
     color: #fff;
     border: none;
-    box-shadow: var(--shadow-brand)
+    box-shadow: var(--shadow-brand);
+    font-size: 14px
 }
 
 .send-btn:hover {
@@ -2135,8 +2208,8 @@ code {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 12px;
-    margin-bottom: 4px;
+    padding: 5px 12px;
+    margin-bottom: 3px;
     font-size: 11.5px;
     font-weight: 600;
     letter-spacing: .04em;
@@ -2163,16 +2236,9 @@ code {
     opacity: .7
 }
 
-/* 渠道会话来源徽标（飞书/钉钉等） */
-.sess-channel-badge {
-    flex-shrink: 0;
-    font-size: 10px;
-    font-weight: 500;
-    line-height: 1;
-    padding: 3px 6px;
-    border-radius: 6px;
-    color: var(--acctx);
-    background: var(--brand-soft)
+/* 分组下的小会话缩进，与工作区 .ws-sessions 的 20px 保持一致 */
+.sess-group-body {
+    padding-left: 20px
 }
 
 /* 用户画像维度预览：最多 2 行，超出省略号 */
@@ -2189,7 +2255,7 @@ code {
 }
 
 .sess-item {
-    padding: 7px 12px;
+    padding: 5px 12px;
     border-radius: 10px;
     cursor: pointer;
     margin-bottom: 0;

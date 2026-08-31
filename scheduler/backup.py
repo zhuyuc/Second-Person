@@ -75,8 +75,10 @@ class BackupManager:
                 if cfg.exists():
                     z.write(cfg, "config.yaml")
                 # md 目录 + 对话图片（随消息持久化，恢复后历史图片不悬挂）
+                # M5：projects/ 是项目工作区 md 主副本，恢复后 --rebuild-index
+                # 能从 md 重建 projects 表
                 for sub in ("memories", "sessions", "profile", "soul", "skills",
-                            "chat_images"):
+                            "chat_images", "projects"):
                     base = self.data_dir / sub
                     if not base.exists():
                         continue
