@@ -209,10 +209,17 @@ function stripTail(t, visuals) {
   return s
 }
 
-async function reloadMessages(sid) {
+async function reloadMessages(sid, { preserveLocalTail = false } = {}) {
   try {
+    const localTail = preserveLocalTail ? messages.value[messages.value.length - 1] : null
     const msgs = await fetchSessionMessages(sid)
-    if (sessStore.currentSid === sid) messages.value = msgs
+    if (sessStore.currentSid !== sid) return
+    const keepLocalTail =
+      preserveLocalTail &&
+      localTail?.role === 'assistant' &&
+      !localTail.id &&
+      msgs[msgs.length - 1]?.role !== 'assistant'
+    messages.value = keepLocalTail ? [...msgs, localTail] : msgs
   } catch {
     /* 重拉失败：保留内存部分回复不降级 */
   }
@@ -1311,12 +1318,15 @@ async function abort() {
     }
   }
   // 后端中断补救落库为异步完成，稍候重载该会话消息，拉取持久化版本（含真实 id 与标记）
-  if (sid)
-    {[300, 900].forEach((ms) =>
+  if (sid) {
+    ;[300, 900, 2000].forEach((ms) =>
       setTimeout(() => {
-        if (sessStore.currentSid === sid && !generating.value) reloadMessages(sid)
+        if (sessStore.currentSid === sid && !generating.value) {
+          reloadMessages(sid, { preserveLocalTail: true })
+        }
       }, ms)
-    )}
+    )
+  }
 }
 
 // 反馈原因弹窗（自研对话框，替代原生 prompt；中文标签映射英文枚举值提交）

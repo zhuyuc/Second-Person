@@ -231,6 +231,8 @@ class TurnRuntime:
             cumulative_model_messages: list[dict[str, Any]] = []
             last_model_seq: int = 0
             cached_system_content: str | None = None
+            turn_body = ""  # 用户可见正文（工具步旁白 content_reset 后会清空）
+            step = 0
             for step in range(1, max_steps + 1):
                 # 与 deepseek-harness 契约对齐：ttft/llm/decode 只计量 LLM 调用本身，
                 # 检索/精筛/prompt 组装的耗时单独进 context_ms。这样 ttft 跨轮稳定
@@ -427,6 +429,8 @@ class TurnRuntime:
                             first_token_at = time.perf_counter()
                         if kind == "content":
                             content_parts.append(data)
+                            if not narration_reset_done:
+                                turn_body += data
                             await emit("content_delta", {"text": data})
                         elif kind == "reasoning":
                             reasoning_source = "provider"
@@ -442,6 +446,7 @@ class TurnRuntime:
                                 await emit("content_reset", {"turn_id": turn_id, "step": step})
                                 _tl_append_narration("".join(content_parts))
                                 narration_reset_done = True
+                                turn_body = ""
                         elif kind == "done":
                             tool_calls = data.get("tool_calls") or []
                             step_usage = data.get("usage") or {}
@@ -522,6 +527,7 @@ class TurnRuntime:
                     narration = "".join(content_parts)
                     await emit("content_reset", {"turn_id": turn_id, "step": step})
                     _tl_append_narration(narration)
+                    turn_body = ""
                 self.events.append(turn_id, "assistant.tool_calls", actor="model", step=step,
                                    model_visible=True, payload={"content": "".join(content_parts),
                                                                 "tool_calls": tool_calls,
@@ -584,7 +590,40 @@ class TurnRuntime:
             })
             return {"turn_id": turn_id, "message_id": msg_id, "content": content}
         except asyncio.CancelledError:
-            self.events.finish(turn_id, status="cancelled", end_reason="cancelled", step=0)
+            partial_body = turn_body.strip()
+            has_progress = bool(
+                partial_body or timeline or reasoning_parts or tool_events or thinking_parts)
+            if has_progress:
+                marker = "> ⚠️ 本回复未完成：生成已中断"
+                content = (f"{partial_body}\n\n{marker}" if partial_body
+                           else f"{marker}，仅输出了处理进度")
+                analysis_metadata = self._analysis_metadata(
+                    turn_id=turn_id, reasoning_effort=reasoning_effort,
+                    reasoning_parts=reasoning_parts, system_parts=system_parts,
+                    tool_events=tool_events, decision_notices=decision_notices,
+                    reasoning_source=reasoning_source, end_reason="cancelled",
+                    timeline=timeline)
+                msg_id = self.sessions.append_message(
+                    session_id, "assistant", content,
+                    thinking="".join(thinking_parts) or None,
+                    analysis_metadata=analysis_metadata,
+                    parent_id=assistant_parent_id,
+                    version_group_id=assistant_version_group_id)
+                self.events.append(turn_id, "assistant.message", actor="host", step=step,
+                                   model_visible=True,
+                                   payload={"content": content, "message_id": msg_id})
+                try:
+                    await runtime_emit("turn_completed", {
+                        "message_id": msg_id, "turn_id": turn_id,
+                        "reasoning_effort": reasoning_effort,
+                        "analysis_metadata": analysis_metadata,
+                        "metrics": turn_metrics(self.db, turn_id),
+                        "session_metrics": session_metrics(self.db, session_id,
+                                                           current_turn_id=turn_id),
+                    })
+                except asyncio.CancelledError:
+                    pass
+            self.events.finish(turn_id, status="cancelled", end_reason="cancelled", step=step)
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("Agent turn failed: %s", turn_id)
