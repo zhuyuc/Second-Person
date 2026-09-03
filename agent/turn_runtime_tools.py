@@ -109,5 +109,10 @@ class TurnToolRunner:
             if cites:
                 payload["citations"] = cites
         await emit("tool_result", payload)
+        # 图形工具执行成功 → 发射 tool_visual 事件供前端 DiagramRenderer 渲染。
+        # （render_flowchart/render_mermaid 产出 {type, ...}；前端据 type 选 SVG/Mermaid）
+        if ok and name in ("render_flowchart", "render_mermaid") \
+                and isinstance(result, dict) and result.get("type"):
+            await emit("tool_visual", {"type": result["type"], "data": result})
         return {"tool": name, "ok": ok, "result": result if ok else None,
                 "error": None if ok else content}

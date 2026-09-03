@@ -7,11 +7,13 @@ import { computed } from 'vue'
 const props = defineProps({
   visible: { type: Boolean, default: false },
   rect: { type: Object, default: null },
+  // 是否显示「侧边会话」按钮。侧边会话内部的选区不再套娃，故其实例传 false。
+  showAside: { type: Boolean, default: true },
 })
-const emit = defineEmits(['copy', 'quote'])
+const emit = defineEmits(['copy', 'quote', 'aside'])
 
 // 估算的 toolbar 尺寸（真实尺寸由 CSS 决定；这里用于避免超出视窗）
-const TOOLBAR_WIDTH = 168
+const TOOLBAR_WIDTH = props.showAside ? 252 : 168
 const TOOLBAR_HEIGHT = 36
 const GAP = 8
 const EDGE = 8
@@ -49,6 +51,17 @@ const pos = computed(() => {
       >
         <i class="ti ti-quote"></i><span>引用</span>
       </button>
+      <template v-if="showAside">
+        <span class="sab-sep"></span>
+        <button
+          type="button"
+          class="sab-btn"
+          title="就这段文字开一个侧边会话（不进主对话、不进列表）"
+          @click="emit('aside')"
+        >
+          <i class="ti ti-message-plus"></i><span>侧边会话</span>
+        </button>
+      </template>
     </div>
   </transition>
 </template>

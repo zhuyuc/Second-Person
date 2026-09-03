@@ -22,7 +22,12 @@ export function useChatStream(deps) {
     currentTurnMetrics,
     onHandleThreshold,
     onHandoffReady,
+    // 宿主当前会话 id 访问器。默认取全局 store；侧边会话实例注入自己的 id，
+    // 否则 finishStream 会拿 aside 流的 sid 与全局主会话比较 → sameSession=false
+    // → 回复完成后不入列（表现为“AI 回复完不显示内容”）。
+    getCurrentSid,
   } = deps
+  const currentSid = () => (getCurrentSid ? getCurrentSid() : sessStore.currentSid)
 
   const generating = ref(false)
   const streamText = ref('')
@@ -312,7 +317,7 @@ export function useChatStream(deps) {
     commitPendingToBody()
     flushStreamText()
     const finishedSid = streamSid.value
-    const sameSession = finishedSid === sessStore.currentSid
+    const sameSession = finishedSid === currentSid()
     if (
       !streamPushSuppressed.value &&
       (streamText.value ||
@@ -372,7 +377,7 @@ export function useChatStream(deps) {
     streamSid.value = null
     liveThroughput.reset()
     sessStore.scheduleTitleRefresh(finishedSid)
-    if (msgId && sameSession && !streamPushSuppressed.value) reloadMessages(sessStore.currentSid)
+    if (msgId && sameSession && !streamPushSuppressed.value) reloadMessages(currentSid())
     onMaybeScroll?.()
   }
 

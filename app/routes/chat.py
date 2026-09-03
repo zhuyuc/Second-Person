@@ -283,11 +283,11 @@ async def chat_send(request: Request):
             for sib in siblings:
                 c.sessions._deactivate_downstream(sib["id"])
 
-    # 首条消息后异步生成标题
+    # 首条消息后异步生成标题（侧边会话不进列表，标题无消费方，跳过省成本）
     row = c.db.query_one(
-        "SELECT message_count FROM sessions WHERE session_id=?", (sid,))
+        "SELECT message_count, channel FROM sessions WHERE session_id=?", (sid,))
     is_first = row and row["message_count"] == 0
-    if is_first:
+    if is_first and row["channel"] != "aside":
         from infrastructure.background_tasks import track_task
         track_task(c.chat_svc.generate_title(sid, message),
                    name=f"generate_title:{sid}")
@@ -509,6 +509,10 @@ async def rename(body: SessionRenameRequest):
 
 class SessionCreateRequest(BaseModel):
     project_id: str | None = None
+    # 侧边会话：channel 固定为 'aside'（Web 端不得伪造 IM 渠道），
+    # from_session 记录发起它的主会话（供级联删除与 Langfuse 关联）。
+    aside: bool = False
+    from_session: str | None = None
 
 
 @router.post("/chat/session/create")
@@ -521,8 +525,11 @@ async def create(body: SessionCreateRequest | None = None):
             raise HTTPException(404, f"项目不存在：{project_id}")
         if proj.status != "active":
             raise HTTPException(409, f"项目已归档：{project_id}")
+    channel = "aside" if (body and body.aside) else None
+    from_session = (body.from_session if (body and body.aside) else None)
     return {"code": 200, "data": {
-        "session_id": c.sessions.create_session(project_id=project_id)}}
+        "session_id": c.sessions.create_session(
+            project_id=project_id, channel=channel, from_session=from_session)}}
 
 
 class SessionArchiveRequest(BaseModel):

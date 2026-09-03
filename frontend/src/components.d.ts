@@ -32,6 +32,7 @@ declare module 'vue' {
     SessionMetricsLine: typeof import('./components/SessionMetricsLine.vue')['default']
     SessionSearchPanel: typeof import('./components/SessionSearchPanel.vue')['default']
     SessionSidebar: typeof import('./components/SessionSidebar.vue')['default']
+    SideChatDrawer: typeof import('./components/SideChatDrawer.vue')['default']
     ThinkingTimeline: typeof import('./components/ThinkingTimeline.vue')['default']
   }
 }

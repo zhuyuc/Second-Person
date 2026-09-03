@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { chatApi } from '@/api/chat'
+import SideChatDrawer from '@/components/SideChatDrawer.vue'
 
 const router = useRouter()
 const toast = useToast()
@@ -82,6 +83,12 @@ function onOnboarded() {
 function copyTraceId(tid) {
   navigator.clipboard.writeText(tid).catch(() => {})
 }
+
+// 划词「侧边会话」：主视图 ChatView emit('open-aside') → 交给右侧抽屉开/续侧边会话
+const asideDrawer = ref(null)
+function onOpenAside(quote) {
+  asideDrawer.value?.openAside(quote)
+}
 </script>
 
 <template>
@@ -93,10 +100,11 @@ function copyTraceId(tid) {
     <div class="main">
       <router-view v-slot="{ Component }">
         <keep-alive :max="2">
-          <component :is="Component" />
+          <component :is="Component" @open-aside="onOpenAside" />
         </keep-alive>
       </router-view>
     </div>
+    <SideChatDrawer ref="asideDrawer" />
   </div>
 
   <div class="toast-wrap">

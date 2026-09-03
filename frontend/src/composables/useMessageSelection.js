@@ -5,7 +5,11 @@ import { ref, onMounted, onUnmounted } from 'vue'
 
 const MIN_SELECTION_CHARS = 1
 
-export function useMessageSelection() {
+// options.getRoot?: () => HTMLElement | null
+//   限定选区只在该根容器内触发。多实例（主对话 + 侧边会话）并存时，各自
+//   传入自己的滚动容器根，避免同一次选区被两个实例同时捕获、弹出两条浮条。
+//   不传则全局生效（向后兼容）。
+export function useMessageSelection(options = {}) {
   const visible = ref(false)
   const text = ref('')
   const rect = ref(null)
@@ -20,10 +24,24 @@ export function useMessageSelection() {
     sourceRole.value = null
   }
 
+  // 排除法：消息项内的文字默认都可选，只有落在这些交互控件上才放弃。
+  // 好处是新增内容块（思考面板、Web 来源、时间线 lane、以后的新面板）无需登记，
+  // 自动生效；只需维护这一份「交互件」排除表。
+  const EXCLUDE_SELECTOR =
+    'button, a, input, textarea, [contenteditable="true"], ' +
+    '.msg-actions-row, .version-nav, .banner, [data-selection-actionbar], [data-no-select]'
+
   function pickAnchor(node) {
-    // Selection.anchorNode 通常是文本节点；向上找到消息气泡容器
+    // Selection.anchorNode 通常是文本节点；向上找到所属的消息项
     const el = node?.nodeType === 3 ? node.parentElement : node
-    return el?.closest?.('.chat-message-item .content, .chat-message-item .bubble') || null
+    const item = el?.closest?.('.chat-message-item')
+    if (!item) return null
+    // 落在交互控件里的选区不弹操作条
+    if (el?.closest?.(EXCLUDE_SELECTOR)) return null
+    // 多实例隔离：若指定了根容器，选区必须落在本实例根内才算命中
+    const root = options.getRoot?.()
+    if (root && !root.contains(item)) return null
+    return item
   }
 
   function evaluate() {
@@ -32,13 +50,12 @@ export function useMessageSelection() {
     const raw = sel.toString()
     const trimmed = raw.trim()
     if (trimmed.length < MIN_SELECTION_CHARS) return hide()
-    const anchor = pickAnchor(sel.anchorNode) || pickAnchor(sel.focusNode)
-    if (!anchor) return hide()
+    const item = pickAnchor(sel.anchorNode) || pickAnchor(sel.focusNode)
+    if (!item) return hide()
     const range = sel.getRangeAt(0)
     const box = range.getBoundingClientRect()
     // 极端情况：只选了不可见字符 → getBoundingClientRect 全 0，跳过
     if (!box || (box.width === 0 && box.height === 0)) return hide()
-    const item = anchor.closest('.chat-message-item')
     text.value = trimmed
     rect.value = {
       top: box.top,
@@ -49,7 +66,9 @@ export function useMessageSelection() {
       height: box.height,
     }
     sourceMsgId.value = item?.dataset?.msgId ?? null
-    sourceRole.value = anchor.classList.contains('bubble') ? 'user' : 'assistant'
+    // role 按结构判定：选区落在 .msg-user 内即用户消息，否则助手消息
+    const el = sel.anchorNode?.nodeType === 3 ? sel.anchorNode.parentElement : sel.anchorNode
+    sourceRole.value = el?.closest?.('.msg-user') ? 'user' : 'assistant'
     visible.value = true
   }
 

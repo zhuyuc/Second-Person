@@ -33,6 +33,18 @@ function getToolRow(item, idx) {
   return toolRowCache.value.get(itemKey(item, idx)) || toolRow(item)
 }
 
+const toolCitesCache = computed(() => {
+  const cache = new Map()
+  rendered.value.forEach((item, idx) => {
+    if (item.kind === 'tool_call') cache.set(itemKey(item, idx), toolCitations(item))
+  })
+  return cache
+})
+
+function getToolCites(item, idx) {
+  return toolCitesCache.value.get(itemKey(item, idx)) || toolCitations(item)
+}
+
 function toggle(key) {
   const next = new Set(expanded.value)
   if (next.has(key)) next.delete(key)
@@ -333,9 +345,16 @@ function toolCitations(item) {
       <div
         v-else-if="item.kind === 'tool_call'"
         class="tl-entry tl-entry-tool"
-        :class="{ 'is-active': getToolRow(item, idx).running }"
+        :class="{
+          'is-active': getToolRow(item, idx).running,
+          'is-expanded': isExpanded(itemKey(item, idx)),
+        }"
       >
-        <div class="tl-entry-row">
+        <div
+          class="tl-entry-row"
+          :class="{ 'is-toggle': getToolCites(item, idx).length }"
+          @click="getToolCites(item, idx).length && toggle(itemKey(item, idx))"
+        >
           <span
             class="tl-status"
             :class="
@@ -378,10 +397,21 @@ function toolCitations(item) {
             >{{ truncate(item.result_preview, 64) }}</span
           >
           <span v-if="item.error" class="tl-inline-error">{{ truncate(item.error, 80) }}</span>
+          <span v-if="getToolCites(item, idx).length" class="tl-cites-toggle">
+            <span class="tl-cites-count">{{ getToolCites(item, idx).length }} 个来源</span>
+            <i
+              class="ti tl-cites-chevron"
+              :class="isExpanded(itemKey(item, idx)) ? 'ti-chevron-down' : 'ti-chevron-right'"
+            ></i>
+          </span>
         </div>
-        <div v-if="toolCitations(item).length" class="tl-cites-row">
+        <div
+          v-if="getToolCites(item, idx).length"
+          v-show="isExpanded(itemKey(item, idx))"
+          class="tl-cites-row"
+        >
           <a
-            v-for="(cite, ci) in toolCitations(item)"
+            v-for="(cite, ci) in getToolCites(item, idx)"
             :key="ci"
             class="tl-web-cite"
             :href="cite.url"
@@ -625,6 +655,33 @@ function toolCitations(item) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tl-entry-row.is-toggle {
+  cursor: pointer;
+}
+
+.tl-cites-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.tl-entry-row.is-toggle:hover .tl-cites-toggle {
+  color: var(--fg);
+}
+
+.tl-cites-count {
+  white-space: nowrap;
+}
+
+.tl-cites-chevron {
+  font-size: 13px;
 }
 
 .tl-cites-row {

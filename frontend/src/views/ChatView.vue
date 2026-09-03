@@ -44,8 +44,41 @@ const sse = useSSE()
 const sessStore = useSessions() // 会话列表/当前会话共享状态（侧栏在 SessionSidebar）
 const projStore = useProjects() // 项目工作区（v5）
 
+// 侧边会话模式：本组件既是主对话视图，也被 SideChatDrawer 以第二实例复用。
+// asideMode 下"当前会话"走 asideSessionId（本地维护，首条发送时创建），且不触碰
+// 全局会话列表/当前会话（setCurrent/load/ensurePlaceholder 等）—— 内容隔离、不进列表。
+const props = defineProps({
+  asideMode: { type: Boolean, default: false },
+  asideSessionId: { type: String, default: null },
+  asideProjectId: { type: String, default: null },
+  asideFromSession: { type: String, default: null },
+})
+const emit = defineEmits(['open-aside', 'aside-session-created', 'aside-close'])
+
+const asideLocalSid = ref(props.asideSessionId)
+watch(
+  () => props.asideSessionId,
+  (v) => {
+    asideLocalSid.value = v
+  }
+)
+const currentSid = computed(() =>
+  props.asideMode ? asideLocalSid.value : sessStore.currentSid
+)
+
+// 本次流式请求的 crid：主模式沿用全局 sp_active_crid 支持刷新续推；aside 模式用
+// 本地 crid（临时窗口不做刷新续推），stop 时据此取消对应流，避免误取消主对话。
+function genCrid() {
+  return 'crid_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8)
+}
+const streamCrid = ref(null)
+
 const currentProject = computed(() => {
-  const sid = sessStore.currentSid
+  // aside 模式：项目继承自发起它的主会话（不在全局 list 里，直接用 prop 解析）
+  if (props.asideMode) {
+    return props.asideProjectId ? projStore.byId(props.asideProjectId) || null : null
+  }
+  const sid = currentSid.value
   if (sid) {
     const s = sessStore.list.find((x) => x.session_id === sid)
     if (s && s.project_id) return projStore.byId(s.project_id) || null
@@ -128,7 +161,8 @@ function onComposerKeyDown(e) {
   }
 }
 // 消息气泡文字选中 → 悬浮 toolbar（复制/引用）
-const selection = useMessageSelection()
+// 传入本实例滚动容器，使主对话与侧边会话的选区互不串扰（各弹各的浮条）
+const selection = useMessageSelection({ getRoot: () => scroller.value })
 const messages = ref([])
 // 历史消息分页：后端默认返回最近 50 条，"加载更早"通过 before_id 游标向前拉。
 const PAGE_SIZE = 50
@@ -145,7 +179,7 @@ async function showOlderMessages() {
   if (!firstId) return
   loadingMore.value = true
   try {
-    const older = await fetchSessionMessages(sessStore.currentSid, {
+    const older = await fetchSessionMessages(currentSid.value, {
       before_id: firstId,
       limit: PAGE_SIZE,
     })
@@ -213,7 +247,7 @@ async function reloadMessages(sid, { preserveLocalTail = false } = {}) {
   try {
     const localTail = preserveLocalTail ? messages.value[messages.value.length - 1] : null
     const msgs = await fetchSessionMessages(sid)
-    if (sessStore.currentSid !== sid) return
+    if (currentSid.value !== sid) return
     const keepLocalTail =
       preserveLocalTail &&
       localTail?.role === 'assistant' &&
@@ -233,7 +267,7 @@ function handleThreshold(threshold) {
     if (!softToastShown.value) {
       toast.push('warning', '此会话已接近容量，建议尽快收尾或开启新会话')
       softToastShown.value = true
-      sessionStorage.setItem(`sp_soft_toast_shown_${sessStore.currentSid}`, '1')
+      sessionStorage.setItem(`sp_soft_toast_shown_${currentSid.value}`, '1')
     }
     thresholdBreached.value = 'soft'
   }
@@ -268,6 +302,8 @@ const {
 } = useChatStream({
   messages,
   sessStore,
+  // 侧边会话实例把自己的当前会话 id 注入流式状态机，确保回复完成后正确入列
+  getCurrentSid: () => currentSid.value,
   liveThroughput,
   toast,
   reloadMessages,
@@ -298,9 +334,11 @@ const {
 
 // ---- handoff 操作 ----
 async function startHandoff() {
-  if (!sessStore.currentSid) return
+  // 侧边会话是临时窗口，不支持 handoff（会切换全局当前会话，破坏隔离）
+  if (props.asideMode) return
+  if (!currentSid.value) return
   try {
-    const d = await chatApi.handoff(sessStore.currentSid)
+    const d = await chatApi.handoff(currentSid.value)
     sessStore.setCurrent(d.new_session_id)
     messages.value = []
     sessionMetrics.value = null
@@ -448,7 +486,8 @@ function trimMessagesFromEdit(editMsgId) {
 
 async function openSession(sid, opts = {}) {
   try {
-    sessStore.setCurrent(sid)
+    // aside 模式不切换全局当前会话（否则会连累主对话侧栏高亮/加载）
+    if (!props.asideMode) sessStore.setCurrent(sid)
     const [msgs, metrics] = await Promise.all([fetchSessionMessages(sid), fetchSessionMetrics(sid)])
     messages.value = msgs
     resetMessageWindow(msgs.length)
@@ -486,13 +525,15 @@ async function tryReattach(sid) {
   try {
     const d = await chatApi.activeRequest(sid)
     const crid = d?.client_request_id
-    if (!crid || sessStore.currentSid !== sid) return
+    if (!crid || currentSid.value !== sid) return
     beginStream(sid)
+    streamCrid.value = crid
     // 重挂后删掉尾部尚未完成的那轮用户消息渲染冗余风险低：回放事件仅重建流式区
     await sse.send({
       sessionId: sid,
       message: '',
       clientRequestId: crid,
+      trackActive: !props.asideMode,
       onEvent: (ev, data) => handleEvent(ev, data),
       onError: (e) => {
         toast.push('error', friendlyError(e?.message))
@@ -608,46 +649,64 @@ async function copySelection() {
   selection.hide()
 }
 // QuoteComposer 弹窗暂存的引用原文与元信息；visible 控制弹窗开合
-const pendingQuote = ref({ visible: false, text: '', sourceMsgId: null, sourceRole: null })
-function quoteSelection() {
+// forAside：true 表示这条引用要送去「侧边会话」而非当前输入框（确认后 emit 上抛）
+const pendingQuote = ref({
+  visible: false,
+  text: '',
+  sourceMsgId: null,
+  sourceRole: null,
+  forAside: false,
+})
+function _openQuoteComposer(forAside) {
   const t = selection.text.value
   if (!t) return
+  // 送往侧边会话不占本输入框的附件配额；仅本地引用才校验 MAX
   const MAX = 5
-  if (attachments.value.length >= MAX) {
+  if (!forAside && attachments.value.length >= MAX) {
     toast.push('warning', `最多 ${MAX} 个附件`)
     selection.hide()
     return
   }
-  // 打开评论录入弹窗；确认后再落到 attachments。这里先把原文与来源
+  // 打开评论录入弹窗；确认后再落到 attachments / 侧边会话。这里先把原文与来源
   // 暂存下来，收起 SelectionActionBar 并清空浏览器选区，避免 toolbar 复现
   pendingQuote.value = {
     visible: true,
     text: t,
     sourceMsgId: selection.sourceMsgId.value,
     sourceRole: selection.sourceRole.value,
+    forAside,
   }
   selection.hide()
   window.getSelection?.()?.removeAllRanges?.()
 }
-function cancelQuoteComposer() {
-  pendingQuote.value = { visible: false, text: '', sourceMsgId: null, sourceRole: null }
+function quoteSelection() {
+  _openQuoteComposer(false)
 }
-function commitQuoteAttachment({ comment }) {
-  const q = pendingQuote.value
-  const t = q.text
-  if (!t) {
-    cancelQuoteComposer()
-    return
+// 划词「侧边会话」：复用同一评论录入弹窗，确认后把引用送去侧边会话
+function asideSelection() {
+  _openQuoteComposer(true)
+}
+function cancelQuoteComposer() {
+  pendingQuote.value = {
+    visible: false,
+    text: '',
+    sourceMsgId: null,
+    sourceRole: null,
+    forAside: false,
   }
+}
+// 把一条引用（原文 + 可选评论）压入本实例输入框的附件条。抽出复用：既供
+// 本地「引用」确认，也供侧边会话被 SideChatDrawer 注入选中文本（injectQuote）。
+function pushQuoteAttachment({ text, comment, sourceMsgId, sourceRole }) {
+  const t = text
+  if (!t) return
   const MAX = 5
   if (attachments.value.length >= MAX) {
     toast.push('warning', `最多 ${MAX} 个附件`)
-    cancelQuoteComposer()
     return
   }
   // 与"粘贴的文本"共用同一通道：同一形状、同一附件面板、同一历史还原路径。
   // kind:'quote' 用于渲染层切图标/胶囊底色；comment 可选，弹窗留空即为 ''。
-  // 胶囊显示统一叫"引用"，弹窗内用"选中的文本"段头呼应发送到模型的 【选中的文本】。
   const n = attachments.value.filter((a) => a.kind === 'quote').length
   attachments.value.push({
     name: n ? `引用 ${n + 1}` : '引用',
@@ -660,6 +719,31 @@ function commitQuoteAttachment({ comment }) {
     comment: comment || '',
     chars: t.length,
     lines: t.split('\n').length,
+    sourceMsgId: sourceMsgId ?? null,
+    sourceRole: sourceRole ?? null,
+  })
+}
+function commitQuoteAttachment({ comment }) {
+  const q = pendingQuote.value
+  const t = q.text
+  if (!t) {
+    cancelQuoteComposer()
+    return
+  }
+  // 送往侧边会话：不落本输入框，上抛给宿主（SideChatDrawer）开/续侧边会话
+  if (q.forAside) {
+    emit('open-aside', {
+      text: t,
+      comment: comment || '',
+      sourceMsgId: q.sourceMsgId,
+      sourceRole: q.sourceRole,
+    })
+    cancelQuoteComposer()
+    return
+  }
+  pushQuoteAttachment({
+    text: t,
+    comment,
     sourceMsgId: q.sourceMsgId,
     sourceRole: q.sourceRole,
   })
@@ -668,6 +752,15 @@ function commitQuoteAttachment({ comment }) {
     ta.value?.focus()
   })
 }
+
+// 供 SideChatDrawer 调用：把选中文本作为引用注入本侧边实例的输入框（不自动发送）
+function injectQuote(payload) {
+  pushQuoteAttachment(payload)
+  nextTick(() => {
+    ta.value?.focus()
+  })
+}
+defineExpose({ injectQuote })
 
 // ---- 表情选择器：点击表情插入输入框光标处（支持连续插入，点击外部关闭） ----
 const emojiOpen = ref(false)
@@ -1202,30 +1295,43 @@ async function send() {
   }
   // 无当前会话（新对话/欢迎页）：新建一条全新会话，不复用旧空会话，
   // 避免消息落进以前的会话记录
-  if (!sessStore.currentSid) {
-    // M5.1：若来自「+ 新建会话」项目挂载，此时 pendingProjectId 有值
-    const pendingPid = sessStore.pendingProjectId
-    const body = pendingPid ? { project_id: pendingPid } : {}
-    const d = await chatApi.createSession(body)
-    // 占位挂到正确的项目下，避免侧栏先出现在「最近」再跳到工作区
-    sessStore.ensurePlaceholder(d.session_id, pendingPid)
-    if (pendingSandboxMode.value) {
-      try {
-        await projectsApi.setSandboxMode(d.session_id, pendingSandboxMode.value)
-      } catch {
-        /* toast 已弹 */
+  if (!currentSid.value) {
+    if (props.asideMode) {
+      // 侧边会话：首条发送时才创建（channel='aside' + from_session 记来源），
+      // 全程不触碰全局会话列表/当前会话，实现内容隔离、不进列表。
+      const d = await chatApi.createSession({
+        aside: true,
+        from_session: props.asideFromSession || undefined,
+        project_id: props.asideProjectId || undefined,
+      })
+      asideLocalSid.value = d.session_id
+      emit('aside-session-created', d.session_id)
+      messages.value = []
+    } else {
+      // M5.1：若来自「+ 新建会话」项目挂载，此时 pendingProjectId 有值
+      const pendingPid = sessStore.pendingProjectId
+      const body = pendingPid ? { project_id: pendingPid } : {}
+      const d = await chatApi.createSession(body)
+      // 占位挂到正确的项目下，避免侧栏先出现在「最近」再跳到工作区
+      sessStore.ensurePlaceholder(d.session_id, pendingPid)
+      if (pendingSandboxMode.value) {
+        try {
+          await projectsApi.setSandboxMode(d.session_id, pendingSandboxMode.value)
+        } catch {
+          /* toast 已弹 */
+        }
+        pendingSandboxMode.value = null
       }
-      pendingSandboxMode.value = null
+      sessStore.setCurrent(d.session_id) // 内部会自动清空 pendingProjectId
+      sessStore.scheduleTitleRefresh(d.session_id)
+      sessStore.load() // 后台同步真实数据
+      messages.value = []
     }
-    sessStore.setCurrent(d.session_id) // 内部会自动清空 pendingProjectId
-    sessStore.scheduleTitleRefresh(d.session_id)
-    sessStore.load() // 后台同步真实数据
-    messages.value = []
   }
   // handoff 附件路径：新会话首条消息携带
   let hPath = null
   if (handoffStatus.value === 'ready' && messages.value.length === 0) {
-    hPath = `artifacts/handoffs/${sessStore.currentSid}.md`
+    hPath = `artifacts/handoffs/${currentSid.value}.md`
   }
   // 构造发送给后端的消息：把附件解析文本作为上下文前置（不截断，完整交给模型）
   // 引用附件（kind:'quote'）走 【选中的文本】\n{原文} + 可选 \n\n【用户评论】\n{评论}
@@ -1274,18 +1380,21 @@ async function send() {
   // 文档附件统一存入知识库：后台异步导入，不阻塞本次对话
   kbFiles.forEach((f) => ingestToKb(f))
   nextTick(autoGrow)
-  beginStream(sessStore.currentSid)
+  beginStream(currentSid.value)
   scrollBottom()
 
+  streamCrid.value = genCrid()
   await sse.send({
-    sessionId: sessStore.currentSid,
+    sessionId: currentSid.value,
     // M5.1：无 sessionId + pendingProjectId 时，后端会带项目建库
-    projectId: sessStore.currentSid ? undefined : sessStore.pendingProjectId,
+    projectId: currentSid.value ? undefined : sessStore.pendingProjectId,
     message: backendMsg,
     images: imgs.length ? imgs : undefined,
     location: geoEnabled.value ? cachedLocation() : undefined,
     handoffPath: hPath,
     reasoningEffort: reasoningEffort.value,
+    clientRequestId: streamCrid.value,
+    trackActive: !props.asideMode,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => {
       toast.push('error', friendlyError(e?.message))
@@ -1306,7 +1415,8 @@ async function send() {
 // 已输出的内容必须保留：先即时保留屏上部分，后端中断补救会把已生成部分落库
 // （带“未完成”标记），随后以落库版本为准重载会话，保证屏上所见即 DB 所存
 async function abort() {
-  const crid = sessionStorage.getItem('sp_active_crid')
+  // aside 用本地 crid（不写全局 sp_active_crid），避免误取消主对话的进行中流
+  const crid = props.asideMode ? streamCrid.value : sessionStorage.getItem('sp_active_crid')
   const sid = streamSid.value
   sse.abort()
   finishStream() // 即时保留已输出部分，避免闪烁
@@ -1321,7 +1431,7 @@ async function abort() {
   if (sid) {
     ;[300, 900, 2000].forEach((ms) =>
       setTimeout(() => {
-        if (sessStore.currentSid === sid && !generating.value) {
+        if (currentSid.value === sid && !generating.value) {
           reloadMessages(sid, { preserveLocalTail: true })
         }
       }, ms)
@@ -1399,7 +1509,7 @@ async function submitEdit(msg) {
   editText.value = ''
   if (!trimMessagesFromEdit(editMsgId)) {
     toast.push('warning', '未能同步截断旧回复，将刷新消息列表')
-    await reloadMessages(sessStore.currentSid)
+    await reloadMessages(currentSid.value)
   }
   messages.value.push({
     id: -1,
@@ -1413,16 +1523,19 @@ async function submitEdit(msg) {
     atts: msg.atts || [],
     has_branches: false,
   })
-  beginStream(sessStore.currentSid)
+  beginStream(currentSid.value)
   maybeScroll()
   streamPushSuppressed.value = true
+  streamCrid.value = genCrid()
   try {
     await sse.send({
-      sessionId: sessStore.currentSid,
+      sessionId: currentSid.value,
       message: text,
       editMessageId: editMsgId,
       location: geoEnabled.value ? cachedLocation() : undefined,
       reasoningEffort: reasoningEffort.value,
+      clientRequestId: streamCrid.value,
+      trackActive: !props.asideMode,
       onEvent: (ev, data) => handleEvent(ev, data),
       onError: (e) => {
         toast.push('error', friendlyError(e?.message))
@@ -1433,14 +1546,14 @@ async function submitEdit(msg) {
     streamPushSuppressed.value = false
   }
   if (generating.value) finishStream()
-  await reloadMessages(sessStore.currentSid)
+  await reloadMessages(currentSid.value)
 }
 
 // ---- 版本切换 ----
 async function switchVersion(msg, direction) {
   if (generating.value) return
   const siblings = await chatApi.switchVersion({
-    session_id: sessStore.currentSid,
+    session_id: currentSid.value,
     version_group_id: msg.version_group_id,
     // direction: +1 → 下一个兄弟, -1 → 上一个兄弟
     // 后端需要 target_message_id，前端需要计算
@@ -1477,7 +1590,7 @@ async function getSiblingId(msg, direction) {
 
 // 重新生成（分支化）：旧回复保留，创建 assistant 兄弟节点
 async function regenerate(msg) {
-  if (generating.value || !sessStore.currentSid) return
+  if (generating.value || !currentSid.value) return
   if (!msg.id) {
     toast.push('warning', '该消息暂不支持重新生成')
     return
@@ -1494,14 +1607,17 @@ async function regenerate(msg) {
     toast.push('warning', '未找到对应的提问，无法重新生成')
     return
   }
-  beginStream(sessStore.currentSid)
+  beginStream(currentSid.value)
   maybeScroll()
+  streamCrid.value = genCrid()
   await sse.send({
-    sessionId: sessStore.currentSid,
+    sessionId: currentSid.value,
     message: userMsg.content,
     regenerateMessageId: msg.id,
     location: geoEnabled.value ? cachedLocation() : undefined,
     reasoningEffort: reasoningEffort.value,
+    clientRequestId: streamCrid.value,
+    trackActive: !props.asideMode,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => {
       toast.push('error', friendlyError(e?.message))
@@ -1510,7 +1626,7 @@ async function regenerate(msg) {
   })
   if (generating.value) finishStream()
   // 重新加载消息列表以获取更新后的分支信息
-  await reloadMessages(sessStore.currentSid)
+  await reloadMessages(currentSid.value)
 }
 
 function copyText(msg) {
@@ -1821,14 +1937,20 @@ function onOpenSession(e) {
 }
 
 onMounted(() => {
-  sessStore.load()
   loadProviders()
-  window.addEventListener('sp-new-chat', resetToHome)
-  window.addEventListener('sp-open-session', onOpenSession)
   document.addEventListener('click', handleMermaidActions)
-  // 直接从其他页面进入或刷新后恢复上次会话（currentSid 已从 localStorage 恢复）
-  // → openSession 内部会调 tryReattach 续播进行中的生成，实现刷新不中断
-  if (sessStore.currentSid && !messages.value.length) openSession(sessStore.currentSid)
+  if (props.asideMode) {
+    // 侧边会话：不加载全局会话列表、不监听全局新建/切换会话事件（那是主视图的）。
+    // 已有 asideSessionId（同页内复用一个尚未关闭的侧边）则加载其消息 + 续挂进行中生成。
+    if (currentSid.value && !messages.value.length) openSession(currentSid.value)
+  } else {
+    sessStore.load()
+    window.addEventListener('sp-new-chat', resetToHome)
+    window.addEventListener('sp-open-session', onOpenSession)
+    // 直接从其他页面进入或刷新后恢复上次会话（currentSid 已从 localStorage 恢复）
+    // → openSession 内部会调 tryReattach 续播进行中的生成，实现刷新不中断
+    if (currentSid.value && !messages.value.length) openSession(currentSid.value)
+  }
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)
   document.addEventListener('click', onDocClickModelControl)
@@ -1980,8 +2102,10 @@ onUnmounted(() => {
     <SelectionActionBar
       :visible="selection.visible.value"
       :rect="selection.rect.value"
+      :show-aside="!asideMode"
       @copy="copySelection"
       @quote="quoteSelection"
+      @aside="asideSelection"
     />
     <!-- 引用评论录入弹窗（点"引用"后弹出，确认后写入附件条） -->
     <QuoteComposer
@@ -1991,7 +2115,7 @@ onUnmounted(() => {
       @cancel="cancelQuoteComposer"
     />
     <!-- 定位锚点栏：独立左列，宽度不随右侧内容变化；与对话状态解耦，仅悬停触发 -->
-    <MessageAnchorRail :anchors="anchorItems" @select="scrollToAnchor" />
+    <MessageAnchorRail v-if="!asideMode" :anchors="anchorItems" @select="scrollToAnchor" />
     <!-- 对话区（会话列表已合并到全局侧栏 SessionSidebar） -->
     <div class="chat-main">
       <!-- 空状态：顶部 spacer 将 hero+composer 推向中间 -->
@@ -2306,7 +2430,7 @@ onUnmounted(() => {
           <!-- 生成中：安全处理进度（展开）→ 正文首字后自动折叠并流式输出正文 -->
           <!-- 生成中：仅在发起请求的会话内展示（切会话后不泄漏到其他会话） -->
           <div
-            v-if="(generating || streamText) && streamSid === sessStore.currentSid"
+            v-if="(generating || streamText) && streamSid === currentSid"
             class="msg-ai"
           >
             <div class="avatar"><i class="ti ti-brain"></i></div>
@@ -2525,7 +2649,7 @@ onUnmounted(() => {
                 @click.stop="emojiOpen = !emojiOpen"
               ></i>
               <SandboxModeChip
-                :session-id="sessStore.currentSid"
+                :session-id="currentSid"
                 :has-project="!!currentProject"
                 :fallback-mode="sandboxFallback"
                 @pending-change="(m) => (pendingSandboxMode = m)"

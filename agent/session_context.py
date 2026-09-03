@@ -96,6 +96,9 @@ class SessionStore:
         """
         where = []
         params: list = []
+        # 侧边会话（channel='aside'）永不进列表：内容隔离于主对话，用完即走。
+        # IM 渠道（feishu/telegram 等）仍需出现，故只排除 aside 一种。
+        where.append("(channel IS NULL OR channel != 'aside')")
         if not include_archived:
             where.append("archived=0")
         if project_id is None:
@@ -158,6 +161,13 @@ class SessionStore:
             (1 if pinned else 0, _now() if pinned else None, sid))
 
     def delete_session(self, sid: str) -> None:
+        # 级联删除派生的侧边会话（channel='aside' 且 from_session 指向本会话）：
+        # 侧边会话绑定主会话，主会话删除时其侧边留痕一并回收。各子会话走完整
+        # 清理（图片/摘要/关联表），故这里递归调用而非仅删行。
+        for child in self.db.query_all(
+                "SELECT session_id FROM sessions "
+                "WHERE from_session=? AND channel='aside'", (sid,)):
+            self.delete_session(child["session_id"])
         self._cleanup_images(
             "SELECT images FROM conversations WHERE session_id=? AND images IS NOT NULL",
             (sid,))
@@ -746,6 +756,7 @@ class SessionStore:
             for r in self.db.query_all(
                 "SELECT session_id, title FROM sessions "
                 "WHERE title LIKE ? ESCAPE '\\' "
+                "AND (channel IS NULL OR channel != 'aside') "
                 "ORDER BY pinned DESC, last_active DESC LIMIT ?",
                 (like_pat, limit)):
                 title_hits[r["session_id"]] = _highlight_plain(r["title"], q)
@@ -771,8 +782,10 @@ class SessionStore:
                            bm25(conversations_fts) AS score
                     FROM conversations c
                     JOIN conversations_fts ON c.id = conversations_fts.rowid
+                    JOIN sessions s ON s.session_id = c.session_id
                     WHERE conversations_fts MATCH ?
-                      AND c.message_type = 'normal'{role_sql}
+                      AND c.message_type = 'normal'
+                      AND (s.channel IS NULL OR s.channel != 'aside'){role_sql}
                     ORDER BY score
                     LIMIT ?
                     """,

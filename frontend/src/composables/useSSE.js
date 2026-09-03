@@ -20,9 +20,12 @@ export function useSSE() {
     onError,
     handoffPath,
     reasoningEffort = 'high',
+    // 是否把本次 crid 写入全局 sp_active_crid（刷新后续推的锚点）。
+    // 侧边会话是临时窗口、刷新即弃，传 false 以免覆盖主对话的续推锚点。
+    trackActive = true,
   }) {
     const crid = clientRequestId || genId()
-    sessionStorage.setItem('sp_active_crid', crid)
+    if (trackActive) sessionStorage.setItem('sp_active_crid', crid)
     // 首次发送携带 message；断线重连时同 crid 重推（服务端缓冲区断点续推）
     const MAX_RETRY = 2
     let attempt = 0
@@ -86,7 +89,7 @@ export function useSSE() {
         await new Promise((r) => setTimeout(r, 800 * attempt))
       }
     }
-    sessionStorage.removeItem('sp_active_crid')
+    if (trackActive) sessionStorage.removeItem('sp_active_crid')
   }
 
   function abort() {

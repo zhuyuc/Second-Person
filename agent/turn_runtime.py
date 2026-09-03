@@ -63,11 +63,16 @@ class TurnRuntime:
         max_steps = int(self.config.get(
             "agent_max_steps", _mem_const.AGENT_MAX_STEPS))
         tracer = get_tracer()
+        # 侧边会话（channel='aside'）在 Langfuse 打 tag，便于按会话类型独立分析。
+        _ch_row = self.db.query_one(
+            "SELECT channel FROM sessions WHERE session_id=?", (session_id,))
+        _is_aside = bool(_ch_row and _ch_row["channel"] == "aside")
         trace = tracer.trace_start(
             "agent.turn", session_id=session_id,
             input={"message_chars": len(message), "images": len(images or [])},
             metadata={"request_id": client_request_id, "reasoning_effort": reasoning_effort,
-                      "contract_version": "v2"})
+                      "contract_version": "v2", "channel": (_ch_row["channel"] if _ch_row else None)},
+            tags=(["aside"] if _is_aside else None))
         turn = self.events.start_turn(session_id, reasoning_effort=reasoning_effort,
                                       max_steps=max_steps, request_id=client_request_id,
                                       langfuse_trace_id=getattr(trace, "id", None))
@@ -79,6 +84,9 @@ class TurnRuntime:
         system_parts: list[str] = []
         decision_notices: list[dict[str, Any]] = []
         tool_events: list[dict[str, Any]] = []
+        # 图形工具产出的可视化（render_flowchart/render_mermaid），随最终消息持久化，
+        # 供刷新后 DiagramRenderer 恢复渲染；实时渲染走 tool_visual SSE 事件。
+        turn_visuals: list[dict[str, Any]] = []
         # v7：交错时间线——按事件到达顺序 append reasoning 段与 tool_call 卡片，
         # 前端按此重放"想 → 调 → 想 → 调"的因果链。相邻同类事件自动合并/更新。
         # 结构：{"kind": "reasoning", "text": "..."} 或
@@ -491,6 +499,7 @@ class TurnRuntime:
                         session_id, "assistant", content,
                         thinking="".join(thinking_parts) or None,
                         analysis_metadata=analysis_metadata,
+                        visuals=turn_visuals or None,
                         parent_id=assistant_parent_id,
                         version_group_id=assistant_version_group_id)
                     self.events.append(turn_id, "assistant.message", actor="model", step=step,
@@ -534,6 +543,13 @@ class TurnRuntime:
                                                                 "reasoning_content": "".join(step_reasoning_parts)[:12000]})
                 results = await self._run_tool_calls(turn_id, step, tool_calls, runtime_emit,
                                                      repeat_guard)
+                # 收集图形工具产出，随最终消息持久化（刷新后可恢复渲染）
+                for _tr in results:
+                    if _tr.get("ok") and _tr.get("tool") in (
+                            "render_flowchart", "render_mermaid"):
+                        _vd = _tr.get("result")
+                        if isinstance(_vd, dict) and _vd.get("type"):
+                            turn_visuals.append({"type": _vd["type"], "data": _vd})
                 tool_ms = sum(int(result.get("_duration_ms", 0) or 0)
                               for result in results)
                 if tool_ms:
