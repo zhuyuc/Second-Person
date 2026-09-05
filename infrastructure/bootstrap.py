@@ -29,6 +29,8 @@ DATA_SUBDIRS = [
     "backups",
     "temp",
     "temp/attachments",
+    "temp/exports",
+    "temp/spills",
     "workspace",
 ]
 

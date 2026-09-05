@@ -19,6 +19,10 @@ def summarize_tool_result(result: Any) -> str:
     try:
         if isinstance(result, str):
             text = result
+            if "内容已截断" in text:
+                text = "已截断 · " + text
+            elif "完整结果：" in text:
+                text = "已落盘 · " + text
         elif isinstance(result, dict):
             for key in ("summary", "preview", "content", "path", "matches",
                          "total_lines", "action"):
@@ -89,13 +93,16 @@ def format_turn_time() -> str | None:
     改到 messages 尾部，只影响尾部一小段 tokens，system + tools + history
     保持字节稳定，DeepSeek 官方 prefix cache 命中率显著提升。
 
-    文本极简化 + 精度降为"天"（T1+T2）：去掉冗余说明，只保留 [北京时间] +
-    YYYY-MM-DD。同一天内所有 turn 的 context.time 字节完全相同，直接可命中
-    prefix cache；模型仍能通过日期计算星期几，聊天场景下"精确到天"足够，
-    真需要精确时刻可由 datetime_now 工具按需返回。
+    精度为"天"：同一天内所有 turn 的 context.time 字节完全相同，可命中
+    prefix cache。必须显式带上中文星期——仅给 YYYY-MM-DD 时模型常推错
+    星期（例如 2026-09-05 实为周六却回成周五）。真需要精确时刻可由
+    datetime_now 工具按需返回。
     """
     try:
         now = now_cst()
-        return f"[北京时间] {now:%Y-%m-%d}"
+        # Python: Monday=0 … Sunday=6
+        weekdays = ("星期一", "星期二", "星期三", "星期四",
+                    "星期五", "星期六", "星期日")
+        return f"[北京时间] {now:%Y-%m-%d} {weekdays[now.weekday()]}"
     except Exception:  # noqa: BLE001
         return None

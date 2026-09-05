@@ -561,7 +561,37 @@ function onDragLeave(e) {
   // 仅当离开整个 composer（而非移到子元素）才取消高亮
   if (!e.currentTarget.contains(e.relatedTarget)) dragOver.value = false
 }
-function onDrop(e) {
+// ---- 编辑态附件的上传入口（复用 uploadFiles，目标数组为 editAtts）----
+const editDragOver = ref(false)
+const editFileInput = ref(null)
+function triggerEditFile() {
+  editFileInput.value && editFileInput.value.click()
+}
+function onEditFilePick(e) {
+  uploadFiles(e.target.files, editAtts, 'new')
+  e.target.value = ''
+}
+function onEditDragLeave(e) {
+  if (!e.currentTarget.contains(e.relatedTarget)) editDragOver.value = false
+}
+function onEditDrop(e) {
+  editDragOver.value = false
+  onDrop(e, editAtts, 'new')
+}
+// 包装：模板里 <script setup> 会把 editAtts 自动解包成数组，
+// 不能直接把它当 ref 传给 removeAttachment，这里在 setup 作用域内传真正的 ref。
+function removeEditAtt(i) {
+  removeAttachment(i, editAtts)
+}
+// 从图片 URL（/chat-images/xxx.png）取文件名，供后端 keep_image_names 匹配
+function imgBasename(url) {
+  try {
+    return String(url).split('?')[0].split('#')[0].split('/').pop() || url
+  } catch {
+    return url
+  }
+}
+function onDrop(e, target = attachments, origin = undefined) {
   dragOver.value = false
   const dt = e.dataTransfer
   if (!dt) return
@@ -572,15 +602,17 @@ function onDrop(e) {
       .map((it) => it.getAsFile())
       .filter(Boolean)
   }
-  if (files.length) uploadFiles(files)
+  if (files.length) uploadFiles(files, target, origin)
 }
-async function uploadFiles(fileList) {
+// target：附件落到哪个数组（默认 composer 的 attachments，编辑态传 editAtts）。
+// origin：编辑态新增项传 'new'，供 submitEdit 区分"保留旧附件/本次新增"。
+async function uploadFiles(fileList, target = attachments, origin = undefined) {
   const MAX = 5
-  if (attachments.value.length >= MAX) {
-    toast.push('warning', `最多上传 ${MAX} 个文件，当前已有 ${attachments.value.length} 个`)
+  if (target.value.length >= MAX) {
+    toast.push('warning', `最多上传 ${MAX} 个文件，当前已有 ${target.value.length} 个`)
     return
   }
-  const allowed = Array.from(fileList).slice(0, MAX - attachments.value.length)
+  const allowed = Array.from(fileList).slice(0, MAX - target.value.length)
   if (fileList.length > allowed.length) {
     toast.push('warning', `一次最多上传 ${MAX} 个文件，已自动截取前 ${allowed.length} 个`)
   }
@@ -590,16 +622,16 @@ async function uploadFiles(fileList) {
       // 图片：读为 base64 dataURL 直接作多模态内容发送，无需文本解析
       const preview = URL.createObjectURL(f)
       const dataUrl = await readAsDataURL(f)
-      attachments.value.push({ name: f.name, uploading: false, isImage: true, preview, dataUrl })
+      target.value.push({ name: f.name, uploading: false, isImage: true, preview, dataUrl, origin })
       continue
     }
-    const item = { name: f.name, uploading: true, isImage: false }
-    const idx = attachments.value.push(item) - 1
+    const item = { name: f.name, uploading: true, isImage: false, origin }
+    const idx = target.value.push(item) - 1
     try {
       const fd = new FormData()
       fd.append('file', f)
       const d = await chatApi.uploadAttachment(fd)
-      attachments.value[idx] = {
+      target.value[idx] = {
         name: d.filename,
         chars: d.chars,
         text: d.text,
@@ -608,10 +640,11 @@ async function uploadFiles(fileList) {
         uploading: false,
         isImage: false,
         file: f,
+        origin,
       }
       if (!d.parsed) toast.push('warning', `「${d.filename}」未能解析出文本内容`)
     } catch {
-      attachments.value[idx] = { name: f.name, uploading: false, error: true, isImage: false }
+      target.value[idx] = { name: f.name, uploading: false, error: true, isImage: false, origin }
     }
   }
 }
@@ -623,10 +656,11 @@ function readAsDataURL(f) {
     r.readAsDataURL(f)
   })
 }
-function removeAttachment(i) {
-  const a = attachments.value[i]
-  if (a && a.isImage && a.preview) URL.revokeObjectURL(a.preview)
-  attachments.value.splice(i, 1)
+function removeAttachment(i, target = attachments) {
+  const a = target.value[i]
+  // 仅本地新建的 blob 预览需要 revoke；编辑态保留的旧图是服务端 URL，不能 revoke
+  if (a && a.isImage && a.preview && a.origin !== 'existing') URL.revokeObjectURL(a.preview)
+  target.value.splice(i, 1)
 }
 function clearAttachments(opts = {}) {
   const keep = opts.keepPreviews
@@ -1479,11 +1513,38 @@ async function submitFeedback() {
 // ---- 消息编辑 ----
 const editingId = ref(null)
 const editText = ref('')
+// 编辑态附件集合，形态与 composer 的 attachments 对齐；
+// origin: 'existing' 表示被编辑消息原有的附件，'new' 表示编辑时新增。
+const editAtts = ref([])
 
-function startEdit(msg) {
+async function startEdit(msg) {
   if (generating.value) return
+  // 保底：文档附件正文（text）用于重建【附件：】前缀。历史/重拉消息经
+  // extractAttachments 已带 text；极少数刚发出的非粘贴附件可能缺失 → 先重拉。
+  const needReload = (msg.atts || []).some(
+    (a) =>
+      !a.isImage &&
+      a.kind !== 'quote' &&
+      !a.pasted &&
+      (a.text === null || a.text === undefined),
+  )
+  if (needReload && currentSid.value) {
+    await reloadMessages(currentSid.value)
+    const again = messages.value.find((m) => m.id === msg.id)
+    if (again) msg = again
+  }
   editingId.value = msg.id
   editText.value = msg.content
+  editAtts.value = [
+    ...(msg.atts || []).map((a) => ({ ...a, origin: 'existing' })),
+    // 图片以服务端 URL 呈现；name 存 basename 供后端保留匹配
+    ...(msg.images || []).map((url) => ({
+      isImage: true,
+      origin: 'existing',
+      name: imgBasename(url),
+      preview: url,
+    })),
+  ]
   nextTick(() => {
     const el = document.querySelector('.edit-textarea')
     if (el) {
@@ -1494,16 +1555,75 @@ function startEdit(msg) {
   })
 }
 function cancelEdit() {
+  // 仅 revoke 本次新建的 blob 预览；保留的旧图是服务端 URL，不能 revoke
+  for (const a of editAtts.value) {
+    if (a.isImage && a.origin === 'new' && a.preview) URL.revokeObjectURL(a.preview)
+  }
   editingId.value = null
   editText.value = ''
+  editAtts.value = []
 }
 
 async function submitEdit(msg) {
   const text = editText.value.trim()
-  if (!text || text === msg.content) {
+  // 附件仍在解析中：等待完成再提交，避免丢正文
+  if (editAtts.value.some((a) => a.uploading)) {
+    toast.push('warning', '附件解析中，请稍候')
+    return
+  }
+  // 拆分最终附件集合：文档（保留+新增）/ 保留的旧图 / 新增的图
+  const docs = editAtts.value.filter((a) => !a.isImage && (a.text || a.kind === 'quote'))
+  const keepImages = editAtts.value.filter((a) => a.isImage && a.origin === 'existing')
+  const newImageItems = editAtts.value.filter((a) => a.isImage && a.origin === 'new' && a.dataUrl)
+  const newImages = newImageItems.map((a) => a.dataUrl)
+  const keepImageNames = keepImages.map((a) => a.name)
+  const newKbFiles = docs.filter((a) => a.origin === 'new' && a.file).map((a) => a.file)
+
+  // 无实质内容 → 取消
+  if (!text && !docs.length && !keepImages.length && !newImages.length) {
     cancelEdit()
     return
   }
+  // 文本与附件均无变化 → 不产生冗余版本
+  const origAttCount = (msg.atts?.length || 0) + (msg.images?.length || 0)
+  const curExistingCount = editAtts.value.filter((a) => a.origin === 'existing').length
+  const hasNew = editAtts.value.some((a) => a.origin === 'new')
+  const attsUnchanged = !hasNew && curExistingCount === origAttCount
+  if (text === (msg.content || '') && attsUnchanged) {
+    cancelEdit()
+    return
+  }
+
+  // 与 send() 同款：文档/引用块 + \n---\n + 正文，交给后端作上下文
+  let backendMsg = text
+  if (docs.length) {
+    const blocks = docs
+      .map((a) => {
+        if (a.kind === 'quote') {
+          const base = `【选中的文本】\n${a.text || ''}`
+          return a.comment ? `${base}\n\n【用户评论】\n${a.comment}` : base
+        }
+        return `【附件：${a.name}】\n${a.text || ''}`
+      })
+      .join('\n\n')
+    backendMsg = blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
+  }
+  if (!backendMsg && (newImages.length || keepImages.length)) backendMsg = '请看图并回应。'
+
+  // 气泡附件（保留原有的展示形态）：文档带 kind/comment/pasted，图片用 preview/URL
+  const bubbleAtts = docs.map((a) => ({
+    name: a.name,
+    pasted: !!a.pasted,
+    kind: a.kind,
+    comment: a.comment,
+    text: a.pasted ? a.text : undefined,
+    file: a.origin === 'new' ? a.file : undefined,
+    chars: a.chars,
+  }))
+  const bubbleImages = [...keepImages.map((a) => a.preview), ...newImageItems.map((a) => a.preview)]
+  // 已随气泡送出的新图 blob preview 不能在清理时 revoke（否则气泡图立即失效）
+  const sentPreviews = new Set(newImageItems.map((a) => a.preview))
+
   const editMsgId = msg.id
   editingId.value = null
   editText.value = ''
@@ -1519,10 +1639,20 @@ async function submitEdit(msg) {
     citations: [],
     feedback: 0,
     create_time: nowLocalIso(),
-    images: msg.images || [],
-    atts: msg.atts || [],
+    images: bubbleImages,
+    atts: bubbleAtts,
     has_branches: false,
   })
+  // 清空编辑态（保留已送出的新图 preview 不 revoke）
+  for (const a of editAtts.value) {
+    if (a.isImage && a.origin === 'new' && a.preview && !sentPreviews.has(a.preview)) {
+      URL.revokeObjectURL(a.preview)
+    }
+  }
+  editAtts.value = []
+  // 编辑时新增的文档附件同样异步入库
+  newKbFiles.forEach((f) => ingestToKb(f))
+
   beginStream(currentSid.value)
   maybeScroll()
   streamPushSuppressed.value = true
@@ -1530,8 +1660,11 @@ async function submitEdit(msg) {
   try {
     await sse.send({
       sessionId: currentSid.value,
-      message: text,
+      message: backendMsg,
       editMessageId: editMsgId,
+      attachmentsOverridden: true,
+      keepImageNames,
+      images: newImages.length ? newImages : undefined,
       location: geoEnabled.value ? cachedLocation() : undefined,
       reasoningEffort: reasoningEffort.value,
       clientRequestId: streamCrid.value,
@@ -2168,7 +2301,7 @@ onUnmounted(() => {
                     <i class="ti ti-chevron-right"></i>
                   </button>
                 </div>
-                <div v-if="m.atts && m.atts.length" class="attach-row">
+                <div v-if="m.atts && m.atts.length && editingId !== m.id" class="attach-row">
                   <span
                     v-for="(f, fi) in m.atts"
                     :key="fi"
@@ -2202,7 +2335,7 @@ onUnmounted(() => {
                     >
                   </span>
                 </div>
-                <div v-if="m.images && m.images.length" class="attach-row">
+                <div v-if="m.images && m.images.length && editingId !== m.id" class="attach-row">
                   <img
                     v-for="(im, ii) in m.images"
                     :key="ii"
@@ -2211,8 +2344,57 @@ onUnmounted(() => {
                     @click="openBubbleImage(im)"
                   />
                 </div>
-                <!-- 编辑态：textarea + 提交/取消 -->
-                <div v-if="editingId === m.id" class="max-w-bubble">
+                <!-- 编辑态：附件（可增删）+ textarea + 提交/取消 -->
+                <div
+                  v-if="editingId === m.id"
+                  class="max-w-bubble edit-box"
+                  :class="{ dragover: editDragOver }"
+                  @dragenter.prevent="editDragOver = true"
+                  @dragover.prevent="editDragOver = true"
+                  @dragleave.prevent="onEditDragLeave"
+                  @drop.prevent.stop="onEditDrop"
+                >
+                  <!-- 可增删的附件胶囊（复用 composer 样式） -->
+                  <div v-if="editAtts.length" class="attach-chips">
+                    <span
+                      v-for="(a, ai) in editAtts"
+                      :key="ai"
+                      class="attach-chip"
+                      :class="{ 'attach-quote': a.kind === 'quote' }"
+                    >
+                      <img
+                        v-if="a.isImage && a.preview"
+                        :src="a.preview"
+                        class="attach-thumb"
+                        loading="lazy"
+                        decoding="async"
+                        alt=""
+                      />
+                      <i
+                        v-else
+                        class="ti"
+                        :class="
+                          a.uploading
+                            ? 'ti-loader-2'
+                            : a.error
+                              ? 'ti-alert-triangle'
+                              : a.kind === 'quote'
+                                ? 'ti-quote'
+                                : a.pasted
+                                  ? 'ti-clipboard-text'
+                                  : 'ti-paperclip'
+                        "
+                      ></i>
+                      {{ a.name }}
+                      <span v-if="a.uploading" class="muted">解析中…</span>
+                      <span v-else-if="a.error" class="dang">失败</span>
+                      <span v-else-if="a.isImage" class="muted">图片</span>
+                      <span v-else-if="!a.isImage && !a.parsed && a.origin === 'new'" class="dang"
+                        >无文本</span
+                      >
+                      <i class="ti ti-x cursor-pointer" @click.stop="removeEditAtt(ai)"></i>
+                    </span>
+                  </div>
                   <textarea
                     v-model="editText"
                     class="edit-textarea"
@@ -2227,9 +2409,21 @@ onUnmounted(() => {
                     @keydown.escape="cancelEdit"
                   ></textarea>
                   <div class="edit-actions">
+                    <i
+                      class="ti ti-paperclip edit-add-att"
+                      title="添加附件（可拖入文件）"
+                      @click="triggerEditFile"
+                    ></i>
                     <button class="edit-cancel-btn" @click="cancelEdit">取消</button>
                     <button class="edit-submit-btn" @click="submitEdit(m)">提交修改</button>
                   </div>
+                  <input
+                    ref="editFileInput"
+                    type="file"
+                    multiple
+                    class="hidden-input"
+                    @change="onEditFilePick"
+                  />
                 </div>
                 <!-- 普通态 -->
                 <div v-else>

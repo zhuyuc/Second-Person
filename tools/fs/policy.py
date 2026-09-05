@@ -73,13 +73,17 @@ class PolicyStore:
 
     def __init__(self, db, projects_store, config, *,
                  legacy_workspace: Path,
-                 legacy_whitelist: list[Path] | None = None):
+                 legacy_whitelist: list[Path] | None = None,
+                 spill_read_root: Path | None = None):
         self.db = db
         self.projects = projects_store
         self.config = config
         self.legacy_workspace = Path(legacy_workspace).resolve()
         self.legacy_whitelist = [Path(p).resolve()
                                   for p in (legacy_whitelist or [])]
+        # 工具结果溢写目录：只读并入 read_roots，供 fs_read/fs_grep 续读
+        self.spill_read_root = (
+            Path(spill_read_root).resolve() if spill_read_root else None)
 
     def resolve(self, session_id: str) -> SandboxPolicy:
         row = self.db.query_one(
@@ -143,15 +147,16 @@ class PolicyStore:
         else:
             work_roots = (self.legacy_workspace, *self.legacy_whitelist)
 
+        read_roots = self._with_spill_root(work_roots)
         if mode == "read-only":
             return SandboxPolicy(
                 mode=mode, project_id=project_id, project_root=project_root,
-                writable_roots=(), read_roots=work_roots,
+                writable_roots=(), read_roots=read_roots,
                 shell_enabled=False)
         if mode == "workspace-write":
             return SandboxPolicy(
                 mode=mode, project_id=project_id, project_root=project_root,
-                writable_roots=work_roots, read_roots=work_roots,
+                writable_roots=work_roots, read_roots=read_roots,
                 shell_enabled=False)
         if mode == "danger-full-access":
             # 全盘：writable/read 空集 → 工具层判定跳围栏
@@ -164,4 +169,11 @@ class PolicyStore:
         logger.warning("未知沙箱档位 %s，降级 read-only", mode)
         return SandboxPolicy(
             mode="read-only", project_id=project_id, project_root=project_root,
-            writable_roots=(), read_roots=work_roots)
+            writable_roots=(), read_roots=read_roots)
+
+    def _with_spill_root(self, roots: tuple[Path, ...]) -> tuple[Path, ...]:
+        if not self.spill_read_root:
+            return roots
+        if self.spill_read_root in roots:
+            return roots
+        return (*roots, self.spill_read_root)

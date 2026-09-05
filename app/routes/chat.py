@@ -178,6 +178,8 @@ async def chat_send(request: Request):
     images = payload.images
     regen_id = payload.regenerate_message_id
     edit_message_id = payload.edit_message_id
+    attachments_overridden = payload.attachments_overridden
+    keep_image_names = payload.keep_image_names
     location = payload.location
     handoff_path = payload.handoff_path
     reasoning_effort = payload.reasoning_effort
@@ -221,31 +223,60 @@ async def chat_send(request: Request):
         if orig:
             edit_parent_id = orig["parent_id"]
             edit_version_group_id = orig["version_group_id"] or orig["id"]
-            # 编辑时继承附件：当前版本可能无附件（修复前创建），
-            # 从同 version_group 所有兄弟版本中查找有附件的记录
-            if not images:
-                img_row = c.db.query_one(
-                    "SELECT images FROM conversations "
-                    "WHERE version_group_id=? AND images IS NOT NULL "
-                    "ORDER BY id LIMIT 1",
-                    (edit_version_group_id,))
-                if img_row and img_row["images"]:
-                    images = await asyncio.to_thread(
-                        _load_images_as_data_uri,
-                        c.sessions.data_dir, json.loads(img_row["images"]))
-            # 编辑时继承文档附件上下文（【附件：...】前缀）
-            att_content = orig["content"] or ""
-            if "\n---\n" not in att_content or "【附件：" not in att_content:
-                att_row = c.db.query_one(
-                    "SELECT content FROM conversations "
-                    "WHERE version_group_id=? AND content LIKE '%【附件：%' "
-                    "ORDER BY id LIMIT 1",
-                    (edit_version_group_id,))
-                if att_row:
-                    att_content = att_row["content"] or ""
-            if "\n---\n" in att_content and "【附件：" in att_content:
-                att_prefix = att_content.rsplit("\n---\n", 1)[0]
-                message = att_prefix + "\n---\n" + message
+            if attachments_overridden:
+                # 前端已接管附件：message 已包含用户确认的【附件：】前缀，
+                # 后端不再重建文档前缀；图片仅继承 keep_image_names 命中的旧图，
+                # 再拼接前端本次新上传的 images（data URI）。
+                kept: list[str] = []
+                if keep_image_names:
+                    keep_set = set(keep_image_names)
+                    rows = c.db.query_all(
+                        "SELECT images FROM conversations "
+                        "WHERE version_group_id=? AND images IS NOT NULL",
+                        (edit_version_group_id,))
+                    ordered: list[str] = []
+                    seen: set[str] = set()
+                    for r in rows:
+                        try:
+                            for fname in json.loads(r["images"]) or []:
+                                if fname in keep_set and fname not in seen:
+                                    seen.add(fname)
+                                    ordered.append(fname)
+                        except (TypeError, ValueError):
+                            continue
+                    if ordered:
+                        loaded = await asyncio.to_thread(
+                            _load_images_as_data_uri, c.sessions.data_dir, ordered)
+                        kept = loaded or []
+                images = kept + (images or [])
+                images = images or None
+            else:
+                # 旧行为（兼容未升级前端）：自动继承附件。
+                # 编辑时继承附件：当前版本可能无附件（修复前创建），
+                # 从同 version_group 所有兄弟版本中查找有附件的记录
+                if not images:
+                    img_row = c.db.query_one(
+                        "SELECT images FROM conversations "
+                        "WHERE version_group_id=? AND images IS NOT NULL "
+                        "ORDER BY id LIMIT 1",
+                        (edit_version_group_id,))
+                    if img_row and img_row["images"]:
+                        images = await asyncio.to_thread(
+                            _load_images_as_data_uri,
+                            c.sessions.data_dir, json.loads(img_row["images"]))
+                # 编辑时继承文档附件上下文（【附件：...】前缀）
+                att_content = orig["content"] or ""
+                if "\n---\n" not in att_content or "【附件：" not in att_content:
+                    att_row = c.db.query_one(
+                        "SELECT content FROM conversations "
+                        "WHERE version_group_id=? AND content LIKE '%【附件：%' "
+                        "ORDER BY id LIMIT 1",
+                        (edit_version_group_id,))
+                    if att_row:
+                        att_content = att_row["content"] or ""
+                if "\n---\n" in att_content and "【附件：" in att_content:
+                    att_prefix = att_content.rsplit("\n---\n", 1)[0]
+                    message = att_prefix + "\n---\n" + message
             # 同组旧版本停用
             c.db.execute(
                 "UPDATE conversations SET is_active=0 WHERE version_group_id=?",

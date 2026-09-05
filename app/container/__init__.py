@@ -200,7 +200,8 @@ class AppContainer:
         self.policy_store = PolicyStore(
             self.db, self.projects, self.config,
             legacy_workspace=self.sandbox.workspace,
-            legacy_whitelist=self.sandbox.whitelist)
+            legacy_whitelist=self.sandbox.whitelist,
+            spill_read_root=d / "temp" / "spills")
         self.workspace_resolver = WorkspaceResolver(self.policy_store)
         register_fs_tools(self.registry,
                           observation_store=self.fs_observations,
@@ -226,7 +227,8 @@ class AppContainer:
         # ---- Agent Core ----
         self.tool_executor = ToolExecutor(
             self.registry, self.config, self.notifier,
-            workspace_resolver=self.workspace_resolver)
+            workspace_resolver=self.workspace_resolver,
+            data_dir=d)
         self.signals = SignalCollector(self.db)
         self.core = AgentCore(
             db=self.db, config=self.config, session_store=self.sessions,
@@ -326,6 +328,20 @@ class AppContainer:
                     pass
         return n
 
+    def _cleanup_spills(self, days: int | None = None) -> int:
+        """清理 temp/spills 下超期的工具结果溢写文件（夜间链）。"""
+        from memory import _constants as _mem_const
+        from tools.hooks import cleanup_temp_spills
+        ttl = days if days is not None else int(
+            getattr(_mem_const, "TOOL_SPILL_TTL_DAYS", 7))
+        raw = self.config.get_raw("tool_spill", {}) or {}
+        if isinstance(raw, dict) and raw.get("ttl_days") is not None:
+            try:
+                ttl = int(raw["ttl_days"])
+            except (TypeError, ValueError):
+                pass
+        return cleanup_temp_spills(self.data_dir, ttl)
+
     def _register_scheduled_tasks(self) -> None:
         s = self.scheduler
         # 夜间维护链
@@ -338,7 +354,8 @@ class AppContainer:
                              .isoformat(timespec="seconds"),)))
         s.register_task("temp_cleanup", "接收文件缓存清理",
                         lambda: (self.ingest.cleanup_temp_attachments(7),
-                                 self._cleanup_exports(7)))
+                                 self._cleanup_exports(7),
+                                 self._cleanup_spills(7)))
         s.register_task("log_cleanup", "日志清理", lambda: (
             s.purge_old_logs(), self.oplog.purge_expired(90),
             self.migration_runner.purge_old_backups(30),

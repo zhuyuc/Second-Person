@@ -962,20 +962,15 @@ code {
   margin-bottom: 20px;
 }
 
-/* 消息悬浮时间：默认隐藏，hover 用户/AI 消息时淡入显示（精确到秒） */
+/* 消息时间：常驻显示（精确到秒） */
 .msg-time {
   font-size: 11px;
   color: var(--muted);
-  opacity: 0;
+  opacity: 1;
   transition: opacity var(--dur, 0.2s);
   align-self: center;
   white-space: nowrap;
   user-select: none;
-}
-
-.msg-user:hover .msg-time,
-.msg-ai:hover .msg-time {
-  opacity: 1;
 }
 
 /* 用户气泡：元宝式浅底小气泡，不再大面积品牌色。宽度受外层 .max-w-user 统一约束 */
@@ -3616,9 +3611,29 @@ button.btn-danger:hover {
 }
 .edit-actions {
   display: flex;
+  align-items: center;
   gap: var(--sp-2);
   justify-content: flex-end;
   margin-top: 6px;
+}
+/* 编辑态「添加附件」按钮：靠左，其余按钮被推到右侧 */
+.edit-add-att {
+  margin-right: auto;
+  color: var(--sec);
+  cursor: pointer;
+  font-size: 18px;
+  transition: color var(--dur-fast);
+}
+.edit-add-att:hover {
+  color: var(--brand-solid);
+}
+/* 编辑态拖入文件高亮 */
+.edit-box {
+  border-radius: var(--radius-sm);
+  transition: box-shadow var(--dur-fast);
+}
+.edit-box.dragover {
+  box-shadow: 0 0 0 2px var(--brand-solid);
 }
 .msg-actions-mt {
   margin-top: var(--sp-2);

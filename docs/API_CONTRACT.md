@@ -28,6 +28,8 @@
 | `client_request_id` | string | 可选重连键，最长 120 字符 |
 | `images` | string[] | 可选图片 data URI |
 | `regenerate_message_id` / `edit_message_id` | positive integer | 可选版本操作目标 |
+| `attachments_overridden` | boolean | 编辑消息时前端已接管附件；置真后后端不再自动重建旧附件，完全信任本次 `message`（含【附件：】前缀）与 `images`。缺省 `false`（旧行为：自动继承附件） |
+| `keep_image_names` | string[] | 仅 `attachments_overridden=true` 时生效：编辑时需保留的原图文件名（basename）；后端据此从同版本组筛选旧图并与新上传 `images` 合并 |
 | `location` | string | 可选位置摘要，最长 60 字符 |
 | `handoff_path` | string | 可选会话交接摘要路径，最长 240 字符 |
 | `reasoning_effort` | `off` / `low` / `high` / `max` | 单轮推理预算；缺省为 `high` |

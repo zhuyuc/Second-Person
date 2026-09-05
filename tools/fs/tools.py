@@ -447,7 +447,7 @@ def register_fs_tools(registry: ToolRegistry, *, observation_store, config) -> N
         return s
 
     registry.register_function(_spec(
-        "fs_read", "读取项目内文本文件；返回带行号的分页内容。"
+        "fs_read", "读取文本文件（项目内路径，或工具 spill 落盘路径）；返回带行号的分页内容。"
         "写入/编辑前必须先调用。",
         {"type": "object", "properties": {
             "path": {"type": "string", "description": "文件路径（相对项目根或绝对）"},

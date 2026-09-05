@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from tools import hooks
@@ -13,12 +15,14 @@ logger = logging.getLogger("second_person.tool_exec")
 class ToolExecutor:
     def __init__(self, registry, config,
                  notifier: Callable[[str, str], None] | None = None,
-                 workspace_resolver=None):
+                 workspace_resolver=None,
+                 data_dir=None):
         self.registry = registry
         self.config = config
         self.notify = notifier or (lambda _topic, _message: None)
         # M3：fs 工具族依赖此解析器；无解析器时 fs_* 工具不会被注册，无影响
         self.workspace_resolver = workspace_resolver
+        self.data_dir = Path(data_dir) if data_dir else None
 
     async def execute_tool(self, tool_name: str, params: dict, *,
                            intent_summary: str = "",
@@ -62,6 +66,18 @@ class ToolExecutor:
         if injection_hit:
             logger.warning("工具输出疑似含注入指令，已隔离标注：%s", tool_name)
             self.notify("injection_guard", f"工具 {tool_name} 返回的外部内容疑似包含注入指令，已隔离标注")
+        # 脱敏/隔离之后再 spill，避免磁盘残留明文密钥
+        spill_cap = hooks.resolve_spill_inline_cap(self.config)
+        if spill_cap and self.data_dir is not None:
+            redacted = hooks.maybe_spill_result(
+                redacted,
+                data_dir=self.data_dir,
+                session_id=session_id,
+                tool_name=tool_name,
+                call_id=uuid.uuid4().hex[:12],
+                max_inline_bytes=spill_cap,
+                max_file_bytes=hooks.resolve_spill_max_file_bytes(self.config),
+            )
         span.end(output={"ok": True, "redacted": credential_hit,
                          "injection": injection_hit,
                          "result": mark_preview(redacted, content_type="tool_result")})

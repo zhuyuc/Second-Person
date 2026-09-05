@@ -81,6 +81,12 @@ class ChatSendRequest(BaseModel):
     images: list[str] | None = None
     regenerate_message_id: int | None = None
     edit_message_id: int | None = None
+    # 编辑消息时前端接管附件：声明后后端不再自动重建旧附件，
+    # 完全信任本次请求携带的 message（含【附件：】前缀）与 images。
+    attachments_overridden: bool = False
+    # 编辑时需保留的原图文件名（basename）。仅在 attachments_overridden 时生效：
+    # 后端从同 version_group 里筛选命中项加载回来，再拼接前端新上传的 images。
+    keep_image_names: list[str] | None = None
     location: str | None = None
     handoff_path: str | None = None
     reasoning_effort: str | None = None
@@ -127,6 +133,24 @@ class ChatSendRequest(BaseModel):
     @classmethod
     def _validate_edit_message_id(cls, value: Any) -> int | None:
         return _optional_id(value, "edit_message_id")
+
+    @field_validator("attachments_overridden", mode="before")
+    @classmethod
+    def _validate_attachments_overridden(cls, value: Any) -> bool:
+        if value in (None, ""):
+            return False
+        if not isinstance(value, bool):
+            raise ValueError("attachments_overridden must be a boolean")
+        return value
+
+    @field_validator("keep_image_names", mode="before")
+    @classmethod
+    def _validate_keep_image_names(cls, value: Any) -> list[str] | None:
+        if value in (None, []):
+            return None
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError("keep_image_names must be a list of strings")
+        return value
 
     @field_validator("location", mode="before")
     @classmethod

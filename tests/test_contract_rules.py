@@ -53,6 +53,33 @@ def test_chat_request_contract_uses_only_reasoning_effort():
         parse_chat_send({"message": "测试", "regenerate_message_id": 0})
 
 
+def test_chat_request_edit_attachment_override_fields():
+    """编辑消息接管附件：attachments_overridden / keep_image_names 契约。"""
+    # 默认值：未升级前端不携带这两个字段
+    base = parse_chat_send({"message": "测试"})
+    assert base.attachments_overridden is False
+    assert base.keep_image_names is None
+
+    req = parse_chat_send({
+        "message": "测试",
+        "edit_message_id": "7",
+        "attachments_overridden": True,
+        "keep_image_names": ["a.png", "b.jpg"],
+    })
+    assert req.attachments_overridden is True
+    assert req.keep_image_names == ["a.png", "b.jpg"]
+
+    # 空列表归一化为 None（等价于"不保留任何旧图"由 override 语义决定）
+    assert parse_chat_send({
+        "message": "测试", "keep_image_names": []}).keep_image_names is None
+
+    # 类型校验
+    with pytest.raises(ContractValidationError, match="keep_image_names"):
+        parse_chat_send({"message": "测试", "keep_image_names": [1, 2]})
+    with pytest.raises(ContractValidationError, match="attachments_overridden"):
+        parse_chat_send({"message": "测试", "attachments_overridden": "yes"})
+
+
 def test_chat_sse_events_are_registered_and_have_terminal_semantics():
     expected = {
         "queued", "error", "reasoning_delta", "decision_notice", "tool_executing",
