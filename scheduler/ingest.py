@@ -345,6 +345,8 @@ class IngestManager:
         size_mb = len(content) / (1024 * 1024)
         if size_mb > MAX_FILE_MB:
             raise ValueError(f"文件超过 {MAX_FILE_MB} MB 上限")
+        from langfuse.integration import get_tracer
+        tracer = get_tracer()
         doc_id = self._next_doc_id()
         stored = self.raw_dir / f"{doc_id}_{filename}"
         stored.write_bytes(content)
@@ -352,6 +354,35 @@ class IngestManager:
         # 避免留下无数据库记录的孤儿文件（列表读 DB，孤儿文件永不可见/不可管理）。
         preview_mode = (not self.config.get("silent_doc_import", True)
                         and source == "web_ui")
+        trace = tracer.trace_start(
+            "ingest.file",
+            metadata={"filename": filename, "source": source,
+                      "doc_id": doc_id, "size_bytes": len(content),
+                      "preview_mode": preview_mode},
+            tags=["ingest", source])
+        try:
+            result = await self._ingest_file_body(
+                filename, content, source, progress_cb,
+                doc_id, stored, preview_mode)
+            out: dict = {"doc_id": result.get("doc_id", doc_id)}
+            if "extracted" in result:
+                out["extracted"] = result["extracted"]
+            if result.get("preview"):
+                out["preview"] = True
+                out["item_count"] = len(result.get("items") or [])
+            if "partial_failed" in result:
+                out["partial_failed"] = result["partial_failed"]
+            if "memory_ids" in result:
+                out["memory_count"] = len(result["memory_ids"])
+            trace.end(output=out)
+            return result
+        except Exception as e:  # noqa: BLE001
+            trace.end(level="ERROR", status_message=str(e)[:240])
+            raise
+
+    async def _ingest_file_body(self, filename: str, content: bytes,
+                                source: str, progress_cb, doc_id: str,
+                                stored: Path, preview_mode: bool) -> dict:
         try:
             if progress_cb:
                 await progress_cb("extracting", {})

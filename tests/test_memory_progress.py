@@ -56,6 +56,26 @@ def test_skip_summary_contains_query_snippet():
     assert "ack_shortcut" not in s or "确认" in s
 
 
+def test_compact_candidates_marks_selected():
+    from memory.retriever_progress import compact_candidates
+    from memory.retriever import Candidate
+
+    cands = [
+        Candidate(memory_id="a", title="A", summary="sa", lifecycle="active",
+                  final_score=0.9),
+        Candidate(memory_id="b", title="B", summary="sb", lifecycle="active",
+                  final_score=0.5),
+    ]
+    rows = compact_candidates(cands, selected_ids={"a"})
+    assert len(rows) == 2
+    assert rows[0]["id"] == "a" and rows[0]["selected"] is True
+    assert rows[1]["id"] == "b" and rows[1]["selected"] is False
+    # 预筛不传 selected_ids → 不带 selected 字段
+    pre = compact_candidates(cands)
+    assert "selected" not in pre[0]
+    assert pre[0]["title"] == "A" and pre[0]["summary"] == "sa"
+
+
 def test_retrieve_emits_real_progress_on_short_circuit():
     events: list[dict] = []
 

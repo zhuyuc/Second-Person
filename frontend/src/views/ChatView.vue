@@ -155,6 +155,11 @@ function onComposerKeyDown(e) {
       if (e.defaultPrevented) return
     }
   }
+  if (e.key === 'Escape' && editingId.value) {
+    e.preventDefault()
+    cancelEdit()
+    return
+  }
   if (e.key === 'Enter' && !e.shiftKey && !filePickerVisible.value) {
     e.preventDefault()
     send()
@@ -463,8 +468,9 @@ function onDocClickModelControl(e) {
 
 // 仅提示类系统通知由 useChatSession 统一处理
 
+/** 历史消息默认折叠思考过程；仅用户点开时展开。 */
 function messageThinkExpanded(m) {
-  return m.thinkOpen !== false
+  return m.thinkOpen === true
 }
 function toggleMessageThink(m) {
   m.thinkOpen = !messageThinkExpanded(m)
@@ -486,6 +492,7 @@ function trimMessagesFromEdit(editMsgId) {
 
 async function openSession(sid, opts = {}) {
   try {
+    if (editingId.value) cancelEdit()
     // aside 模式不切换全局当前会话（否则会连累主对话侧栏高亮/加载）
     if (!props.asideMode) sessStore.setCurrent(sid)
     const [msgs, metrics] = await Promise.all([fetchSessionMessages(sid), fetchSessionMetrics(sid)])
@@ -561,28 +568,6 @@ function onDragLeave(e) {
   // 仅当离开整个 composer（而非移到子元素）才取消高亮
   if (!e.currentTarget.contains(e.relatedTarget)) dragOver.value = false
 }
-// ---- 编辑态附件的上传入口（复用 uploadFiles，目标数组为 editAtts）----
-const editDragOver = ref(false)
-const editFileInput = ref(null)
-function triggerEditFile() {
-  editFileInput.value && editFileInput.value.click()
-}
-function onEditFilePick(e) {
-  uploadFiles(e.target.files, editAtts, 'new')
-  e.target.value = ''
-}
-function onEditDragLeave(e) {
-  if (!e.currentTarget.contains(e.relatedTarget)) editDragOver.value = false
-}
-function onEditDrop(e) {
-  editDragOver.value = false
-  onDrop(e, editAtts, 'new')
-}
-// 包装：模板里 <script setup> 会把 editAtts 自动解包成数组，
-// 不能直接把它当 ref 传给 removeAttachment，这里在 setup 作用域内传真正的 ref。
-function removeEditAtt(i) {
-  removeAttachment(i, editAtts)
-}
 // 从图片 URL（/chat-images/xxx.png）取文件名，供后端 keep_image_names 匹配
 function imgBasename(url) {
   try {
@@ -591,7 +576,7 @@ function imgBasename(url) {
     return url
   }
 }
-function onDrop(e, target = attachments, origin = undefined) {
+function onDrop(e) {
   dragOver.value = false
   const dt = e.dataTransfer
   if (!dt) return
@@ -602,17 +587,17 @@ function onDrop(e, target = attachments, origin = undefined) {
       .map((it) => it.getAsFile())
       .filter(Boolean)
   }
-  if (files.length) uploadFiles(files, target, origin)
+  if (files.length) uploadFiles(files)
 }
-// target：附件落到哪个数组（默认 composer 的 attachments，编辑态传 editAtts）。
-// origin：编辑态新增项传 'new'，供 submitEdit 区分"保留旧附件/本次新增"。
-async function uploadFiles(fileList, target = attachments, origin = undefined) {
+// 编辑态新增附件标 origin:'new'，供 submitEdit 区分保留/新增；普通发送不带 origin。
+async function uploadFiles(fileList) {
   const MAX = 5
-  if (target.value.length >= MAX) {
-    toast.push('warning', `最多上传 ${MAX} 个文件，当前已有 ${target.value.length} 个`)
+  const origin = editingId.value ? 'new' : undefined
+  if (attachments.value.length >= MAX) {
+    toast.push('warning', `最多上传 ${MAX} 个文件，当前已有 ${attachments.value.length} 个`)
     return
   }
-  const allowed = Array.from(fileList).slice(0, MAX - target.value.length)
+  const allowed = Array.from(fileList).slice(0, MAX - attachments.value.length)
   if (fileList.length > allowed.length) {
     toast.push('warning', `一次最多上传 ${MAX} 个文件，已自动截取前 ${allowed.length} 个`)
   }
@@ -622,16 +607,16 @@ async function uploadFiles(fileList, target = attachments, origin = undefined) {
       // 图片：读为 base64 dataURL 直接作多模态内容发送，无需文本解析
       const preview = URL.createObjectURL(f)
       const dataUrl = await readAsDataURL(f)
-      target.value.push({ name: f.name, uploading: false, isImage: true, preview, dataUrl, origin })
+      attachments.value.push({ name: f.name, uploading: false, isImage: true, preview, dataUrl, origin })
       continue
     }
     const item = { name: f.name, uploading: true, isImage: false, origin }
-    const idx = target.value.push(item) - 1
+    const idx = attachments.value.push(item) - 1
     try {
       const fd = new FormData()
       fd.append('file', f)
       const d = await chatApi.uploadAttachment(fd)
-      target.value[idx] = {
+      attachments.value[idx] = {
         name: d.filename,
         chars: d.chars,
         text: d.text,
@@ -644,7 +629,7 @@ async function uploadFiles(fileList, target = attachments, origin = undefined) {
       }
       if (!d.parsed) toast.push('warning', `「${d.filename}」未能解析出文本内容`)
     } catch {
-      target.value[idx] = { name: f.name, uploading: false, error: true, isImage: false, origin }
+      attachments.value[idx] = { name: f.name, uploading: false, error: true, isImage: false, origin }
     }
   }
 }
@@ -656,11 +641,11 @@ function readAsDataURL(f) {
     r.readAsDataURL(f)
   })
 }
-function removeAttachment(i, target = attachments) {
-  const a = target.value[i]
+function removeAttachment(i) {
+  const a = attachments.value[i]
   // 仅本地新建的 blob 预览需要 revoke；编辑态保留的旧图是服务端 URL，不能 revoke
   if (a && a.isImage && a.preview && a.origin !== 'existing') URL.revokeObjectURL(a.preview)
-  target.value.splice(i, 1)
+  attachments.value.splice(i, 1)
 }
 function clearAttachments(opts = {}) {
   const keep = opts.keepPreviews
@@ -755,6 +740,7 @@ function pushQuoteAttachment({ text, comment, sourceMsgId, sourceRole }) {
     lines: t.split('\n').length,
     sourceMsgId: sourceMsgId ?? null,
     sourceRole: sourceRole ?? null,
+    origin: editingId.value ? 'new' : undefined,
   })
 }
 function commitQuoteAttachment({ comment }) {
@@ -1313,10 +1299,16 @@ function addPastedText(text) {
     text,
     chars: text.length,
     lines: text.split('\n').length,
+    origin: editingId.value ? 'new' : undefined,
   })
 }
 
 async function send() {
+  // 编辑态：底部同一输入框提交修改，不走新建消息路径
+  if (editingId.value) {
+    await submitEdit()
+    return
+  }
   const text = input.value.trim()
   const atts = attachments.value.filter((a) => a.parsed && a.text)
   const imgs = attachments.value.filter((a) => a.isImage && a.dataUrl).map((a) => a.dataUrl)
@@ -1510,12 +1502,12 @@ async function submitFeedback() {
   toast.push('success', '反馈已记录')
 }
 
-// ---- 消息编辑 ----
+// ---- 消息编辑（复用底部 composer，不再单独做编辑框）----
 const editingId = ref(null)
-const editText = ref('')
-// 编辑态附件集合，形态与 composer 的 attachments 对齐；
-// origin: 'existing' 表示被编辑消息原有的附件，'new' 表示编辑时新增。
-const editAtts = ref([])
+// 进入编辑前暂存的草稿，取消/提交后恢复
+const composerDraft = ref(null)
+// 被编辑消息的原始快照，用于判定是否有实质修改
+const editingOrig = ref(null)
 
 async function startEdit(msg) {
   if (generating.value) return
@@ -1533,11 +1525,27 @@ async function startEdit(msg) {
     const again = messages.value.find((m) => m.id === msg.id)
     if (again) msg = again
   }
+  if (editingId.value === msg.id) {
+    nextTick(() => ta.value?.focus())
+    return
+  }
+  // 切换到另一条：丢掉当前编辑附件中的新增 blob，保留首次进入时的草稿
+  if (editingId.value) {
+    for (const a of attachments.value) {
+      if (a.isImage && a.origin === 'new' && a.preview) URL.revokeObjectURL(a.preview)
+    }
+  } else {
+    composerDraft.value = { input: input.value, attachments: attachments.value }
+  }
   editingId.value = msg.id
-  editText.value = msg.content
-  editAtts.value = [
+  editingOrig.value = {
+    content: msg.content || '',
+    attCount: (msg.atts?.length || 0) + (msg.images?.length || 0),
+  }
+  // 把消息内容灌进底部同一套 composer
+  input.value = msg.content || ''
+  attachments.value = [
     ...(msg.atts || []).map((a) => ({ ...a, origin: 'existing' })),
-    // 图片以服务端 URL 呈现；name 存 basename 供后端保留匹配
     ...(msg.images || []).map((url) => ({
       isImage: true,
       origin: 'existing',
@@ -1546,55 +1554,59 @@ async function startEdit(msg) {
     })),
   ]
   nextTick(() => {
-    const el = document.querySelector('.edit-textarea')
-    if (el) {
-      el.focus()
-      el.style.height = 'auto'
-      el.style.height = Math.min(el.scrollHeight, 200) + 'px'
-    }
+    autoGrow()
+    ta.value?.focus()
   })
 }
 function cancelEdit() {
-  // 仅 revoke 本次新建的 blob 预览；保留的旧图是服务端 URL，不能 revoke
-  for (const a of editAtts.value) {
+  // 仅 revoke 编辑过程中新建的 blob 预览
+  for (const a of attachments.value) {
     if (a.isImage && a.origin === 'new' && a.preview) URL.revokeObjectURL(a.preview)
   }
   editingId.value = null
-  editText.value = ''
-  editAtts.value = []
+  editingOrig.value = null
+  if (composerDraft.value) {
+    input.value = composerDraft.value.input
+    attachments.value = composerDraft.value.attachments
+    composerDraft.value = null
+  } else {
+    input.value = ''
+    attachments.value = []
+  }
+  nextTick(autoGrow)
 }
 
-async function submitEdit(msg) {
-  const text = editText.value.trim()
-  // 附件仍在解析中：等待完成再提交，避免丢正文
-  if (editAtts.value.some((a) => a.uploading)) {
+async function submitEdit() {
+  const msg = messages.value.find((m) => m.id === editingId.value)
+  if (!msg) {
+    cancelEdit()
+    return
+  }
+  const text = input.value.trim()
+  if (attachments.value.some((a) => a.uploading)) {
     toast.push('warning', '附件解析中，请稍候')
     return
   }
-  // 拆分最终附件集合：文档（保留+新增）/ 保留的旧图 / 新增的图
-  const docs = editAtts.value.filter((a) => !a.isImage && (a.text || a.kind === 'quote'))
-  const keepImages = editAtts.value.filter((a) => a.isImage && a.origin === 'existing')
-  const newImageItems = editAtts.value.filter((a) => a.isImage && a.origin === 'new' && a.dataUrl)
+  const docs = attachments.value.filter((a) => !a.isImage && (a.text || a.kind === 'quote'))
+  const keepImages = attachments.value.filter((a) => a.isImage && a.origin === 'existing')
+  const newImageItems = attachments.value.filter((a) => a.isImage && a.origin === 'new' && a.dataUrl)
   const newImages = newImageItems.map((a) => a.dataUrl)
   const keepImageNames = keepImages.map((a) => a.name)
   const newKbFiles = docs.filter((a) => a.origin === 'new' && a.file).map((a) => a.file)
 
-  // 无实质内容 → 取消
   if (!text && !docs.length && !keepImages.length && !newImages.length) {
     cancelEdit()
     return
   }
-  // 文本与附件均无变化 → 不产生冗余版本
-  const origAttCount = (msg.atts?.length || 0) + (msg.images?.length || 0)
-  const curExistingCount = editAtts.value.filter((a) => a.origin === 'existing').length
-  const hasNew = editAtts.value.some((a) => a.origin === 'new')
-  const attsUnchanged = !hasNew && curExistingCount === origAttCount
-  if (text === (msg.content || '') && attsUnchanged) {
+  const orig = editingOrig.value || { content: msg.content || '', attCount: 0 }
+  const curExistingCount = attachments.value.filter((a) => a.origin === 'existing').length
+  const hasNew = attachments.value.some((a) => a.origin === 'new')
+  const attsUnchanged = !hasNew && curExistingCount === orig.attCount
+  if (text === orig.content && attsUnchanged) {
     cancelEdit()
     return
   }
 
-  // 与 send() 同款：文档/引用块 + \n---\n + 正文，交给后端作上下文
   let backendMsg = text
   if (docs.length) {
     const blocks = docs
@@ -1610,7 +1622,6 @@ async function submitEdit(msg) {
   }
   if (!backendMsg && (newImages.length || keepImages.length)) backendMsg = '请看图并回应。'
 
-  // 气泡附件（保留原有的展示形态）：文档带 kind/comment/pasted，图片用 preview/URL
   const bubbleAtts = docs.map((a) => ({
     name: a.name,
     pasted: !!a.pasted,
@@ -1621,12 +1632,14 @@ async function submitEdit(msg) {
     chars: a.chars,
   }))
   const bubbleImages = [...keepImages.map((a) => a.preview), ...newImageItems.map((a) => a.preview)]
-  // 已随气泡送出的新图 blob preview 不能在清理时 revoke（否则气泡图立即失效）
   const sentPreviews = new Set(newImageItems.map((a) => a.preview))
 
   const editMsgId = msg.id
   editingId.value = null
-  editText.value = ''
+  editingOrig.value = null
+  // 提交后恢复进入编辑前的草稿（若有），否则清空
+  const draft = composerDraft.value
+  composerDraft.value = null
   if (!trimMessagesFromEdit(editMsgId)) {
     toast.push('warning', '未能同步截断旧回复，将刷新消息列表')
     await reloadMessages(currentSid.value)
@@ -1643,14 +1656,20 @@ async function submitEdit(msg) {
     atts: bubbleAtts,
     has_branches: false,
   })
-  // 清空编辑态（保留已送出的新图 preview 不 revoke）
-  for (const a of editAtts.value) {
+  // 清掉编辑附件：保留已送入气泡的新图 preview；existing 为服务端 URL 不 revoke
+  for (const a of attachments.value) {
     if (a.isImage && a.origin === 'new' && a.preview && !sentPreviews.has(a.preview)) {
       URL.revokeObjectURL(a.preview)
     }
   }
-  editAtts.value = []
-  // 编辑时新增的文档附件同样异步入库
+  if (draft) {
+    input.value = draft.input
+    attachments.value = draft.attachments
+  } else {
+    input.value = ''
+    attachments.value = []
+  }
+  nextTick(autoGrow)
   newKbFiles.forEach((f) => ingestToKb(f))
 
   beginStream(currentSid.value)
@@ -2039,6 +2058,7 @@ function autoGrow() {
 // 点击侧栏 logo：回到空白新对话（欢迎页，不立即建会话）
 // 仅断开读者不取消生成：回复继续在后台完成并落库，切回会话可见
 function resetToHome() {
+  if (editingId.value) cancelEdit()
   if (generating.value) sse.abort()
   cleanupRaf()
   sessStore.setCurrent(null)
@@ -2280,7 +2300,7 @@ onUnmounted(() => {
           >
             <!-- 用户气泡 -->
             <div v-if="m.role === 'user'" class="msg-user">
-              <div :class="editingId === m.id ? 'max-w-user-edit' : 'max-w-user'">
+              <div :class="editingId === m.id ? 'max-w-user msg-editing' : 'max-w-user'">
                 <!-- 版本翻页器（用户消息有多版本时显示） -->
                 <div v-if="m.has_branches" class="version-nav end">
                   <button
@@ -2344,95 +2364,16 @@ onUnmounted(() => {
                     @click="openBubbleImage(im)"
                   />
                 </div>
-                <!-- 编辑态：附件（可增删）+ textarea + 提交/取消 -->
                 <div
-                  v-if="editingId === m.id"
-                  class="max-w-bubble edit-box"
-                  :class="{ dragover: editDragOver }"
-                  @dragenter.prevent="editDragOver = true"
-                  @dragover.prevent="editDragOver = true"
-                  @dragleave.prevent="onEditDragLeave"
-                  @drop.prevent.stop="onEditDrop"
-                >
-                  <!-- 可增删的附件胶囊（复用 composer 样式） -->
-                  <div v-if="editAtts.length" class="attach-chips">
-                    <span
-                      v-for="(a, ai) in editAtts"
-                      :key="ai"
-                      class="attach-chip"
-                      :class="{ 'attach-quote': a.kind === 'quote' }"
-                    >
-                      <img
-                        v-if="a.isImage && a.preview"
-                        :src="a.preview"
-                        class="attach-thumb"
-                        loading="lazy"
-                        decoding="async"
-                        alt=""
-                      />
-                      <i
-                        v-else
-                        class="ti"
-                        :class="
-                          a.uploading
-                            ? 'ti-loader-2'
-                            : a.error
-                              ? 'ti-alert-triangle'
-                              : a.kind === 'quote'
-                                ? 'ti-quote'
-                                : a.pasted
-                                  ? 'ti-clipboard-text'
-                                  : 'ti-paperclip'
-                        "
-                      ></i>
-                      {{ a.name }}
-                      <span v-if="a.uploading" class="muted">解析中…</span>
-                      <span v-else-if="a.error" class="dang">失败</span>
-                      <span v-else-if="a.isImage" class="muted">图片</span>
-                      <span v-else-if="!a.isImage && !a.parsed && a.origin === 'new'" class="dang"
-                        >无文本</span
-                      >
-                      <i class="ti ti-x cursor-pointer" @click.stop="removeEditAtt(ai)"></i>
-                    </span>
-                  </div>
-                  <textarea
-                    v-model="editText"
-                    class="edit-textarea"
-                    rows="2"
-                    @input="
-                      (e) => {
-                        e.target.style.height = 'auto'
-                        e.target.style.height = Math.min(e.target.scrollHeight, 200) + 'px'
-                      }
-                    "
-                    @keydown.enter.exact.prevent="submitEdit(m)"
-                    @keydown.escape="cancelEdit"
-                  ></textarea>
-                  <div class="edit-actions">
-                    <i
-                      class="ti ti-paperclip edit-add-att"
-                      title="添加附件（可拖入文件）"
-                      @click="triggerEditFile"
-                    ></i>
-                    <button class="edit-cancel-btn" @click="cancelEdit">取消</button>
-                    <button class="edit-submit-btn" @click="submitEdit(m)">提交修改</button>
-                  </div>
-                  <input
-                    ref="editFileInput"
-                    type="file"
-                    multiple
-                    class="hidden-input"
-                    @change="onEditFilePick"
-                  />
+                  v-if="m.content"
+                  class="bubble max-w-bubble"
+                  :class="{ 'bubble-editing': editingId === m.id }"
+                  v-html="renderUser(m.content)"
+                ></div>
+                <div v-else-if="editingId === m.id" class="bubble max-w-bubble bubble-editing muted">
+                  （附件消息）
                 </div>
-                <!-- 普通态 -->
-                <div v-else>
-                  <div
-                    v-if="m.content"
-                    class="bubble max-w-bubble"
-                    v-html="renderUser(m.content)"
-                  ></div>
-                </div>
+                <div v-if="editingId === m.id" class="edit-inline-hint">正在底部输入框编辑此消息</div>
                 <div class="msg-actions-row user-actions">
                   <span class="msg-time">{{ formatTimeFull(m.create_time) }}</span>
                   <i class="ti ti-copy" title="复制" @click="copyText(m)"></i>
@@ -2621,7 +2562,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- 生成中：安全处理进度（展开）→ 正文首字后自动折叠并流式输出正文 -->
+          <!-- 生成中：思考/工具阶段展开 → 正文首字起折叠；结束后历史消息默认折叠 -->
           <!-- 生成中：仅在发起请求的会话内展示（切会话后不泄漏到其他会话） -->
           <div
             v-if="(generating || streamText) && streamSid === currentSid"
@@ -2702,6 +2643,10 @@ onUnmounted(() => {
 
       <!-- 输入区 -->
       <div class="composer-wrap">
+        <div v-if="editingId" class="edit-composer-bar composer-max">
+          <span><i class="ti ti-pencil"></i> 正在编辑消息</span>
+          <button type="button" class="edit-cancel-btn" @click="cancelEdit">取消</button>
+        </div>
         <!-- 95% 硬阈值提示条（会话上下文管理方案 v2） -->
         <div v-if="thresholdBreached === 'hard'" class="handoff-bar composer-max">
           <i class="ti ti-alert-triangle"></i>
@@ -2795,7 +2740,9 @@ onUnmounted(() => {
             :placeholder="
               thresholdBreached === 'hard'
                 ? '已达容量上限，请开启新会话'
-                : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件；项目会话内输入 @ 可插入文件）'
+                : editingId
+                  ? '编辑消息（Enter 提交修改，Esc 取消）'
+                  : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件；项目会话内输入 @ 可插入文件）'
             "
             rows="1"
             :disabled="thresholdBreached === 'hard'"
@@ -2962,7 +2909,7 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-        <!-- 会话指标行：置于输入框正下方，与其居中对齐 -->
+        <!-- 会话指标行：置于输入框正下方，与其居中对齐（不含轮/步） -->
         <SessionMetricsLine
           :metrics="sessionMetrics"
           :turn-metrics="currentTurnMetrics"

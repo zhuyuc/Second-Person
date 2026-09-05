@@ -11,19 +11,50 @@
 - 完全可控：上报为后台异步批量，失败只告警、绝不影响对话主链路
 - 禁用态零开销：未配置密钥时全部为空实现
 
-## 追踪层级
+## 追踪层级（按时间线）
+
+### 1. 对话主链 `agent.turn`
+
+一次用户发消息 → 助手回复，按发生顺序大致如下：
 
 ```
-trace: agent.turn               （一次对话轮次，带 session_id / 用户输入 / 最终回复）
-├─ span: context.assemble       （宿主上下文、静态 prompt 与动态 prompt）
-├─ span: agent.step              （一次模型/工具循环步骤）
-│  └─ generation: llm.agent_step （模型调用，含 token 用量）
-├─ span: agent.decision          （宿主能力选择和决策摘要）
-├─ span: tool_execute            （工具权限、执行、脱敏与结果回填）
-└─ span: handoff.summary_generation（跨会话摘要生成，按需出现）
+trace: agent.turn
+├─ span: agent.decision              （能力/路由决策，按需）
+├─ span: context.assemble            （组装上下文；output.retrieval 含候选明细）
+│  ├─ span: memory.skipped           （短查询短路时，仅此节点）
+│  ├─ span: memory.embed             （检索向量 + FTS 并行）
+│  ├─ span: memory.presearch         （Hybrid 预筛 / 可选 fallback）
+│  ├─ span: memory.graph             （图扩展）
+│  └─ span: memory.refine            （精筛；内嵌 generation: llm.*）
+├─ span: context.compact             （step≥2 时检查/执行压缩；可含 LLM）
+├─ span: agent.step                  （模型步骤，可多轮）
+│  └─ generation: llm.*              （本步模型调用）
+└─ span: tool_execute                （工具执行，按需；挂在当前活跃 observation 下）
 ```
 
-此外，所有非对话链路的模型调用（标题生成、压缩、回顾、画像、记忆提炼和 handoff 摘要）也会被记录为 generation。
+`context.assemble` 的 `output.retrieval`（有记忆检索时）大致包含：
+
+- `presearch_candidates`：Hybrid 预筛召回（id/title/summary/score）
+- `refine_pool`：进入精筛的候选（带 selected 标记）
+- `refine_rejected` / `selected_ids` / `injected`：落选与最终注入
+- `vector_hits` / `fts_hits` / `refine_path` / `retrieval_time_ms` 等诊断量
+
+前端记忆检索进度与上述 `memory.*` span 阶段对齐，便于对照 UI 与 Langfuse。
+
+### 2. 回合旁路 / 后台（独立 trace）
+
+这些任务不在 `agent.turn` 内（或 turn 已结束），各自 `trace_start`，其内 LLM 才能挂上 generation：
+
+| Trace 名 | 触发时机 | 说明 |
+|---|---|---|
+| `title_generation` | 首条消息后异步 | span `title_generation` + `llm.title_gen` |
+| `mood.after_turn` | 回合结束后异步 | span `mood.judge` + 情绪判定 LLM |
+| `handoff.summary` | 跨会话交接 | span `handoff.summary_generation` 等 |
+| `scheduler.{task_id}` | 定时/手动跑任务 | 回顾/Lint/画像/备份等整任务包一层 |
+| `ingest.file` | 文档/图片导入 | Distiller 提炼挂在此 trace 下 |
+| `user_feedback` / `attachment_upload` | 反馈、附件 | 路由侧轻量 trace |
+
+> 机制提醒：`generation_start` / `span_start` 在没有活跃 `_active_trace` 时是 noop。后台 LLM 必须先 `trace_start`，否则会「调了模型但 Langfuse 空白」。
 
 ## 启用方式
 
@@ -68,7 +99,7 @@ langfuse_secret_key: "sk-lf-xxxxxxxx"
 
 ### 3. 使用
 
-正常发起对话即可。稍等几秒（后台批量上报间隔默认 3s），刷新 Langfuse UI 的 Tracing 页面，即可看到名为 `chat.turn` 的完整调用树。
+正常发起对话即可。稍等几秒（后台批量上报间隔默认 3s），刷新 Langfuse UI 的 Tracing 页面，即可看到名为 `agent.turn` 的完整调用树。
 
 ## 可选环境变量
 
@@ -91,8 +122,14 @@ langfuse_secret_key: "sk-lf-xxxxxxxx"
 | `tracer.py` | 高层追踪器 `PipelineTracer`：trace / span / generation，contextvars 传播父子关系，禁用态空实现 |
 | `__init__.py` | 导出 `init_tracer` / `get_tracer` / `PipelineTracer` |
 
-集成点（本目录之外的最小改动）：
+集成点（本目录之外）：
 
-- `app/container.py`：`init_tracer()` 初始化，startup 启动、shutdown 停机
-- `agent/turn_runtime.py`：`agent.turn` trace，各模型/工具步骤 span
-- `infrastructure/llm_provider.py`：`chat()` / `stream()` 记录 generation（模型、输入输出、token）
+- `app/container`：`init_tracer()` 初始化，startup 启动、shutdown 停机
+- `agent/turn_runtime.py`：`agent.turn` + `context.assemble` / `context.compact` / `agent.step` / `agent.decision`
+- `memory/retriever.py`：`memory.embed` / `presearch` / `graph` / `refine`（挂在 assemble 下）
+- `agent/tool_executor.py`：`tool_execute`
+- `infrastructure/llm_provider.py`：`generation_start`（模型、输入输出、token）
+- `app/services/chat_service.py`：`title_generation` / `handoff.summary`
+- `agent/core.py`：`mood.after_turn`
+- `scheduler/scheduler.py`：`scheduler.{task_id}`
+- `scheduler/ingest.py`：`ingest.file`

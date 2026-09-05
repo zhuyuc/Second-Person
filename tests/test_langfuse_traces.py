@@ -118,6 +118,29 @@ def test_disabled_tracer_is_noop_and_never_enqueues():
     assert fake.events == []
 
 
+def test_memory_stage_spans_nest_under_context_assemble():
+    """记忆检索子阶段必须挂在 context.assemble 下，形成时间线树。"""
+    tracer, fake = _tracer()
+
+    trace = tracer.trace_start("agent.turn", session_id="sid-mem")
+    assemble = tracer.span_start("context.assemble")
+    for name in ("memory.embed", "memory.presearch", "memory.graph", "memory.refine"):
+        stage = tracer.span_start(name)
+        stage.end(output={"ok": True})
+    assemble.end(output={"memories": 0})
+    trace.end()
+
+    span_creates = _events(fake, "span-create")
+    assert [e["body"]["name"] for e in span_creates] == [
+        "context.assemble", "memory.embed", "memory.presearch",
+        "memory.graph", "memory.refine",
+    ]
+    assemble_id = span_creates[0]["body"]["id"]
+    for child in span_creates[1:]:
+        assert child["body"]["parentObservationId"] == assemble_id
+        assert child["body"]["traceId"] == trace.id
+
+
 def test_developer_trace_is_structured_and_excludes_raw_reasoning():
     initial = initial_developer_trace(
         requested_mode="deep", client_request_id="cr-1")

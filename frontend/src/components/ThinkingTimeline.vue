@@ -2,6 +2,7 @@
 // 思考时间线：对齐参考图布局（左侧状态图标 + 行内摘要/药丸/命令，仅「已思考」展开灰框）
 import { computed, ref } from 'vue'
 import { fmtDuration } from '@/utils/format'
+import { formatMemoryStageBadge } from '@/utils/timelineSummary'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -81,6 +82,31 @@ function memoryRelationLabel(rel) {
       co_cited: '共引',
     }[rel] || ''
   )
+}
+
+function memoryHitCount(item) {
+  return Array.isArray(item?.hits) ? item.hits.length : 0
+}
+
+function memoryListHeading(item) {
+  if (item?.stage === 'presearch') return '预筛候选'
+  if (item?.stage === 'refine') return '精筛候选'
+  if (item?.stage === 'done') return '注入的记忆'
+  return '记忆列表'
+}
+
+function memoryListHint(item) {
+  const n = memoryHitCount(item)
+  if (!n) return ''
+  if (item?.stage === 'presearch') return `点击查看 ${n} 条预筛候选`
+  if (item?.stage === 'refine') return `点击查看 ${n} 条精筛候选`
+  return `点击查看 ${n} 条记忆`
+}
+
+function memorySelectedLabel(hit) {
+  if (hit?.selected === true) return '精选'
+  if (hit?.selected === false) return '未入选'
+  return ''
 }
 
 function onMemoryClick(mid) {
@@ -186,20 +212,10 @@ function toolRow(item) {
   }
 }
 
-function memoryBadge(item) {
-  if (item.status === 'skipped') return '已跳过'
-  if (item.status === 'running') {
-    const m = {
-      embed: '生成向量…',
-      presearch: '预筛中…',
-      graph: '关联扩展…',
-      refine: '精筛中…',
-    }
-    return m[item.stage] || '检索中…'
-  }
-  if (item.hit_count > 0) return `注入 ${item.hit_count} 条`
-  if (item.stage === 'done' || item.status === 'ok') return '未命中'
-  return ''
+function memoryBadge(item, idx) {
+  return formatMemoryStageBadge(item, {
+    effectiveStatus: memoryEffectiveStatus(item, idx),
+  })
 }
 
 function onRowClick(key, item) {
@@ -262,13 +278,14 @@ function toolCitations(item) {
         </div>
       </div>
 
-      <!-- 记忆检索：行内药丸，详情默认折叠 -->
+      <!-- 记忆检索：行内药丸，详情默认折叠；注入结果展开可见记忆列表 -->
       <div
         v-else-if="item.kind === 'memory_stage'"
         class="tl-entry tl-entry-memory"
         :class="{
           'is-expanded': isExpanded(itemKey(item, idx)),
           'is-active': isItemRunning(item, idx),
+          'has-hits': memoryHitCount(item) > 0,
         }"
       >
         <button type="button" class="tl-entry-head" @click="onRowClick(itemKey(item, idx), item)">
@@ -285,7 +302,17 @@ function toolCitations(item) {
             <i class="ti" :class="isItemRunning(item, idx) ? 'ti-loader-2' : 'ti-circle-check'"></i>
           </span>
           <span class="tl-label">记忆检索</span>
-          <span class="tl-pill">{{ memoryBadge(item) }}</span>
+          <span class="tl-pill">{{ memoryBadge(item, idx) }}</span>
+          <span
+            v-if="memoryHitCount(item) && !isExpanded(itemKey(item, idx))"
+            class="tl-inline-preview"
+            >{{ memoryListHint(item) }}</span
+          >
+          <i
+            v-if="isExpandable(item)"
+            class="ti tl-chevron"
+            :class="isExpanded(itemKey(item, idx)) ? 'ti-chevron-down' : 'ti-chevron-right'"
+          ></i>
         </button>
         <div v-show="isExpanded(itemKey(item, idx))" class="tl-detail-sub">
           <div v-if="item.summary" class="tl-detail-text">{{ item.summary }}</div>
@@ -297,26 +324,39 @@ function toolCitations(item) {
             <span v-if="item.hit_count != null">注入 {{ item.hit_count }}</span>
             <span v-if="item.elapsed_ms != null">{{ fmtDuration(item.elapsed_ms) }}</span>
           </div>
-          <!-- 点击查看被注入的记忆全文（去记忆中心那套详情弹窗） -->
-          <ul
-            v-if="Array.isArray(item.hits) && item.hits.length"
-            class="tl-memory-list"
-          >
-            <li
-              v-for="hit in item.hits"
-              :key="hit.id || hit.title"
-              class="tl-memory-item"
-              :title="hit.summary || hit.title"
-              @click.stop="onMemoryClick(hit.id)"
-            >
-              <i class="ti ti-book-2 tl-memory-icon"></i>
-              <span class="tl-memory-title">{{ hit.title || hit.id || '未命名记忆' }}</span>
-              <span
-                v-if="memoryRelationLabel(hit.relation)"
-                class="tl-memory-tag"
-              >{{ memoryRelationLabel(hit.relation) }}</span>
-            </li>
-          </ul>
+          <!-- 预筛/精筛/注入：默认折叠，展开后可见标题+摘要；精筛带精选/未入选标记 -->
+          <div v-if="memoryHitCount(item)" class="tl-memory-block">
+            <div class="tl-memory-heading">{{ memoryListHeading(item) }}</div>
+            <ul class="tl-memory-list">
+              <li
+                v-for="hit in item.hits"
+                :key="hit.id || hit.title"
+                class="tl-memory-item"
+                :class="{
+                  'is-selected': hit.selected === true,
+                  'is-rejected': hit.selected === false,
+                }"
+                @click.stop="onMemoryClick(hit.id)"
+              >
+                <div class="tl-memory-item-head">
+                  <i class="ti ti-book-2 tl-memory-icon"></i>
+                  <span class="tl-memory-title">{{ hit.title || hit.id || '未命名记忆' }}</span>
+                  <span
+                    v-if="memorySelectedLabel(hit)"
+                    class="tl-memory-tag"
+                    :class="hit.selected ? 'is-selected' : 'is-rejected'"
+                    >{{ memorySelectedLabel(hit) }}</span
+                  >
+                  <span
+                    v-else-if="memoryRelationLabel(hit.relation)"
+                    class="tl-memory-tag"
+                    >{{ memoryRelationLabel(hit.relation) }}</span
+                  >
+                </div>
+                <div v-if="hit.summary" class="tl-memory-summary">{{ hit.summary }}</div>
+              </li>
+            </ul>
+          </div>
         </div>
       </div>
 
@@ -591,32 +631,52 @@ function toolCitations(item) {
   color: var(--muted);
 }
 
+.tl-memory-block {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--bd) 70%, transparent);
+}
+
+.tl-memory-heading {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
 .tl-memory-list {
-  margin: 6px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .tl-memory-item {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
   border-radius: 6px;
   cursor: pointer;
   color: var(--fg);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 1.45;
   min-width: 0;
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
   transition: background var(--dur-fast, 0.15s);
 }
 
 .tl-memory-item:hover {
   background: var(--brand-soft, rgba(60, 120, 220, 0.12));
-  color: var(--brand-tx, #3c78dc);
+}
+
+.tl-memory-item-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .tl-memory-icon {
@@ -635,6 +695,19 @@ function toolCitations(item) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-weight: 500;
+}
+
+.tl-memory-summary {
+  margin-left: 19px;
+  color: var(--sec);
+  font-size: 11px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
 }
 
 .tl-memory-tag {
@@ -645,6 +718,35 @@ function toolCitations(item) {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.4;
+}
+
+.tl-memory-tag.is-selected {
+  background: color-mix(in srgb, var(--brand-solid) 18%, transparent);
+  color: var(--brand-tx, #3c78dc);
+}
+
+.tl-memory-tag.is-rejected {
+  opacity: 0.85;
+}
+
+.tl-memory-item.is-rejected {
+  opacity: 0.72;
+}
+
+.tl-memory-item.is-rejected .tl-memory-title {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--muted) 50%, transparent);
+}
+
+.tl-chevron {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.tl-entry-memory.has-hits .tl-pill {
+  color: var(--brand-tx, #3c78dc);
 }
 
 .tl-inline-error {

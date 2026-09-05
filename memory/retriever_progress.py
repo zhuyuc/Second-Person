@@ -70,10 +70,46 @@ def _compact_hit(item: dict[str, Any]) -> dict[str, Any]:
         "summary": item.get("summary") or "",
     }
     for key in ("relation", "from_seed",
-                "verification_state", "freshness_state", "confidence"):
+                "verification_state", "freshness_state", "confidence",
+                "selected", "score"):
         val = item.get(key)
-        if val:
+        if val is not None and val != "":
             out[key] = val
+    return out
+
+
+def compact_candidates(
+    candidates: list[Any],
+    *,
+    selected_ids: set[str] | frozenset[str] | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """把 Candidate / dict 列表压成时间线与 Langfuse 可用的短结构。
+
+    selected_ids 非空时标记精筛选中（selected=True/False）；预筛阶段不传。
+    """
+    out: list[dict[str, Any]] = []
+    for raw in (candidates or [])[: max(0, limit)]:
+        if isinstance(raw, dict):
+            item = dict(raw)
+            mid = item.get("id") or item.get("memory_id") or ""
+        else:
+            mid = getattr(raw, "memory_id", "") or ""
+            score = getattr(raw, "final_score", None)
+            item = {
+                "id": mid,
+                "title": getattr(raw, "title", "") or "",
+                "summary": getattr(raw, "summary", "") or "",
+                "relation": getattr(raw, "relation", None),
+                "from_seed": getattr(raw, "from_seed", None),
+                "confidence": getattr(raw, "confidence", None),
+                "verification_state": getattr(raw, "verification_state", None),
+                "freshness_state": getattr(raw, "freshness_state", None),
+                "score": round(float(score), 4) if score else None,
+            }
+        if selected_ids is not None and mid:
+            item["selected"] = mid in selected_ids
+        out.append(_compact_hit(item))
     return out
 
 

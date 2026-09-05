@@ -35,11 +35,11 @@ function formatSpeed(value) {
   return `${speed >= 100 ? Math.round(speed) : Math.round(speed * 10) / 10} tok/s`
 }
 
-// 布局：| 分组，组内 · 配对；仅保留 轮/步、LLM、首 token+tok/s、缓存、输入+输出 五组。
+// 布局：| 分组，组内 · 配对；保留 LLM、首 token+tok/s、缓存、输入+输出（不含轮/步）。
 const items = computed(() => {
   const m = props.metrics
-  if (!m || !num(m.steps)) return []
-  const out = [`${num(m.turns)} 轮 · ${num(m.steps)} 步`]
+  if (!m) return []
+  const out = []
   const llm = formatDuration(m.llm_ms)
   if (llm) out.push(`LLM ${llm}`)
   const speeds = []

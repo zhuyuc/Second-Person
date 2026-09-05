@@ -158,6 +158,10 @@ export function useChatStream(deps) {
     streamChunkBuf = ''
     bodyCommitted = false
     appendTimelineNarration(narration)
+    // 工具步旁白撤回后回到「思考/工具」阶段：重新展开时间线；
+    // 下一轮正文首字仍会经 pushStreamText 自动折叠。
+    preBodyPhase.value = true
+    thinkOpen.value = true
   }
 
   function upsertMemoryStage(data) {

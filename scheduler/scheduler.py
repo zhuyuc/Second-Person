@@ -47,7 +47,15 @@ class TaskScheduler:
         task = self._tasks.get(task_id)
         if not task:
             return False
+        from langfuse.integration import get_tracer
+        tracer = get_tracer()
+        trace = tracer.trace_start(
+            f"scheduler.{task_id}",
+            metadata={"trigger_source": trigger_source,
+                      "task_name": task.get("name")},
+            tags=["scheduler", task_id])
         start = now_cst()
+        last_err: Exception | None = None
         for attempt in range(TASK_RETRY + 1):
             try:
                 # 同步任务丢线程池执行，避免备份/布局重算等重操作阻塞事件循环
@@ -59,8 +67,10 @@ class TaskScheduler:
                 self.db.execute(
                     "UPDATE scheduled_tasks SET status='completed', last_run=? WHERE task_id=?",
                     (start.isoformat(timespec="seconds"), task_id))
+                trace.end(output={"ok": True, "attempts": attempt + 1})
                 return True
             except Exception as e:  # noqa: BLE001
+                last_err = e
                 logger.warning("任务 %s 失败(第 %d 次)：%s", task_id, attempt + 1, e)
                 if attempt >= TASK_RETRY:
                     self._log(task_id, start, "failed", str(e), trigger_source)
@@ -68,8 +78,14 @@ class TaskScheduler:
                         "UPDATE scheduled_tasks SET status='failed', last_run=? WHERE task_id=?",
                         (start.isoformat(timespec="seconds"), task_id))
                     self.notify("task_failed", f"定时任务 {task['name']} 失败：{e}")
+                    trace.end(level="ERROR",
+                              status_message=str(e)[:240],
+                              output={"ok": False, "attempts": attempt + 1})
                     return False
                 await asyncio.sleep(1)
+        trace.end(level="ERROR",
+                  status_message=str(last_err or "unknown")[:240],
+                  output={"ok": False})
         return False
 
     async def run_chain(self, chain_id: str, trigger_source: str = "schedule") -> None:

@@ -3588,8 +3588,43 @@ button.btn-danger:hover {
   flex-direction: column;
   align-items: flex-end;
 }
-.max-w-user-edit {
-  width: 80%;
+/* 编辑中：原气泡淡化，内容改到下方 composer */
+.bubble-editing {
+  opacity: 0.55;
+}
+.edit-inline-hint {
+  font-size: var(--fs-sm);
+  color: var(--sec);
+  margin-top: 4px;
+}
+.edit-composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  margin: 0 auto 8px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--brand-solid) 12%, var(--surface-1));
+  color: var(--fg);
+  font-size: var(--fs-sm);
+}
+.edit-composer-bar .ti {
+  margin-right: 4px;
+  color: var(--brand-solid);
+}
+.edit-cancel-btn {
+  padding: 5px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--bd);
+  background: transparent;
+  color: var(--sec);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background var(--dur-fast);
+}
+.edit-cancel-btn:hover {
+  background: var(--surface-2);
 }
 .composer-wrap {
   padding: var(--sp-4) 32px 12px;
@@ -3608,32 +3643,6 @@ button.btn-danger:hover {
   flex-wrap: wrap;
   gap: var(--sp-2);
   margin-bottom: 10px;
-}
-.edit-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  justify-content: flex-end;
-  margin-top: 6px;
-}
-/* 编辑态「添加附件」按钮：靠左，其余按钮被推到右侧 */
-.edit-add-att {
-  margin-right: auto;
-  color: var(--sec);
-  cursor: pointer;
-  font-size: 18px;
-  transition: color var(--dur-fast);
-}
-.edit-add-att:hover {
-  color: var(--brand-solid);
-}
-/* 编辑态拖入文件高亮 */
-.edit-box {
-  border-radius: var(--radius-sm);
-  transition: box-shadow var(--dur-fast);
-}
-.edit-box.dragover {
-  box-shadow: 0 0 0 2px var(--brand-solid);
 }
 .msg-actions-mt {
   margin-top: var(--sp-2);
@@ -4210,57 +4219,4 @@ button .ti-loader-2 {
   font-size: 12px;
   min-width: 32px;
   text-align: center;
-}
-
-/* ---- 消息编辑态 ---- */
-.edit-textarea {
-  width: 100%;
-  resize: vertical;
-  border: 1.5px solid var(--brand-solid);
-  border-radius: var(--radius-sm);
-  padding: 10px 14px;
-  font-size: 15px;
-  font-family: inherit;
-  line-height: 1.6;
-  background: var(--surface-1);
-  color: var(--fg);
-  outline: none;
-  max-height: 200px;
-  box-sizing: border-box;
-}
-
-.edit-textarea:focus {
-  border-color: var(--brand-solid);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-solid) 20%, transparent);
-}
-
-.edit-submit-btn {
-  padding: 5px 14px;
-  border-radius: var(--radius-sm);
-  border: none;
-  background: var(--brand-solid);
-  color: #fff;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  font-weight: 500;
-  transition: opacity var(--dur-fast);
-}
-
-.edit-submit-btn:hover {
-  opacity: 0.85;
-}
-
-.edit-cancel-btn {
-  padding: 5px 14px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--bd);
-  background: transparent;
-  color: var(--sec);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  transition: background var(--dur-fast);
-}
-
-.edit-cancel-btn:hover {
-  background: var(--surface-2);
 }

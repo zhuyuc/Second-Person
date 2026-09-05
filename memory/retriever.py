@@ -42,6 +42,7 @@ from .retriever_gates import (
 )
 from .retriever_progress import (
     build_progress_payload,
+    compact_candidates,
     done_summary,
     presearch_summary,
     refine_start_summary,
@@ -361,6 +362,12 @@ class Retriever:
     # ---- 完整链路 -----------------------------------------------------------
     EMBED_QUERY_MAX_CHARS = 2000
 
+    @staticmethod
+    def _lf_span(name: str, **kwargs):
+        """挂到当前活跃 trace（通常是 agent.turn → context.assemble）下的子 span。"""
+        from langfuse.integration import get_tracer
+        return get_tracer().span_start(name, **kwargs)
+
     async def retrieve(self, query: str,
                        session_id: str | None = None,
                        context_text: str | None = None,
@@ -386,6 +393,9 @@ class Retriever:
                 query, _PresearchResult(), context_text, "", _start)
             result.diagnostics["gate"] = gate
             elapsed = round((time.perf_counter() - _start) * 1000)
+            skip_span = self._lf_span("memory.skipped", input={
+                "gate": gate, "query": (query or "")[:80]})
+            skip_span.end(output={"gate": gate, "elapsed_ms": elapsed})
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="skipped", status="skipped", summary=skip_summary(gate, query),
                 gate=gate, hit_count=0, candidates=0, elapsed_ms=elapsed,
@@ -407,6 +417,8 @@ class Retriever:
         query_vec = None
         top_k = self.config.get("retrieval_top_k", 10)
         bm25_floor = _mem_const.BM25_RELATIVE_FLOOR
+        embed_span = self._lf_span("memory.embed", input={
+            "cue_chars": len(embed_cue), "has_embed_fn": bool(self.embed_fn)})
         fts_task = asyncio.create_task(asyncio.to_thread(
             self._fts_search, query, top_k, bm25_floor))
         if self.embed_fn:
@@ -416,21 +428,37 @@ class Retriever:
                 result.degraded = "Embedding 不可用，检索降级 FTS5 单路"
                 logger.info(result.degraded)
         fts_hits = await fts_task
+        embed_span.end(output={
+            "has_vector": query_vec is not None,
+            "fts_hits": len(fts_hits),
+            "degraded": result.degraded or None,
+        })
 
         await self._notify_progress(on_progress, build_progress_payload(
             stage="presearch", status="running", summary="Hybrid 预筛进行中",
         ))
 
+        pre_span = self._lf_span("memory.presearch", input={
+            "has_vector": query_vec is not None, "project_id": project_id})
         pre = await self.hybrid_presearch(
             query, query_vec, project_id=project_id, fts_hits=fts_hits)
         candidates = pre.candidates
+        fallback_used = False
         if not candidates and has_recall_intent(query):
+            fallback_used = True
             pre = await self.hybrid_presearch(
                 query, query_vec, fallback=True, project_id=project_id,
                 fts_hits=fts_hits)
             candidates = pre.candidates
         if pre.disputed:
             result.disputed = list(pre.disputed)
+        pre_span.end(output={
+            "candidates": len(candidates),
+            "vector_hits": pre.vector_hits,
+            "fts_hits": pre.fts_hits,
+            "fallback": fallback_used,
+            "top_vector_score": round(pre.top_vector_score, 4),
+        })
 
         await self._notify_progress(on_progress, build_progress_payload(
             stage="presearch", status="ok" if candidates else "skipped",
@@ -439,6 +467,7 @@ class Retriever:
             vector_hits=pre.vector_hits,
             fts_hits=pre.fts_hits,
             elapsed_ms=round((time.perf_counter() - _start) * 1000),
+            hits=compact_candidates(candidates) or None,
         ))
 
         if not candidates:
@@ -451,26 +480,41 @@ class Retriever:
             ))
             return result
 
+        # 预筛快照：后续图扩展会原地往 candidates 追加，需先留一份给诊断/面板
+        presearch_snapshot = list(candidates)
+
         await self._notify_progress(on_progress, build_progress_payload(
             stage="graph", status="running",
             summary=f"从 {min(len(candidates), int(self.config.get('graph_expand_seed_pool', _mem_const.GRAPH_EXPAND_SEED_POOL)))} 条 seed 做图扩展",
         ))
 
+        seed_n = min(len(candidates), int(self.config.get(
+            "graph_expand_seed_pool", _mem_const.GRAPH_EXPAND_SEED_POOL)))
+        graph_span = self._lf_span("memory.graph", input={"seed_pool": seed_n})
         seed_pool = candidates[:int(self.config.get(
             "graph_expand_seed_pool", _mem_const.GRAPH_EXPAND_SEED_POOL))]
         graph_neighbors = await self._expand_graph(
             [c.memory_id for c in seed_pool], query_vec)
         seen_ids = {c.memory_id for c in candidates}
+        added = 0
         for neighbor in graph_neighbors:
             if neighbor.memory_id in seen_ids:
                 continue
             candidates.append(neighbor)
             seen_ids.add(neighbor.memory_id)
+            added += 1
+        graph_span.end(output={
+            "neighbors_raw": len(graph_neighbors),
+            "neighbors_added": added,
+            "pool_size": len(candidates),
+        })
 
         pool_cap = int(self.config.get(
             "candidate_pool_hard_cap", _mem_const.CANDIDATE_POOL_HARD_CAP))
         picked = candidates[:pool_cap]
         refine_path = "full"
+        refine_span = self._lf_span("memory.refine", input={
+            "pool": len(picked), "session_id": session_id})
         fast_ids = self._try_fast_path_refine(picked)
         if fast_ids is not None:
             refine_path = "fast_path"
@@ -479,16 +523,23 @@ class Retriever:
                 stage="refine", status="ok",
                 summary=refine_start_summary(len(picked), refine_path),
                 candidates=len(picked), refine_path=refine_path,
+                hits=compact_candidates(picked, selected_ids=set(chosen_ids)) or None,
             ))
         else:
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="refine", status="running",
                 summary=refine_start_summary(len(picked)),
                 candidates=len(picked),
+                hits=compact_candidates(picked) or None,
             ))
             chosen_ids, refine_path = await self._refine(
                 query, candidates, session_id, context_text, result,
                 on_progress=on_progress)
+        refine_span.end(output={
+            "refine_path": refine_path,
+            "selected": len(chosen_ids),
+            "selected_ids": list(chosen_ids)[:20],
+        })
         if not chosen_ids:
             diag_gate = "refine_empty"
 
@@ -549,6 +600,7 @@ class Retriever:
             hits=injected_hits or None,
         ))
 
+        rejected = [c for c in picked if c.memory_id not in chosen_set]
         result.diagnostics = {
             "degraded": bool(result.degraded),
             "vector_hits": pre.vector_hits,
@@ -564,6 +616,11 @@ class Retriever:
             "selected_ids": list(chosen_ids),
             "rejected": [{"id": c.memory_id, "reason": "refine_rejected"}
                          for c in candidates[:20] if c.memory_id not in chosen_ids],
+            # Langfuse / 面板共用：带标题摘要的阶段明细
+            "presearch_candidates": compact_candidates(presearch_snapshot),
+            "refine_pool": compact_candidates(picked, selected_ids=chosen_set),
+            "refine_rejected": compact_candidates(rejected),
+            "injected": compact_candidates(injected_hits),
         }
         return result
 
@@ -578,6 +635,8 @@ class Retriever:
             "context_chars": len(context_text or ""),
             "graph_neighbors": 0,
             "candidate_ids": [], "selected_ids": [], "rejected": [],
+            "presearch_candidates": [], "refine_pool": [],
+            "refine_rejected": [], "injected": [],
             "retrieval_time_ms": round((time.perf_counter() - start) * 1000, 2),
             "refined_count": 0,
         }
@@ -596,12 +655,14 @@ class Retriever:
             _mem_const.RETRIEVAL_REFINE_MIN_CANDIDATES))
         if len(candidates) < max(1, min_cands):
             path = "degrade_pick"
+            chosen = self._degrade_pick(candidates)
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="refine", status="ok",
                 summary=refine_start_summary(len(candidates), path),
                 candidates=len(candidates), refine_path=path,
+                hits=compact_candidates(candidates, selected_ids=set(chosen)) or None,
             ))
-            return self._degrade_pick(candidates), path
+            return chosen, path
         try:
             timeout = self.config.get(
                 "retrieval_refine_timeout_seconds",
@@ -616,13 +677,15 @@ class Retriever:
                 result.degraded = "第 2 层精筛 cache 命中"
                 logger.debug("refine cache hit sid=%s query=%r", session_id, query[:40])
                 path = "refine_cache"
+                chosen_list = cached[:int(self.config.get(
+                    "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
                 await self._notify_progress(on_progress, build_progress_payload(
                     stage="refine", status="ok",
                     summary=refine_start_summary(len(picked), path),
                     candidates=len(picked), refine_path=path,
+                    hits=compact_candidates(picked, selected_ids=set(chosen_list)) or None,
                 ))
-                return cached[:int(self.config.get(
-                    "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))], path
+                return chosen_list, path
             payload = [{"id": c.memory_id, "title": c.title,
                         "summary": c.summary, "source_type": c.source_type,
                         "confidence": c.confidence,
@@ -638,35 +701,41 @@ class Retriever:
                 timeout=timeout)
             chosen_list = list(chosen)
             self._refine_cache_put(cache_key, chosen_list)
+            chosen_list = chosen_list[:int(self.config.get(
+                "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="refine", status="ok",
                 summary=refine_start_summary(len(picked), "full"),
                 candidates=len(picked), refine_path="full",
+                hits=compact_candidates(picked, selected_ids=set(chosen_list)) or None,
             ))
-            return chosen_list[:int(self.config.get(
-                "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))], "full"
+            return chosen_list, "full"
         except asyncio.TimeoutError:
             result.degraded = "第 2 层精筛超时，按得分兜底"
             logger.warning("检索精筛超时")
             path = "degrade_pick"
+            chosen = self._degrade_pick(candidates)
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="refine", status="ok",
                 summary=refine_start_summary(len(candidates), path),
                 candidates=len(candidates), refine_path=path,
+                hits=compact_candidates(candidates, selected_ids=set(chosen)) or None,
             ))
-            return self._degrade_pick(candidates), path
+            return chosen, path
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             result.degraded = "第 2 层精筛不可用，按得分兜底"
             logger.info("检索精筛异常，按得分兜底", exc_info=True)
             path = "degrade_pick"
+            chosen = self._degrade_pick(candidates)
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="refine", status="ok",
                 summary=refine_start_summary(len(candidates), path),
                 candidates=len(candidates), refine_path=path,
+                hits=compact_candidates(candidates, selected_ids=set(chosen)) or None,
             ))
-            return self._degrade_pick(candidates), path
+            return chosen, path
 
     def _degrade_pick(self, candidates: list[Candidate]) -> list[str]:
         """LLM 挂时按相对得分兜底 —— 不再问用户"意图"。

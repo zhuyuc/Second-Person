@@ -273,7 +273,10 @@ class TurnRuntime:
                         timeline.extend(memory_timeline)
                     context_span.end(output={
                         "history_messages": len(turn_context["history"]),
-                        "memories": turn_context.get("memory_count", 0)})
+                        "memories": turn_context.get("memory_count", 0),
+                        # 预筛/精筛/注入明细（含 id/title/summary），供 Langfuse 对照
+                        "retrieval": turn_context.get("retrieval_diagnostics") or {},
+                    })
                     memory_ctx = turn_context.get("memory_context")
                     if memory_ctx:
                         self.events.append(turn_id, "context.memories", actor="host",
@@ -334,15 +337,33 @@ class TurnRuntime:
                 if step >= 2 and self.compaction_engine is not None:
                     await _progress("compact_check", "检查会话上下文容量",
                                     "判断是否需压缩早期对话")
+                    compact_span = tracer.span_start(
+                        "context.compact",
+                        input={"turn_id": turn_id, "step": step,
+                               "history_count": len(context["history"])})
                     try:
                         compact_result = await self.compaction_engine.compact_if_needed(
                             session_id=session_id, snap=snap,
                             messages=context["history"],
                             system=system_content, tools=tools,
                             message_ids=context.get("history_ids") or [])
-                    except Exception:  # noqa: BLE001
+                    except Exception as compact_exc:  # noqa: BLE001
                         logger.warning("压缩检查异常，跳过本轮", exc_info=True)
+                        compact_span.end(
+                            level="ERROR",
+                            status_message=str(compact_exc)[:240])
                         compact_result = None
+                    else:
+                        if compact_result is None:
+                            compact_span.end(output={"compacted": False})
+                        else:
+                            compact_span.end(output={
+                                "compacted": True,
+                                "trigger": compact_result.trigger,
+                                "shadowed_count": compact_result.shadowed_count,
+                                "released_tokens_est":
+                                    compact_result.released_tokens_est,
+                            })
                     if compact_result is not None:
                         await _progress(
                             "compact", "压缩早期对话",

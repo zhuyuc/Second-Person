@@ -181,9 +181,16 @@ class AgentCore:
             return
         if float(self.config.get("mood_influence_strength", 0.5)) <= 0:
             return
+        from langfuse.integration import get_tracer
+        tracer = get_tracer()
+        msg_id = outcome.get("message_id")
+        trace = tracer.trace_start(
+            "mood.after_turn", session_id=session_id,
+            input={"message_id": msg_id},
+            tags=["mood"])
+        span = tracer.span_start("mood.judge", input={"message_id": msg_id})
         try:
             trigger_summary = ""
-            msg_id = outcome.get("message_id")
             if self.mood_trigger and msg_id:
                 trigger_summary = self.mood_trigger.summarize_for_turn(
                     session_id, int(msg_id))
@@ -195,13 +202,23 @@ class AgentCore:
                 trigger_summary=trigger_summary,
                 session_id=session_id)
             result = self.mood.apply_v2(user_res=user_res, ai_res=ai_res)
+            out = {
+                "ai_mood": result.get("ai_mood", "neutral"),
+                "user_mood": result.get("user_mood", "neutral"),
+                "user_changed": bool(result.get("user_changed")),
+                "ai_changed": bool(result.get("ai_changed")),
+            }
+            span.end(output=out)
+            trace.end(output=out)
             if (result.get("user_changed") or result.get("ai_changed")) and self.bus:
                 from infrastructure.event_bus import EVT_MOOD_UPDATED
                 self.bus.publish_nowait(EVT_MOOD_UPDATED, {
                     "ai_mood": result.get("ai_mood", "neutral"),
                     "user_mood": result.get("user_mood", "neutral"),
                 })
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            span.end(level="ERROR", status_message=str(e)[:240])
+            trace.end(level="ERROR", status_message=str(e)[:240])
             logger.warning("turn 后情绪更新失败", exc_info=True)
 
     async def _runtime_context(self, *, session_id: str, turn_id: str,
@@ -306,6 +323,7 @@ class AgentCore:
                     "project_instructions_changes"],
                 "memory_count": len(retrieval.hits) + len(retrieval.related),
                 "memory_timeline": memory_timeline,
+                "retrieval_diagnostics": retrieval.diagnostics or {},
                 "turn_id": turn_id, "step": step}
 
     def _reconcile_project_baseline(self, session_id: str,

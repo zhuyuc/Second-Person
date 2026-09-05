@@ -38,13 +38,22 @@ class ChatService:
 
     async def generate_title(self, sid: str, message: str) -> None:
         """首条消息异步生成标题。"""
+        from langfuse.integration import get_tracer
         c = self.c
+        tracer = get_tracer()
+        q = message.split(
+            "\n---\n")[-1].strip() if "\n---\n" in message else message
+        q = q[:500]
+        trace = tracer.trace_start(
+            "title_generation", session_id=sid,
+            input={"message": q[:200]})
+        span = tracer.span_start(
+            "title_generation", input={"session_id": sid})
         try:
             snap = c.providers.snapshot_for("agent")
-            q = message.split(
-                "\n---\n")[-1].strip() if "\n---\n" in message else message
-            q = q[:500]
             if not snap:
+                span.end(output={"title": None, "skipped": "no_model"})
+                trace.end(output={"title": None, "skipped": "no_model"})
                 return
 
             async def _call_llm():
@@ -67,7 +76,11 @@ class ChatService:
             result = await _call_llm()
             if result:
                 c.sessions.set_auto_title(sid, result)
-        except Exception:  # noqa: BLE001
+            span.end(output={"title": result})
+            trace.end(output={"title": result})
+        except Exception as e:  # noqa: BLE001
+            span.end(level="ERROR", status_message=str(e)[:240])
+            trace.end(level="ERROR", status_message=str(e)[:240])
             logger.warning("会话标题生成失败 session=%s", sid, exc_info=True)
 
     async def handle_feedback(self, message_id: int, feedback: int,
