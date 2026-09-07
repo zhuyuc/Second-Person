@@ -34,15 +34,19 @@ class _Config:
 
 
 class _Spec:
-    def __init__(self, name):
+    def __init__(self, name, connector_id=None):
         self.name = name
+        self.connector_id = connector_id
 
 
 class _Registry:
     """Full-catalog fake matching the denylist-based ToolRegistry API."""
 
-    def __init__(self, names):
-        self.specs = [_Spec(n) for n in names]
+    def __init__(self, names, connector_tools=None):
+        connector_tools = connector_tools or {}
+        self.specs = [
+            _Spec(n, connector_id=connector_tools.get(n)) for n in names
+        ]
 
     def all_specs(self):
         return self.specs
@@ -128,3 +132,29 @@ def test_schemas_byte_stable_across_calls():
 def test_empty_registry_returns_empty():
     builder = ToolPromptBuilder(_Registry([]), _Config())
     assert builder.schemas(SessionCtx()) == []
+
+
+def test_connector_tools_denied_by_default():
+    """寒暄/无项目会话：MCP 工具不进 schemas，保护前缀体量。"""
+    builder = ToolPromptBuilder(
+        _Registry(ALL_TOOLS + ["github_list_issues"],
+                  connector_tools={"github_list_issues": "conn_github"}),
+        _Config())
+    names = _names(builder.schemas(SessionCtx(include_connector_tools=False)))
+    assert "github_list_issues" not in names
+    assert "web_search" in names
+
+
+def test_connector_tools_included_when_enabled():
+    builder = ToolPromptBuilder(
+        _Registry(ALL_TOOLS + ["github_list_issues"],
+                  connector_tools={"github_list_issues": "conn_github"}),
+        _Config())
+    names = _names(builder.schemas(SessionCtx(include_connector_tools=True)))
+    assert "github_list_issues" in names
+
+
+def test_session_ctx_defaults_exclude_connectors():
+    ctx = SessionCtx()
+    assert ctx.include_connector_tools is False
+    assert ctx.sandbox_mode == "workspace-write"

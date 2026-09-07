@@ -21,10 +21,12 @@ class SessionCtx:
     Kept intentionally tiny so tool schema selection cannot silently pick up
     per-message signals (which would break provider prefix cache reuse).
 
-    Sandbox mode is now the single axis — project attachment is orthogonal
-    (it only decides *where* fs_* operate, not *whether* they exist).
+    Sandbox mode gates write/shell tools. Connector (MCP) tools are a second
+    stable axis: only included when the session/project policy opts in, so
+    casual chat does not carry multi-kilobyte external schemas every turn.
     """
     sandbox_mode: str = "workspace-write"  # read-only / workspace-write / danger-full-access
+    include_connector_tools: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,19 +95,18 @@ class ToolPromptBuilder:
     _SHELL_DENY = frozenset({"shell_exec"})
 
     def schemas(self, session_ctx: SessionCtx) -> list[dict]:
-        """Expose the full tool catalog, gated by sandbox mode only.
+        """Expose the catalog gated by stable session-level policy only.
 
         Rationale — see PROMPT_VERSION history: keyword-driven allowlisting
         made tool schemas fluctuate per user message and shredded provider
-        prefix cache. Sandbox-mode gating changes only on the user's own
-        policy change events, so the tools payload stays byte-stable across
-        normal turns.
+        prefix cache. Gating changes only on sandbox / connector-enable
+        policy events, so the tools payload stays byte-stable across normal
+        turns.
 
         Note: fs_* is exposed to every session regardless of project state —
         the execution-layer WorkspaceResolver decides *where* they operate.
-        A non-project session has fs_read/fs_list access to legacy_workspace;
-        the model discovering "there's nothing there" is a legitimate
-        answer that requires no schema-level hiding.
+        MCP/connector tools are excluded unless include_connector_tools is
+        set (typically project sessions or mcp_tools_inject_mode=always).
         """
         if not self.registry.all_specs():
             return []
@@ -116,4 +117,9 @@ class ToolPromptBuilder:
         elif session_ctx.sandbox_mode == "workspace-write":
             denied |= self._SHELL_DENY
         # danger-full-access: no additional deny (writes + shell exposed)
+        if not session_ctx.include_connector_tools:
+            denied |= {
+                spec.name for spec in self.registry.all_specs()
+                if getattr(spec, "connector_id", None)
+            }
         return self.registry.openai_schemas_excluding(denied)

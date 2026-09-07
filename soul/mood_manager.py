@@ -27,7 +27,7 @@ DECAY_FLOOR = 0.05     # 有效强度低于该值视为 neutral（不注入）
 _FUSE_TIME_WINDOW = 30 * 60  # 融合时间因子满窗（秒）
 
 # 情绪标签中文化映射：mood_state 存英文标签（判定/存储稳定），注入前翻译为
-# 中文——避免英文标签进入 system prompt 形成英文语言环境、诱导模型英文推理
+# 中文——避免英文标签进入模型上下文形成英文语言环境、诱导模型英文推理
 MOOD_CN = {
     "neutral": "平静", "joy": "喜悦", "pleased": "满足", "excited": "兴奋",
     "warm": "温暖", "grateful": "感激", "angry": "愤怒", "irritated": "烦躁",
@@ -85,10 +85,23 @@ class MoodManager:
         self.config = config
 
     # ---- 读取与注入 --------------------------------------------------------
-    def build_hint(self) -> str:
-        """生成情绪注入段（system prompt 追加用）v2。
+    def build_rules(self) -> str:
+        """稳定的情绪表达规则（进 system 静态前缀，跨轮字节不变）。"""
+        if not self.config.get("mood_enabled", True):
+            return ""
+        if float(self.config.get("mood_influence_strength", 0.5)) <= 0:
+            return ""
+        try:
+            return PROMPTS.load_raw("agent/prompts/mood_rules").strip()
+        except Exception:  # noqa: BLE001
+            logger.debug("加载 mood_rules 失败", exc_info=True)
+            return ""
+
+    def build_state_context(self) -> str:
+        """本轮情绪状态（进 messages 尾部 context.mood，允许每轮变化）。
 
         - strength 调制：根据 mood_influence_strength 调整注入浓度
+        - 强度用高/中/低档，避免两位小数与时间文案污染 system 前缀
         - baseline 风味：即使 neutral 也根据历史关系给出有温度的基线描述
         - attribution 提示：告知 AI 当前情绪来源（self/other/shared）
         """
@@ -110,17 +123,29 @@ class MoodManager:
             adjusted = raw_intensity * strength
             if mood != "neutral" and adjusted > DECAY_FLOOR:
                 kwargs[f"{scope}_mood"] = _mood_cn(mood)
-                kwargs[f"{scope}_intensity"] = round(adjusted, 2)
+                kwargs[f"{scope}_intensity_band"] = self._intensity_band(adjusted)
                 kwargs[f"{scope}_time_hint"] = self._time_hint(
                     row[f"{scope}_updated_at"])
             else:
                 kwargs[f"{scope}_mood"] = self._baseline_flavor(scope)
-                kwargs[f"{scope}_intensity"] = 0
+                kwargs[f"{scope}_intensity_band"] = "低"
                 kwargs[f"{scope}_time_hint"] = ""
 
         kwargs["ai_attribution_hint"] = self._attribution_hint(
             row["ai_attribution"] or "")
-        return PROMPTS.render("agent/prompts/mood", **kwargs)
+        return PROMPTS.render("agent/prompts/mood_state", **kwargs)
+
+    def build_hint(self) -> str:
+        """兼容旧调用点：等价于本轮状态上下文（不再进入 system）。"""
+        return self.build_state_context()
+
+    @staticmethod
+    def _intensity_band(intensity: float) -> str:
+        if intensity >= 0.5:
+            return "高"
+        if intensity >= 0.2:
+            return "中"
+        return "低"
 
     @staticmethod
     def _strength_hint(strength: float) -> str:

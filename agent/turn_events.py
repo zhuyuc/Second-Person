@@ -163,6 +163,16 @@ class TurnEventStore:
             elif event["type"] == "context.handoff":
                 # 会话交接摘要：不常出现，仍走 messages 尾部保持前缀稳定。
                 messages.append({"role": "user", "content": payload.get("content", "")})
+            elif event["type"] in {
+                "context.project",
+                "context.project_instructions",
+                "context.project_instructions_changes",
+                "context.mood",
+                "context.location",
+                "context.constraints",
+            }:
+                # 项目/情绪/位置/本轮约束：一律 messages 尾部，不进 system 字符串。
+                messages.append({"role": "user", "content": payload.get("content", "")})
         return messages, last_seq
 
     def unresolved_calls(self, turn_id: str) -> list[dict[str, Any]]:

@@ -1,11 +1,13 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 const props = defineProps({
   metrics: { type: Object, default: null },
   turnMetrics: { type: Object, default: null },
   // 流式期间前端估算的实时 tok/s。>0 时优先展示，取代已结算的 turnMetrics 值。
   liveTokensPerSecond: { type: Number, default: 0 },
+  // 生成中不刷新缓存命中，只在回复结束后用最终值更新。
+  generating: { type: Boolean, default: false },
 })
 
 function num(value) {
@@ -35,6 +37,28 @@ function formatSpeed(value) {
   return `${speed >= 100 ? Math.round(speed) : Math.round(speed * 10) / 10} tok/s`
 }
 
+function formatCacheHit(value) {
+  const cache = Number(value)
+  if (!Number.isFinite(cache)) return ''
+  return `缓存命中 ${cache >= 99.95 ? 100 : Math.round(cache)}%`
+}
+
+// 仅在非生成态采纳本轮最终 cache_hit；用户一发送（generating=true）时保持上一次展示。
+const settledCacheHit = ref(null)
+watch(
+  () => [props.generating, props.turnMetrics?.cache_hit_percent],
+  ([generating, hit]) => {
+    if (generating) return
+    if (hit === null || hit === undefined) {
+      settledCacheHit.value = null
+      return
+    }
+    const n = Number(hit)
+    if (Number.isFinite(n)) settledCacheHit.value = n
+  },
+  { immediate: true },
+)
+
 // 布局：| 分组，组内 · 配对；保留 LLM、首 token+tok/s、缓存、输入+输出（不含轮/步）。
 const items = computed(() => {
   const m = props.metrics
@@ -52,10 +76,8 @@ const items = computed(() => {
   if (currentSpeed) speeds.push(currentSpeed)
   if (speeds.length) out.push(speeds.join(' · '))
   if (num(m.input_tokens) || num(m.output_tokens)) {
-    if (m.cache_hit_percent !== null && m.cache_hit_percent !== undefined) {
-      const cache = Number(m.cache_hit_percent)
-      if (Number.isFinite(cache)) out.push(`缓存命中 ${cache >= 99.95 ? 100 : Math.round(cache)}%`)
-    }
+    const cacheLabel = formatCacheHit(settledCacheHit.value)
+    if (cacheLabel) out.push(cacheLabel)
     const io = []
     if (num(m.input_tokens)) io.push(`输入 ${formatTokens(m.input_tokens)} tok`)
     if (num(m.output_tokens)) io.push(`输出 ${formatTokens(m.output_tokens)} tok`)

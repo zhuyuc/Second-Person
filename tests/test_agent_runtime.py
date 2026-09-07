@@ -91,7 +91,10 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
 
             async def context_loader(**_kwargs):
                 return {"snap": _Provider(), "history": [], "extra_system": "",
-                        "memory_count": 0}
+                        "memory_count": 0,
+                        "mood_context": "[当前情绪状态] 测试态",
+                        "location_context": "[当前位置] 测试城",
+                        "constraints_context": "本轮约束：简短回复"}
 
             async def emit(name, data):
                 events.append((name, data))
@@ -132,12 +135,22 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
             assert any(m.get("role") == "user"
                        and "[北京时间]" in (m.get("content") or "")
                        for m in llm.prompts[0])
+            # 可变状态走 messages 尾部 context.*，不进 system
+            assert not any("[当前情绪状态]" in (m.get("content") or "")
+                           for m in llm.prompts[0]
+                           if m.get("role") == "system")
+            for needle in ("[当前情绪状态] 测试态", "[当前位置] 测试城",
+                           "本轮约束：简短回复"):
+                assert any(m.get("role") == "user" and needle in (m.get("content") or "")
+                           for m in llm.prompts[0])
             turn = TurnEventStore(db).get_turn(outcome["turn_id"])
             assert turn["status"] == "completed"
             assert turn["reasoning_effort"] == "high"
             assert [event["type"] for event in TurnEventStore(db).events(outcome["turn_id"])] == [
                 "turn.started", "user.message", "context.time",
-                "step.started", "request.header",
+                "step.started",
+                "context.mood", "context.location", "context.constraints",
+                "request.header",
                 "assistant.tool_calls", "tool.call", "tool.result", "step.finished",
                 "step.started", "request.header", "assistant.message", "step.finished",
                 "turn.finished",

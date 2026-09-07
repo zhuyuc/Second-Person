@@ -8,7 +8,7 @@
 | 能力域 | 当前行为 | 实现入口 |
 | --- | --- | --- |
 | 对话 | 同会话串行的事件化 Agent 循环，支持流式回复、工具调用、停止、重试、编辑/重新生成和会话交接 | `agent/core.py`、`agent/turn_runtime.py`、`app/routes/chat.py` |
-| 上下文 | 静态 system/tool 前缀加动态尾部；token 压力触发摘要压缩；上下文超限且尚未输出时压缩并重试一次 | `agent/prompt_assembler.py`、`agent/compaction_engine.py` |
+| 上下文 | 稳定 system/tool 前缀 + messages 尾部 `context.*`（情绪状态/位置/约束/记忆/项目等）；token 压力触发摘要压缩；上下文超限且尚未输出时压缩并重试一次；MCP 默认仅项目会话注入 | `agent/prompt_assembler.py`、`agent/turn_events.py`、`agent/compaction_engine.py` |
 | 记忆 | Hybrid 预筛、图扩展、LLM 精筛、记忆候选门禁、文件主副本和项目隔离 | `memory/retriever.py`、`memory/write_gate.py`、`memory/file_writer.py` |
 | 项目工作区 | 项目 CRUD、归档、目录浏览、项目记忆隔离和四档文件工具权限 | `agent/projects.py`、`app/routes/projects.py` |
 | 工具与连接器 | 内置工具和 MCP（stdio / Streamable HTTP）工具；本地单用户模式下由宿主直接执行并做参数、超时、脱敏与注入防护 | `tools/`、`connectors/` |

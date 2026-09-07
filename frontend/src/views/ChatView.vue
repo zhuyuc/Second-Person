@@ -2914,6 +2914,7 @@ onUnmounted(() => {
           :metrics="sessionMetrics"
           :turn-metrics="currentTurnMetrics"
           :live-tokens-per-second="liveThroughput.tokensPerSecond.value"
+          :generating="generating"
         />
       </div>
       <!-- 空状态：底部 spacer 将 hero+composer 推离底端 -->

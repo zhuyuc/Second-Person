@@ -139,6 +139,8 @@ def turn_metrics(db, turn_id: str) -> dict:
         "input_tokens": input_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
+        "cache_hit_percent": (cache_read_tokens / input_tokens * 100
+                              if input_tokens else None),
         "prompt_cache": {
             "version": "prompt-cache-v1",
             "observations": cache_observations,
@@ -183,10 +185,11 @@ def session_metrics(db, session_id: str, *, current_turn_id: str | None = None) 
     input_tokens = _num(usage.get("input_tokens"))
     cache_read = _num(usage.get("cache_read_tokens"))
     cache_rows = db.query_all(
-        "SELECT m.system_prompt_hash,m.tool_schema_hash,m.session_context_hash,"
-        "m.prefix_hash,m.cache_change_reason,m.prefix_reused "
+        "SELECT m.input_tokens,m.cache_read_tokens,m.system_prompt_hash,"
+        "m.tool_schema_hash,m.session_context_hash,m.prefix_hash,"
+        "m.cache_change_reason,m.prefix_reused "
         "FROM agent_turns t JOIN agent_step_metrics m ON m.turn_id=t.id "
-        "WHERE t.session_id=? ORDER BY m.created_at", (session_id,))
+        "WHERE t.session_id=? ORDER BY m.created_at, m.id", (session_id,))
     cache_reasons = {}
     for cache_row in cache_rows:
         reason = cache_row.get("cache_change_reason")
@@ -196,6 +199,18 @@ def session_metrics(db, session_id: str, *, current_turn_id: str | None = None) 
                          if row.get("system_prompt_hash")), None)
     cache_observations = sum(1 for row in cache_rows
                              if row.get("system_prompt_hash"))
+    # Lifetime hit mixes old unstable prefixes with the current layout and can
+    # understate whether the live system/tool prefix is actually reusing.
+    # Also expose the cohort that shares the latest prefix_hash.
+    prefix_hit = None
+    latest_prefix = (latest_cache or {}).get("prefix_hash")
+    if latest_prefix:
+        cohort_in = sum(_num(r.get("input_tokens")) for r in cache_rows
+                        if r.get("prefix_hash") == latest_prefix)
+        cohort_read = sum(_num(r.get("cache_read_tokens")) for r in cache_rows
+                          if r.get("prefix_hash") == latest_prefix)
+        if cohort_in:
+            prefix_hit = cohort_read / cohort_in * 100
     result = {
         "turns": _num(row.get("turns")),
         "steps": _num(row.get("steps")),
@@ -215,6 +230,7 @@ def session_metrics(db, session_id: str, *, current_turn_id: str | None = None) 
         "cache_read_tokens": cache_read,
         "cache_write_tokens": _num(usage.get("cache_write_tokens")),
         "cache_hit_percent": (cache_read / input_tokens * 100 if input_tokens else None),
+        "cache_hit_percent_prefix": prefix_hit,
         "prompt_cache": {
             "version": "prompt-cache-v1",
             "observations": cache_observations,

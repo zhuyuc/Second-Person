@@ -14,28 +14,29 @@
 | 3 | agent/prompts/handoff_summary.md | handoff 摘要生成 | memory/handoff_summary.py | A |
 | 4 | agent/prompts/initial_soul.md | 引导期初始 SOUL 生成 | agent/system_agents.py | A |
 | 5 | agent/prompts/memory_candidate_extract.md | 长期记忆候选提取 | app/container/wiring.py | A |
-| 6 | agent/prompts/mood.md | 情绪状态动态模板 | soul/mood_manager.py | A |
-| 7 | agent/prompts/mood_judge.md | turn 结束双源情绪判定 | soul/mood_judge.py | A |
-| 8 | agent/prompts/output_style.md | 输出画像提炼 | agent/system_agents.py | A |
-| 9 | agent/prompts/profile_conflict_scan.md | 画像冲突扫描 | soul/profile_conflict_scanner.py | A |
-| 10 | agent/prompts/profile_rebuild.md | 用户画像重建 | agent/system_agents.py | A |
-| 11 | app/prompts/distill.md | 对话记忆提炼 | app/container | A |
-| 12 | app/prompts/distill_document.md | 文档记忆提炼 | app/container | A |
-| 13 | app/prompts/domain_label.md | 领域名称翻译 | app/container | A |
-| 14 | app/prompts/extract_image.md | 图片解析 system | app/container | A |
-| 15 | app/prompts/extract_image_user.md | 图片解析 user | app/container | A |
-| 16 | app/prompts/format_skeleton.md | 格式骨架提取 | tools/builtin.py | A |
-| 17 | app/prompts/memory_refine.md | 记忆精筛 | app/container | A |
-| 18 | app/prompts/merge_judge.md | 记忆合并判定 | app/container | A |
-| 19 | app/prompts/title_gen.md | 会话标题生成 | app/services/chat_service.py | A |
-| 20 | app/prompts/base_rules_fs.md | fs 工具族使用规则（M3 项目工作区） | agent/core.py | B |
-| 21 | soul/prompts/default_soul_core.md | SOUL 核心默认值 | soul/constants.py | B |
-| 22 | soul/prompts/default_soul_style_dialog.md | SOUL 对话风格默认值 | soul/constants.py | B |
-| 23 | soul/prompts/default_soul_style_output.md | SOUL 输出样式默认值 | soul/constants.py | B |
-| 24 | soul/prompts/onboarding_persona.md | 引导期人格 | soul/constants.py | B |
-| 25 | soul/prompts/output_style_meta_rule.md | 输出样式元规则 | soul/constants.py | B |
-| 26 | agent/prompts/compact_instruction.md | 自动压缩 8 段摘要指令（v7 CompactionEngine） | agent/compaction_engine.py | A |
-| 27 | agent/prompts/compact_preamble.md | 压缩摘要 checkpoint 前言 + `<compacted-summary>` 框架 | agent/compaction_engine.py | A |
+| 6 | agent/prompts/mood_rules.md | 情绪表达规则（system 静态） | soul/mood_manager.py | A |
+| 7 | agent/prompts/mood_state.md | 本轮情绪状态（messages 尾） | soul/mood_manager.py | A |
+| 8 | agent/prompts/mood_judge.md | turn 结束双源情绪判定 | soul/mood_judge.py | A |
+| 9 | agent/prompts/output_style.md | 输出画像提炼 | agent/system_agents.py | A |
+| 10 | agent/prompts/profile_conflict_scan.md | 画像冲突扫描 | soul/profile_conflict_scanner.py | A |
+| 11 | agent/prompts/profile_rebuild.md | 用户画像重建 | agent/system_agents.py | A |
+| 12 | app/prompts/distill.md | 对话记忆提炼 | app/container | A |
+| 13 | app/prompts/distill_document.md | 文档记忆提炼 | app/container | A |
+| 14 | app/prompts/domain_label.md | 领域名称翻译 | app/container | A |
+| 15 | app/prompts/extract_image.md | 图片解析 system | app/container | A |
+| 16 | app/prompts/extract_image_user.md | 图片解析 user | app/container | A |
+| 17 | app/prompts/format_skeleton.md | 格式骨架提取 | tools/builtin.py | A |
+| 18 | app/prompts/memory_refine.md | 记忆精筛 | app/container | A |
+| 19 | app/prompts/merge_judge.md | 记忆合并判定 | app/container | A |
+| 20 | app/prompts/title_gen.md | 会话标题生成 | app/services/chat_service.py | A |
+| 21 | app/prompts/base_rules_fs.md | fs 工具族使用规则（M3 项目工作区） | agent/core.py | B |
+| 22 | soul/prompts/default_soul_core.md | SOUL 核心默认值 | soul/constants.py | B |
+| 23 | soul/prompts/default_soul_style_dialog.md | SOUL 对话风格默认值 | soul/constants.py | B |
+| 24 | soul/prompts/default_soul_style_output.md | SOUL 输出样式默认值 | soul/constants.py | B |
+| 25 | soul/prompts/onboarding_persona.md | 引导期人格 | soul/constants.py | B |
+| 26 | soul/prompts/output_style_meta_rule.md | 输出样式元规则 | soul/constants.py | B |
+| 27 | agent/prompts/compact_instruction.md | 自动压缩 8 段摘要指令（v7 CompactionEngine） | agent/compaction_engine.py | A |
+| 28 | agent/prompts/compact_preamble.md | 压缩摘要 checkpoint 前言 + `<compacted-summary>` 框架 | agent/compaction_engine.py | A |
 
 ## LLM 调用点
 

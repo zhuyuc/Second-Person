@@ -962,15 +962,20 @@ code {
   margin-bottom: 20px;
 }
 
-/* 消息时间：常驻显示（精确到秒） */
+/* 消息时间：与操作按钮同一套弱化/悬停逻辑 */
 .msg-time {
   font-size: 11px;
   color: var(--muted);
-  opacity: 1;
-  transition: opacity var(--dur, 0.2s);
+  opacity: 0.45;
+  transition: opacity var(--dur-fast, 0.15s);
   align-self: center;
   white-space: nowrap;
   user-select: none;
+}
+
+.msg-ai:hover .msg-time,
+.msg-user:hover .msg-time {
+  opacity: 1;
 }
 
 /* 用户气泡：元宝式浅底小气泡，不再大面积品牌色。宽度受外层 .max-w-user 统一约束 */
@@ -1545,7 +1550,7 @@ code {
 }
 
 .think-section-toggle {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 20px;
@@ -1555,6 +1560,15 @@ code {
   background: var(--bg-input, rgba(127, 127, 127, 0.1));
   color: var(--muted);
   font-size: 12px;
+  line-height: 1;
+}
+
+.think-section-toggle .ti {
+  display: block;
+  line-height: 1;
+  width: 1em;
+  height: 1em;
+  margin: 0;
 }
 
 .think-head:hover .think-section-toggle {
@@ -1566,8 +1580,9 @@ code {
   min-width: 0;
 }
 
-.think-head .ti-chevron-up,
-.think-head .ti-chevron-down {
+/* 仅推「联网来源」等行尾箭头；勿命中左侧折叠钮内的 chevron-down */
+.think-head > .ti-chevron-up,
+.think-head > .ti-chevron-down {
   margin-left: auto;
 }
 

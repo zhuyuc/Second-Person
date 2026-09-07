@@ -83,5 +83,42 @@ def test_turn_metrics_exposes_hashes_reasons_and_reuse(tmp_path: Path):
         assert metrics["prompt_cache"]["change_reasons"] == {
             "initial": 1, "session_context_changed": 1}
         assert metrics["prompt_cache"]["latest"]["prefix_hash"] == "prefix"
+        assert metrics["cache_hit_percent"] == 95.5
+    finally:
+        db.close()
+
+
+def test_session_metrics_prefix_cohort_ignores_old_unstable_prefix(tmp_path: Path):
+    from infrastructure.session_metrics import session_metrics
+
+    db = _db(tmp_path)
+    try:
+        db.execute("INSERT INTO sessions(session_id,title,last_active,message_count) "
+                   "VALUES('cache_session','test','now',0)")
+        db.execute(
+            "INSERT INTO agent_turns(id,session_id,status,reasoning_effort,max_steps,created_at,updated_at) "
+            "VALUES('old_turn','cache_session','completed','off',1,'t1','t1')")
+        db.execute(
+            "INSERT INTO agent_turns(id,session_id,status,reasoning_effort,max_steps,created_at,updated_at) "
+            "VALUES('new_turn','cache_session','completed','off',1,'t2','t2')")
+        record_step(
+            db, turn_id="old_turn", step=1, llm_ms=10, ttft_ms=5, decode_ms=5,
+            input_tokens=1000, cache_read_tokens=100,
+            system_prompt_hash="old", tool_schema_hash="tools",
+            session_context_hash="c1", prefix_hash="prefix-old",
+            cache_change_reason="system_prompt_changed", prefix_reused=False)
+        record_step(
+            db, turn_id="new_turn", step=1, llm_ms=10, ttft_ms=5, decode_ms=5,
+            input_tokens=1000, cache_read_tokens=950,
+            system_prompt_hash="new", tool_schema_hash="tools",
+            session_context_hash="c2", prefix_hash="prefix-new",
+            cache_change_reason="session_context_changed", prefix_reused=True)
+        # Force chronological order — record_step stamps created_at with now().
+        db.execute("UPDATE agent_step_metrics SET created_at='t1' WHERE turn_id='old_turn'")
+        db.execute("UPDATE agent_step_metrics SET created_at='t2' WHERE turn_id='new_turn'")
+
+        metrics = session_metrics(db, "cache_session")
+        assert metrics["cache_hit_percent"] == 52.5  # lifetime (100+950)/2000
+        assert metrics["cache_hit_percent_prefix"] == 95.0  # latest prefix only
     finally:
         db.close()

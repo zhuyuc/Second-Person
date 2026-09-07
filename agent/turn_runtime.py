@@ -294,7 +294,7 @@ class TurnRuntime:
                     turn_context = await self.context_loader(
                         session_id=session_id, turn_id=turn_id, message=message,
                         onboarding=onboarding, step=step, handoff_path=handoff_path,
-                        emit=emit)
+                        location=location, emit=emit)
                     memory_timeline = turn_context.get("memory_timeline") or []
                     if memory_timeline:
                         timeline.extend(memory_timeline)
@@ -334,6 +334,17 @@ class TurnRuntime:
                                            "context.project_instructions_changes",
                                            actor="host", model_visible=True,
                                            payload={"content": proj_changes})
+                    # 可变状态走 messages 尾部，避免击穿 system/tools 前缀 cache
+                    for event_type, key in (
+                        ("context.mood", "mood_context"),
+                        ("context.location", "location_context"),
+                        ("context.constraints", "constraints_context"),
+                    ):
+                        content = turn_context.get(key)
+                        if content:
+                            self.events.append(
+                                turn_id, event_type, actor="host",
+                                model_visible=True, payload={"content": content})
                 context = turn_context
                 snap = context["snap"]
                 effective_effort = reasoning_effort
@@ -419,7 +430,7 @@ class TurnRuntime:
                         turn_context = await self.context_loader(
                             session_id=session_id, turn_id=turn_id, message=message,
                             onboarding=onboarding, step=step, handoff_path=handoff_path,
-                            emit=emit)
+                            location=location, emit=emit)
                         memory_timeline = turn_context.get("memory_timeline") or []
                         if memory_timeline:
                             timeline.extend(memory_timeline)
@@ -570,7 +581,7 @@ class TurnRuntime:
                             turn_context = await self.context_loader(
                                 session_id=session_id, turn_id=turn_id, message=message,
                                 onboarding=onboarding, step=step, handoff_path=handoff_path,
-                                emit=emit)
+                                location=location, emit=emit)
                             cached_system_content = None
                             prompt_fingerprint = None
                             continue
@@ -801,37 +812,44 @@ class TurnRuntime:
         }
 
     def _project_tools(self, session_id: str) -> list[dict]:
-        """Expose the full catalog gated by session-level policy.
+        """Expose the catalog gated by session-level policy.
 
-        Session-level gating (project attachment + sandbox mode) keeps the
-        tools payload byte-stable across normal turns — the provider prefix
-        cache reuses this prefix as long as neither of those two policies
-        changes. Per-message keyword projection would collapse cache reuse.
+        Session-level gating (sandbox mode + connector inject mode / project
+        attachment) keeps the tools payload byte-stable across normal turns —
+        the provider prefix cache reuses this prefix as long as those policies
+        do not change. Per-message keyword projection would collapse cache reuse.
         """
         return self.tool_prompts.schemas(self._session_ctx(session_id))
 
     def _session_ctx(self, session_id: str) -> SessionCtx:
-        """Resolve the session's effective sandbox mode.
-
-        Delegates to PolicyStore so this stays authoritative — normalizing
-        legacy modes, respecting event-stream overrides, and inheriting from
-        the project row all live in one place. Falls back to workspace-write
-        on any error so gating never accidentally opens up.
-        """
+        """Resolve sandbox mode and whether MCP/connector tools are included."""
+        sandbox_mode = "workspace-write"
+        project_id = None
         try:
             resolver = getattr(self.executor, "workspace_resolver", None)
             if resolver is not None:
                 policy = resolver.policy.resolve(session_id)
-                return SessionCtx(sandbox_mode=policy.mode)
+                sandbox_mode = policy.mode
             row = self.db.query_one(
-                "SELECT sandbox_mode FROM sessions WHERE session_id=?",
+                "SELECT sandbox_mode, project_id FROM sessions WHERE session_id=?",
                 (session_id,))
-            if row and "sandbox_mode" in row.keys() and row["sandbox_mode"]:
-                from tools.fs.policy import normalize_mode
-                return SessionCtx(sandbox_mode=normalize_mode(row["sandbox_mode"]))
+            if row:
+                if not resolver and row["sandbox_mode"]:
+                    from tools.fs.policy import normalize_mode
+                    sandbox_mode = normalize_mode(row["sandbox_mode"])
+                project_id = row["project_id"] if "project_id" in row.keys() else None
         except Exception:  # noqa: BLE001
             pass
-        return SessionCtx()
+        inject_mode = str(self.config.get("mcp_tools_inject_mode", "project_only")
+                          or "project_only")
+        if inject_mode == "always":
+            include_connectors = True
+        elif inject_mode == "never":
+            include_connectors = False
+        else:
+            include_connectors = bool(project_id)
+        return SessionCtx(sandbox_mode=sandbox_mode,
+                          include_connector_tools=include_connectors)
 
     async def _run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict],
                               emit, repeat_guard: RepeatToolGuard) -> list[dict]:
