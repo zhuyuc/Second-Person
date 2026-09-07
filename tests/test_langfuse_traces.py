@@ -81,6 +81,30 @@ def test_trace_span_generation_parent_chain_is_emitted():
     assert trace_update["output"] == {"title": "标题"}
 
 
+def test_generation_metadata_keeps_prompt_cache_diagnostics():
+    tracer, fake = _tracer()
+    trace = tracer.trace_start("agent.turn", session_id="sid-cache")
+    span = tracer.span_start("agent.step", metadata={
+        "prompt_cache": {"prefix_hash": "prefix", "prefix_reused": True}})
+    generation = tracer.generation_start("llm.agent_step", model="model-a",
+                                          metadata={"prompt_cache": {
+                                              "prefix_hash": "prefix",
+                                              "change_reason": "stable_prefix_reused"}})
+    generation.end(usage={"input": 100, "output": 4, "unit": "TOKENS"},
+                   metadata={"prompt_cache": {"prefix_hash": "prefix"},
+                             "cache_read_tokens": 96})
+    span.end()
+    trace.end()
+
+    span_create = _events(fake, "span-create")[0]["body"]
+    generation_create = _events(fake, "generation-create")[0]["body"]
+    generation_update = _events(fake, "generation-update")[0]["body"]
+    assert span_create["metadata"]["prompt_cache"]["prefix_reused"] is True
+    assert generation_create["metadata"]["prompt_cache"]["change_reason"] == \
+        "stable_prefix_reused"
+    assert generation_update["metadata"]["cache_read_tokens"] == 96
+
+
 def test_error_level_and_status_message_are_emitted():
     tracer, fake = _tracer()
 

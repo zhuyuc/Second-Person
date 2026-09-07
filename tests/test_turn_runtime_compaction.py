@@ -90,6 +90,16 @@ class _NoopCompaction:
         return None
 
 
+class _OverflowRecoveryCompaction(_NoopCompaction):
+    def __init__(self): self.recovered = 0
+    async def compact_now(self, **_kw):
+        self.recovered += 1
+        return CompactionResult(
+            trigger="overflow", shadowed_count=1, shadowed_message_ids=(1,),
+            last_shadowed_message_id=1, released_tokens_est=1000,
+            summary_text="[SUMMARY]", total_before=10000, total_after_est=5000)
+
+
 class _CountingMeter:
     def __init__(self): self.commits = 0
     def commit_anchor(self, *a, **kw): self.commits += 1
@@ -203,6 +213,49 @@ def test_missing_engine_is_optional(tmp_path: Path):
         finally:
             db.close()
 
+    asyncio.run(scenario())
+
+
+def test_context_overflow_compacts_and_retries_once(tmp_path: Path):
+    class _OverflowThenAnswer:
+        def __init__(self): self.calls = 0
+        async def stream_chat(self, _snap, _messages, **_kw):
+            self.calls += 1
+            if self.calls == 1:
+                response = type("Response", (), {
+                    "status_code": 400, "text": "maximum context length exceeded"})()
+                error = RuntimeError("maximum context length exceeded")
+                error.response = response
+                raise error
+            yield "content", "recovered"
+            yield "done", {"content": "recovered", "tool_calls": [],
+                             "usage": {"input_tokens": 10, "output_tokens": 2}}
+
+    async def scenario():
+        db = _db(tmp_path)
+        try:
+            loads = 0
+            async def context_loader(**_kw):
+                nonlocal loads
+                loads += 1
+                return {"snap": _Provider(), "history": [], "history_ids": [],
+                        "history_protected": set(), "memory_count": 0}
+            async def emit(_n, _d): pass
+            comp = _OverflowRecoveryCompaction()
+            llm = _OverflowThenAnswer()
+            runtime = TurnRuntime(
+                db=db, config=_Config(agent_max_steps=3), sessions=_Sessions(),
+                registry=ToolRegistry(), executor=_Executor(), llm=llm,
+                providers=_Providers(), system_prompt=lambda *_a: "sys",
+                context_loader=context_loader, compaction_engine=comp)
+            outcome = await runtime.run(session_id="s", message="hi",
+                                        reasoning_effort="high", emit=emit)
+            assert outcome["content"] == "recovered"
+            assert comp.recovered == 1
+            assert llm.calls == 2
+            assert loads == 2
+        finally:
+            db.close()
     asyncio.run(scenario())
 
 

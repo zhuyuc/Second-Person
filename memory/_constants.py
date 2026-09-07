@@ -110,6 +110,9 @@ RETRIEVAL_REFINE_TIMEOUT_SECONDS = 10
 # key = (session_id, query, tuple(sorted(candidate_ids)))
 RETRIEVER_REFINE_CACHE_SIZE = 128
 RETRIEVER_REFINE_CACHE_TTL_SECONDS = 300   # 5 分钟：覆盖典型重生成窗口
+# 同一检索线索的 embedding 可在短时间内复用；候选仍每次实时查询，避免索引变更滞后。
+RETRIEVER_EMBED_CACHE_SIZE = 256
+RETRIEVER_EMBED_CACHE_TTL_SECONDS = 60
 # LLM 精筛判空时按候选池 top-K 写入 retrieval_negative_count（负样本反馈）
 REFINE_NEGATIVE_FEEDBACK_TOP_K = 3
 # LLM 精筛不可用时的相对得分兜底比例

@@ -433,6 +433,7 @@ class LLMClient:
                           tools: list[dict] | None = None,
                           images: list[str] | None = None,
                           extra_body: dict | None = None,
+                          trace_metadata: dict[str, Any] | None = None,
                           **kw) -> AsyncIterator[tuple]:
         """流式带工具调用：yield 结构化事件供 agent 步循环消费。
 
@@ -451,13 +452,17 @@ class LLMClient:
           出去，即视为 started 不再重试。
         """
         from langfuse.integration import get_tracer
+        generation_metadata = {
+            "source": source, "session_id": session_id,
+            "images": len(images) if images else 0,
+            "thinking_enabled": (extra_body or {}).get("thinking_enabled"),
+            "tools": len(tools) if tools else 0,
+        }
+        if trace_metadata:
+            generation_metadata.update(trace_metadata)
         gen = get_tracer().generation_start(
             name=f"llm.{source}", model=snap.model_id, input=messages,
-            metadata={"source": source, "session_id": session_id,
-                      "images": len(images) if images else 0,
-                      "thinking_enabled": (extra_body or {}).get(
-                          "thinking_enabled"),
-                      "tools": len(tools) if tools else 0},
+            metadata=generation_metadata,
             model_parameters=_observability_parameters(kw, extra_body))
         breaker = self.breaker(snap.model_id)
         if not breaker.allow():
@@ -548,7 +553,7 @@ class LLMClient:
                 "input": usage["input_tokens"], "output": usage["output_tokens"],
                 "total": usage["input_tokens"] + usage["output_tokens"],
                 "input_cache_read": _cache_read, "input_cache_creation": _cache_write,
-                "unit": "TOKENS"}, metadata={
+                "unit": "TOKENS"}, metadata={**generation_metadata,
                     "reasoning_received": reasoning_chars > 0,
                     "reasoning_chars": reasoning_chars,
                     "tool_calls": len(final_tool_calls),

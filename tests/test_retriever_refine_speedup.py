@@ -120,6 +120,60 @@ def test_cache_miss_on_different_session():
     assert count == 2
 
 
+def test_cache_miss_when_context_changes():
+    """同 query/candidates 但对话上下文不同，必须重新精筛。"""
+    count = 0
+    async def refine(query, payload, session_id=None, context_text=None):
+        nonlocal count; count += 1
+        return [payload[0]["id"]]
+    r = _retriever(refine)
+    cands = [_make_candidate("m0"), _make_candidate("m1")]
+    _run(r._refine("q", cands, session_id="s", context_text="context A",
+                   result=RetrievalResult()))
+    _run(r._refine("q", cands, session_id="s", context_text="context B",
+                   result=RetrievalResult()))
+    assert count == 2
+
+
+def test_concurrent_refines_share_one_provider_call():
+    async def scenario():
+        calls = 0
+        async def refine(query, payload, session_id=None, context_text=None):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.02)
+            return [payload[0]["id"]]
+        r = _retriever(refine)
+        cands = [_make_candidate("m0"), _make_candidate("m1")]
+        first, second = await asyncio.gather(
+            r._refine("q", cands, "s", "same", RetrievalResult()),
+            r._refine("q", cands, "s", "same", RetrievalResult()),
+        )
+        assert calls == 1
+        assert first[0] == second[0] == ["m0"]
+        assert {first[1], second[1]} == {"full", "refine_inflight"}
+    asyncio.run(scenario())
+
+
+def test_embedding_cache_and_inflight_reuse_exact_cue():
+    async def scenario():
+        calls = 0
+        async def embed(cues):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.02)
+            return [[0.1, 0.2]]
+        r = Retriever(db=None, vector_store=None, palace=None, config=_Config(),
+                      data_dir=".", embed_fn=embed)
+        first, second = await asyncio.gather(
+            r._embed_query("same cue"), r._embed_query("same cue"))
+        third = await r._embed_query("same cue")
+        assert calls == 1
+        assert {first[1], second[1]} == {"miss", "inflight"}
+        assert third[1] == "cache"
+    asyncio.run(scenario())
+
+
 def test_cache_key_is_order_insensitive():
     """候选顺序不同（预筛排序抖动）不应影响 cache key。"""
     count = 0

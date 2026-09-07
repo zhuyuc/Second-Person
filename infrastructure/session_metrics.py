@@ -28,7 +28,26 @@ def _metric_row(row: dict | None) -> dict:
         "output_tokens": output_tokens,
         "cache_read_tokens": _num(row.get("cache_read_tokens")),
         "cache_write_tokens": _num(row.get("cache_write_tokens")),
+        "system_prompt_hash": row.get("system_prompt_hash"),
+        "tool_schema_hash": row.get("tool_schema_hash"),
+        "session_context_hash": row.get("session_context_hash"),
+        "prefix_hash": row.get("prefix_hash"),
+        "cache_change_reason": row.get("cache_change_reason"),
+        "prefix_reused": bool(_num(row.get("prefix_reused"))),
         "tool_ms": _num(row.get("tool_ms")),
+    }
+
+
+def _cache_snapshot(row: dict | None) -> dict | None:
+    if not row or not row.get("system_prompt_hash"):
+        return None
+    return {
+        "system_prompt_hash": row.get("system_prompt_hash"),
+        "tool_schema_hash": row.get("tool_schema_hash"),
+        "session_context_hash": row.get("session_context_hash"),
+        "prefix_hash": row.get("prefix_hash"),
+        "change_reason": row.get("cache_change_reason"),
+        "prefix_reused": bool(_num(row.get("prefix_reused"))),
     }
 
 
@@ -36,7 +55,13 @@ def record_step(db, *, turn_id: str, step: int, llm_ms: int,
                 ttft_ms: int | None, decode_ms: int | None,
                 input_tokens: int = 0, output_tokens: int = 0,
                 cache_read_tokens: int = 0, cache_write_tokens: int = 0,
-                tool_ms: int = 0, context_ms: int = 0) -> None:
+                tool_ms: int = 0, context_ms: int = 0,
+                system_prompt_hash: str | None = None,
+                tool_schema_hash: str | None = None,
+                session_context_hash: str | None = None,
+                prefix_hash: str | None = None,
+                cache_change_reason: str | None = None,
+                prefix_reused: bool = False) -> None:
     """Insert one idempotent step reading.
 
     A retry/reconnect must not double count a model call. The unique turn/step
@@ -48,17 +73,26 @@ def record_step(db, *, turn_id: str, step: int, llm_ms: int,
     db.execute(
         "INSERT INTO agent_step_metrics(turn_id,step,llm_ms,ttft_ms,decode_ms,"
         "input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,tool_ms,"
-        "context_ms,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+        "context_ms,system_prompt_hash,tool_schema_hash,session_context_hash,"
+        "prefix_hash,cache_change_reason,prefix_reused,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(turn_id,step) DO UPDATE SET llm_ms=excluded.llm_ms,"
         "ttft_ms=excluded.ttft_ms,decode_ms=excluded.decode_ms,"
         "input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,"
         "cache_read_tokens=excluded.cache_read_tokens,"
         "cache_write_tokens=excluded.cache_write_tokens,tool_ms=excluded.tool_ms,"
-        "context_ms=excluded.context_ms",
+        "context_ms=excluded.context_ms,"
+        "system_prompt_hash=excluded.system_prompt_hash,"
+        "tool_schema_hash=excluded.tool_schema_hash,"
+        "session_context_hash=excluded.session_context_hash,"
+        "prefix_hash=excluded.prefix_hash,"
+        "cache_change_reason=excluded.cache_change_reason,"
+        "prefix_reused=excluded.prefix_reused",
         (turn_id, step, _num(llm_ms), ttft_ms, decode_ms, _num(input_tokens),
          _num(output_tokens), _num(cache_read_tokens), _num(cache_write_tokens),
-         _num(tool_ms), _num(context_ms),
+         _num(tool_ms), _num(context_ms), system_prompt_hash, tool_schema_hash,
+         session_context_hash, prefix_hash, cache_change_reason,
+         1 if prefix_reused else 0,
          now_cst().isoformat(timespec="seconds")),
     )
 
@@ -73,7 +107,9 @@ def add_tool_time(db, *, turn_id: str, step: int, tool_ms: int) -> None:
 def turn_metrics(db, turn_id: str) -> dict:
     rows = db.query_all(
         "SELECT step,llm_ms,ttft_ms,decode_ms,input_tokens,output_tokens,"
-        "cache_read_tokens,cache_write_tokens,tool_ms,context_ms "
+        "cache_read_tokens,cache_write_tokens,tool_ms,context_ms,"
+        "system_prompt_hash,tool_schema_hash,session_context_hash,prefix_hash,"
+        "cache_change_reason,prefix_reused "
         "FROM agent_step_metrics WHERE turn_id=? ORDER BY step", (turn_id,))
     readings = [_metric_row(row) for row in rows]
     first_ttft = next((r["ttft_ms"] for r in readings if r["ttft_ms"] is not None), None)
@@ -84,6 +120,14 @@ def turn_metrics(db, turn_id: str) -> dict:
     cache_read_tokens = sum(r["cache_read_tokens"] for r in readings)
     cache_write_tokens = sum(r["cache_write_tokens"] for r in readings)
     context_ms = sum(r["context_ms"] for r in readings)
+    cache_reasons = {}
+    for reading in readings:
+        reason = reading.get("cache_change_reason")
+        if reason:
+            cache_reasons[reason] = cache_reasons.get(reason, 0) + 1
+    latest_cache = next((_cache_snapshot(r) for r in reversed(readings)
+                         if r.get("system_prompt_hash")), None)
+    cache_observations = sum(1 for r in readings if r.get("system_prompt_hash"))
     return {
         "steps": len(readings),
         "llm_ms": sum(r["llm_ms"] for r in readings),
@@ -95,6 +139,13 @@ def turn_metrics(db, turn_id: str) -> dict:
         "input_tokens": input_tokens,
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
+        "prompt_cache": {
+            "version": "prompt-cache-v1",
+            "observations": cache_observations,
+            "prefix_reused_steps": sum(1 for r in readings if r["prefix_reused"]),
+            "change_reasons": cache_reasons,
+            "latest": latest_cache,
+        },
         "tokens_per_second": (output_tokens / (decode_ms / 1000.0)
                                if decode_ms > 0 else None),
     }
@@ -131,6 +182,20 @@ def session_metrics(db, session_id: str, *, current_turn_id: str | None = None) 
             (session_id,)) or usage
     input_tokens = _num(usage.get("input_tokens"))
     cache_read = _num(usage.get("cache_read_tokens"))
+    cache_rows = db.query_all(
+        "SELECT m.system_prompt_hash,m.tool_schema_hash,m.session_context_hash,"
+        "m.prefix_hash,m.cache_change_reason,m.prefix_reused "
+        "FROM agent_turns t JOIN agent_step_metrics m ON m.turn_id=t.id "
+        "WHERE t.session_id=? ORDER BY m.created_at", (session_id,))
+    cache_reasons = {}
+    for cache_row in cache_rows:
+        reason = cache_row.get("cache_change_reason")
+        if reason:
+            cache_reasons[reason] = cache_reasons.get(reason, 0) + 1
+    latest_cache = next((_cache_snapshot(row) for row in reversed(cache_rows)
+                         if row.get("system_prompt_hash")), None)
+    cache_observations = sum(1 for row in cache_rows
+                             if row.get("system_prompt_hash"))
     result = {
         "turns": _num(row.get("turns")),
         "steps": _num(row.get("steps")),
@@ -150,6 +215,13 @@ def session_metrics(db, session_id: str, *, current_turn_id: str | None = None) 
         "cache_read_tokens": cache_read,
         "cache_write_tokens": _num(usage.get("cache_write_tokens")),
         "cache_hit_percent": (cache_read / input_tokens * 100 if input_tokens else None),
+        "prompt_cache": {
+            "version": "prompt-cache-v1",
+            "observations": cache_observations,
+            "prefix_reused_steps": sum(1 for r in cache_rows if _num(r.get("prefix_reused"))),
+            "change_reasons": cache_reasons,
+            "latest": latest_cache,
+        },
         "updated_at": now_cst().isoformat(timespec="seconds"),
     }
     if current_turn_id:

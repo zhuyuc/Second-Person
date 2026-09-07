@@ -559,32 +559,37 @@ class SessionStore:
         msgs: list[dict] = []
         if summary_text and watermark:
             head_rows = self.db.query_all(
-                "SELECT id,role,content FROM conversations WHERE session_id=? "
+                "SELECT id,role,content,protected_from_compression FROM conversations WHERE session_id=? "
                 f"AND id<=? AND message_type='normal' {active_filter} ORDER BY id LIMIT ?",
                 (sid, watermark, head_msgs))
             for r in head_rows:
                 if r["role"] in ("user", "assistant"):
                     msgs.append({"role": r["role"], "content": r["content"],
-                                 "id": r["id"]})
+                                 "id": r["id"],
+                                 "protected": bool(r["protected_from_compression"])})
             msgs.append({
                 "role": "user",
                 "content": PROMPTS.load_raw("agent/prompts/compact_prefix")
                 + "\n" + summary_text,
+                # 摘要代表已压缩至 watermark 的历史；给它同一水位 id 后，
+                # 后续压缩可以把旧摘要和新增 tail 再浓缩，而不会被 None 阻断。
+                "id": watermark,
             })
         if watermark:
             tail_rows = self.db.query_all(
-                "SELECT id,role,content FROM conversations "
+                "SELECT id,role,content,protected_from_compression FROM conversations "
                 f"WHERE session_id=? AND id>? AND message_type='normal' {active_filter} ORDER BY id",
                 (sid, watermark))
         else:
             tail_rows = self.db.query_all(
-                "SELECT id,role,content FROM conversations "
+                "SELECT id,role,content,protected_from_compression FROM conversations "
                 f"WHERE session_id=? AND message_type='normal' {active_filter} ORDER BY id",
                 (sid,))
         for r in tail_rows:
             if r["role"] in ("user", "assistant"):
                 msgs.append({"role": r["role"], "content": r["content"],
-                             "id": r["id"]})
+                             "id": r["id"],
+                             "protected": bool(r["protected_from_compression"])})
         return msgs
 
     async def save_summary(self, sid: str, summary_body: str, last_msg_id: int) -> None:

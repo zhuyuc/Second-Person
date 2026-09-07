@@ -9,7 +9,7 @@
 
 ## 一、产品定位
 
-**Second Person（第二人格）** 是一个**本地运行的个人智能体助手**，核心理念是"记忆宫殿 + 八步对话流水线"：
+**Second Person（第二人格）** 是一个**本地运行的个人智能体助手**，核心理念是“记忆宫殿 + 事件化 Agent 运行时”。
 
 - **有记忆**：三层记忆架构（工作记忆 / 会话记忆 / 记忆宫殿），越用越懂用户；
 - **有人格**：SOUL 双层人格系统（稳定核 + 演化风格），根据用户反馈持续演化；
@@ -33,8 +33,8 @@
 │  应用层  FastAPI 路由 (chat/memory/settings/soul/misc)      │
 │          AppContainer 依赖注入容器 · SSE 流式 · 断线重连缓冲 │
 ├────────────────────────────────────────────────────────────┤
-│  编排层  AgentCore 八步对话流水线                            │
-│          意图识别 → DAG 调度 → 工具执行 → 响应合成 → 后置处理│
+│  编排层  AgentCore / TurnRuntime 事件化 Agent 循环           │
+│          上下文 → 模型工具决策 → 工具事件回填 → 流式回复     │
 ├──────────────┬──────────────┬──────────────┬───────────────┤
 │  记忆系统     │  人格系统     │  工具系统     │  系统 Agent   │
 │  提炼/检索/   │  SOUL/画像/  │  内置+MCP/   │  回顾/Lint/   │
@@ -73,47 +73,31 @@
 
 ## 三、核心功能域
 
-### 3.1 对话调度引擎（八步流水线）
+> 当前状态：本节的 3.1 和 3.2 已按运行时代码更新。其余子节保留产品设计目标与
+> 历史背景，其中的具体计数、阈值、模块名和接口不定义当前实现；当前能力索引见
+> `docs/CURRENT_PRODUCT_CAPABILITIES.md`。
 
-一次用户消息的完整处理链路（`agent/core.py`），全程 Langfuse trace 包裹：
+### 3.1 对话调度引擎（事件化 Agent 运行时）
 
-| 步骤 | 内容 | 关键机制 |
-| --- | --- | --- |
-| 1 输入预处理 | 清洗控制字符；图片经视觉模型解析；URL 自动 web_fetch 预加载（最多 2 个）；信号采集阶段二回填 | 重新生成时先删除旧轮次 |
-| 2 上下文加载 | 冻结快照 = Protected Head(3 条) + 压缩摘要 + Protected Tail(20 轮)；SOUL + 时间 + 位置 + 画像 + 技能目录组装 system prompt | 估算超 80000 token 触发压缩 |
-| 3 记忆检索 | 三级联动混合检索（详见 3.3.4），命中即发 `memory_retrieved` 事件；stale 命中自动恢复 | 检索 query 剥离附件正文（保护本地 embedding） |
-| 4 意图识别 | LLM 结构化输出拆解多意图（11 种枚举），JSON 修复链 + 重试 3 次 | 失败降级单 chat 意图 |
-| 5 流程编排 | DAG 拓扑分层（Kahn），同层并行；环检测降级单意图直出；技能按需注入 | 依赖容错：非法依赖丢弃、未注册工具剔除 |
-| 6 工具执行 | 按层 asyncio 并行；LLM function_call 推断参数；直接执行；失败 Replan 补救（每请求 1 次） | 参数校验、超时、空结果重试、凭证脱敏与外部内容防护 |
-| 7 事件化执行 | 宿主组装上下文和工具 schema；模型在 `off/low/high/max` 推理等级内决定是否调用工具；工具结果持久化后回填下一步模型上下文 | 单次模型物理上限只影响单步，不截短用户可见交付 |
-| 8 后置处理 | 回复落库（安全分析元数据、策略、骨架）；信号采集阶段一；主动记忆检测；频次更新；引用溯源；预算告警 | fire-and-forget，不阻塞回复 |
+每轮对话由 `AgentCore` 装配上下文，再由 `TurnRuntime` 执行可恢复的模型/工具循环：
 
-**意图类型枚举（11 种）**：`query_memory` / `query_knowledge` / `query_external` / `compute` / `file_op` / `remember_intent`（明确记忆指令，直接写入）/ `remember_confirm`（重要性表态，需确认）/ `soul_feedback` / `output_preference_feedback` / `meta` / `chat`。
+1. 加载会话、项目、记忆、SOUL 和可用工具；记忆检索按 Hybrid 预筛、图扩展和 LLM 精筛完成。
+2. 组装稳定 system/tool 前缀，并将时间、位置、项目、记忆和 handoff 等动态内容放在末尾。
+3. 每个模型步骤前检查 token 压力；达到阈值时压缩安全的历史头部。若 provider 在未输出前报告上下文超限，强制压缩并重试一次。
+4. 模型在 `off`、`low`、`high`、`max` 推理等级下决定是否调用宿主注册的工具；工具结果作为 `agent_events` 回填后进入下一步。
+5. 生成回复、引用、步骤指标和分析元数据并持久化。工具步骤的临时旁白会通过 `content_reset` 撤回，用户最终只看到完整答案。
 
-**SSE 事件类型**：事件名、字段和终态语义由 `docs/API_CONTRACT.md` 统一定义并由运行时契约校验。对话界面显示处理进度和可验证结论；Langfuse 向开发者提供结构化的路由、上下文、工具和质量调试记录。
-
-**并发与可靠性**：
-
-- 同会话串行处理，排队上限 `session_queue_limit=3`；模型与工具保留各自超时，整轮任务不以固定总时长截断长文交付；
-- SSE 断线重连：按 `client_request_id` 缓冲事件 5 分钟 / 1MB，重连断点续推；
-- 浏览器断开只断开 SSE 读者，后台生成继续并可重连；仅用户点击停止才取消 worker，深度/长文任务使用较长的可恢复缓冲窗口；
-- mimo 模型内置联网搜索：query_external 意图 + mimo 模型 + 开关开启时由模型端搜索（博查源，带结构化引用，回复尾部自动附"联网来源"列表），否则回退自研 web_search（Bing 优先 / DuckDuckGo 兜底）。
-
-**延迟写入**：`file_write` 内容为回复正文时（`__FROM_RESPONSE__` 标记），登记延迟写，回复流式生成完成后自动写入。
-
-**文档生成兜底**：`generate_document` 产物的下载链接若未出现在正文，自动追加文件卡片，保证下载入口必然可见。
+同一会话生成串行；断线可用相同 `client_request_id` 重连，用户主动取消才中止任务。SSE 事件、字段和终态语义以 `docs/API_CONTRACT.md` 为准；Langfuse 提供上下文、检索、压缩、工具和模型调用的开发者追踪。
 
 ### 3.2 上下文与会话管理
 
-#### 3.2.1 L1 上下文压缩（五段式）
+#### 3.2.1 L1 上下文压缩
 
-- 触发：上下文估算超 `compression_threshold_tokens`（默认 80000）；
-- 结构：只压 Middle 段，Head（前 3 条）与 Tail（最近 3 轮）原文保护；
-- 五段输出：S1 决策记录（绝对日期防重复执行）/ S2 话题栈（当前+挂起）/ S3 分析框架与结论 / S4 话题演变线索 / S5 待跟进任务；
-- 二次压缩：旧摘要与新增 middle 合并压缩，不嵌套；
-- 窗口校验：压缩模型 context window ≥ 阈值 ×1.3，不足回退对话模型；middle 超窗按时间切段串行压缩、摘要链式归并；
-- 摘要落盘：`sessions/{sid}.md`（frontmatter 含压缩水位 `last_compressed_message_id`）；
-- 失败兜底：退化为 Head + 旧摘要 + Tail；连续失败 3 次推系统通知建议新建会话。
+- 触发：以当前 Provider 的 context window 为基准，默认在 token 压力达到 80% 时触发，而非固定 80,000 token；尾部默认保留 20%。
+- 区间：只压缩可安全替换的历史头部；不会跨越 `protected_from_compression` 原文，也不会切断 assistant tool_calls 和 tool result 对。
+- 输出：使用 8 段 checkpoint 摘要，保存到会话摘要并推进 `last_compressed_message_id` 水位；摘要本身可继续参与后续压缩判断。
+- 恢复：手动压缩可无视压力阈值；provider 在本 step 未输出前报告上下文超限时，系统强制压缩、重建上下文并仅重试一次。
+- 失败：摘要生成或保存失败不会中断主回复，压缩失败状态留给后续观测和恢复。
 
 #### 3.2.2 会话管理
 
@@ -382,7 +366,7 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 ### 3.12 可观测性
 
 - **trace_id 全链路**：每请求 tr_ 前缀 id，contextvars 跨 await 传播，日志行携带，错误 toast 可复制；
-- **Langfuse 全链路追踪**：自研批量协议客户端（队列 2000 上限 / 3 秒批量上报 / 失败仅告警绝不影响主链路）；层级 trace（chat.turn）→ span（八步流水线 7 个步骤）→ generation（LLM 调用自动记录模型/输入输出/用量）；标题生成不纳入埋点；本地自托管 Langfuse v2（PostgreSQL 5433 + Redis 6379，页面 3001）；
+- **Langfuse 全链路追踪**：自研批量协议客户端（队列 2000 上限 / 3 秒批量上报 / 失败仅告警绝不影响主链路）；主 trace 为 `agent.turn`，包含上下文、检索、压缩、模型步骤和工具 span/generation；标题和 handoff 使用独立 trace；本地自托管 Langfuse v2 的部署说明见 `langfuse/deploy/README.md`；
 - **运行防线**：EventLoopMonitor 事件循环卡顿哨兵（>0.5s warning / >2s error）、慢操作检测（3000ms）、写队列深度仪表、操作日志（90 天，仅排障）；
 - **健康检查**：/api/health 九项子系统三级判定（healthy/degraded/unhealthy），前端侧栏状态灯 30 秒轮询。
 
@@ -425,34 +409,30 @@ Agent 注册表：内存心跳监控（任务超时 10 分钟 / 心跳卡死 3 �
 
 ---
 
-## 五、API 总览（前缀 /api，统一响应 {code, data / message, trace_id, details}）
+## 五、API 总览
 
-| 域 | 端点（方法 路径） |
-| --- | --- |
-| 对话 | POST /chat/send（SSE）、POST /chat/cancel、GET /chat/session/{sid}/active-request、GET /chat/sessions、GET /chat/messages、POST /chat/feedback、POST /chat/session/rename·create·pin、POST /chat/attachment、DELETE /chat/session/{sid}、GET /chat/session/{sid}/usage |
-| 记忆 | POST /memory/list、GET /memory/domains·domain-labels·detail、PUT /memory/{id}/attributes、POST /memory/archive·restore·delete、GET /memory/graph·graph/entity/{id}/memories·neighbors·graph/search、GET /memory/timeline、GET /memory/health、POST /memory/lint/run·suggestions/accept·dismiss、POST /memory/orphans/relink、GET /memory/conflicts、POST /memory/conflicts/resolve |
-| 引导 | GET /onboarding/status、POST /onboarding/test-connection·test-embedding·welcome-chat/start·finish·soul/confirm |
-| 知识库 | POST /import/document·url、GET /import/documents·/{id}、POST /import/documents/{id}/confirm、DELETE /import/documents/{id}、GET /files/{name} |
-| 设置 | providers CRUD+test+key、model-assignment GET/PUT、embedding estimate/migrate/status/pause/resume、params GET/PUT/reset、connectors CRUD+test+toggle+refresh-tools、usage summary/distribution/trend/month-cost、backups list/create/restore/export/import、status、platforms CRUD+enable/disable/test/resume、tasks list/run/logs |
-| 人格 | GET /profile、POST /profile/build-now、GET /soul、PUT /soul/core、POST /soul/core/reset、GET /soul/style/history·diff、POST /soul/style/rollback、GET /soul/pending、POST /soul/pending/confirm、GET /output-style、POST /output-style/toggle-auto·build-now |
-| 技能 | GET /skills/drafts、POST /skills/drafts/activate·delete、POST /skills/create |
-| 其他 | GET /tasks/{id}/status、POST /im/webhook/{platform}、GET /connectors/oauth/callback、GET /health |
+当前接口由 FastAPI 生成 `/openapi.json`，并以 `docs/API_CONTRACT.md` 作为公开 HTTP/SSE
+契约。路由覆盖以下能力域：对话与会话、项目工作区、记忆与知识库、SOUL 与画像、Provider
+和模型槽位、MCP 连接器、渠道、备份、任务及系统健康。历史端点清单不再在本文维护，避免
+与运行中的路由产生重复来源。
 
 ---
 
 ## 六、数据模型
 
-### 6.1 SQLite 表清单（migrations 001~011）
+### 6.1 SQLite 表与迁移
 
-| 分组 | 表 |
+数据库结构由 `migrations/` 中的顺序迁移定义，运行时以 `schema_migrations` 记录版本。当前
+版本已包含项目工作区、会话 handoff、Agent turn/event/step 指标、记忆候选治理和 Prompt 缓存观测；
+以下分组仅说明产品数据边界，不替代迁移文件。
+
+| 分组 | 当前持久化边界 |
 | --- | --- |
-| 供应商与凭证 | credentials（加密凭证）、providers、model_assignment（chat/agent/intent/deep_analysis/embedding/vision 槽位） |
-| 接入渠道 | platforms、platform_sessions、message_dedup |
-| 对话 | conversations（含 thinking/citations/analysis_metadata/feedback）+ conversations_fts + 触发器、sessions（含置顶/压缩水位）、delivery_jobs、delivery_sections |
-| 记忆索引 | memories（主索引）、memories_fts、vectors（BLOB + pending/ready/failed）、memory_links（5 类边）、memory_entities、memory_entity_links、memory_timeline、lint_suggestions、graph_layout（预计算坐标）、domain_labels（中文标签缓存）、citation_events（引用溯源）、review_candidates（回顾候选）、pending_imports（导入预览暂存） |
-| 素材与技能 | raw_docs（含 extracted_text 解析缓存/review_status）、skill_usage、skill_patterns（3 次计数） |
-| 写入与信号 | pending_writes（写队列持久化）、response_signals（两阶段信号） |
-| 运维 | token_usage、scheduled_tasks、task_logs、operation_logs、embedding_migration、vectors_old_backup、oauth_states、connectors、schema_migrations |
+| 配置与连接 | Provider、模型分配、凭证、MCP 连接器和渠道配置 |
+| 对话 | 会话、用户可见消息、Agent turn/event、步骤指标、会话压缩水位和 handoff 状态 |
+| 记忆 | Markdown 主副本、SQLite 检索索引、向量、关系、候选治理、导入素材与图谱数据 |
+| 项目 | 项目元数据、会话策略事件和文件观察记录 |
+| 运维 | 用量、任务与日志、备份/迁移状态、操作记录和 schema 迁移版本 |
 
 ### 6.2 data/ 目录结构
 
@@ -475,9 +455,9 @@ data/
 
 ---
 
-## 七、配置体系（PARAM_SCHEMA 全参数）
+## 七、配置体系（历史快照）
 
-全部参数声明类型/值域/默认值/生效时机（immediate/next_turn/next_session）/分组/中文说明，前端动态渲染，保存时统一校验（含跨参数约束）。
+当前参数声明、默认值、值域和生效时机以 `infrastructure/config_manager.py` 的 `PARAM_SCHEMA` 及设置页为准。下表保留旧版产品分组示例，不用于读取当前默认值或判断参数是否仍公开。
 
 | 分组 | 参数（默认值） |
 | --- | --- |
@@ -491,7 +471,9 @@ data/
 
 ---
 
-## 八、运行与部署
+## 八、运行与部署（历史说明）
+
+当前可用启动命令和前置条件以 `README.md` 为准；`start.py` 的命令行参数是唯一实现来源。下面的服务编排描述保留为部署目标和历史背景。
 
 ### 8.1 启动编排（start.py）
 
@@ -537,26 +519,10 @@ frontend/ 下 `npm run build`，产物部署至 `app/static/` 由主应用挂载
 
 ---
 
-## 附录 A：系统 Prompt 资产清单（全部外部化为 md，热重载）
+## 附录 A：Prompt 资产
 
-| 文件 | 用途 |
-| --- | --- |
-| agent/prompts/intent_system.md | 意图解析器：11 种枚举、remember_intent/confirm 边界、实时信息必走 web_search 规则 |
-| agent/prompts/memory_card.md | 主动记忆卡片：20 字含主语标题 + 30 字第三人称摘要 |
-| agent/prompts/compress_system.md | 六段结构对话压缩（S0-S5，S1 绝对日期防重复执行） |
-| agent/prompts/replan.md | 工具失败补救判定（retry_other_tool/retry_same_tool/skip/abort） |
-| agent/prompts/response_synth.md | 响应合成：实时信息只依据工具结果、缺失如实告知、末尾 citations 声明 |
-| agent/prompts/compact_prefix.md | 压缩摘要注入前缀（声明为历史参考非当前指令） |
-| agent/prompts/initial_soul.md | 引导期从欢迎对话生成初始 SOUL 草稿 |
-| agent/prompts/profile_rebuild.md | 用户画像重建（维度 + 已确认/部分推断标注） |
-| agent/prompts/output_style.md | 输出样式画像提炼（50-150 字自然语言） |
-| app/prompts/distill.md | 对话记忆提炼：六类归属判定 + 粒度四原则 + “下次对话仍有用不判 session_fact” |
-| app/prompts/distill_document.md | 文档知识提炼：attribution 一律 imported，知识点粒度逐条抽取 |
-| app/prompts/merge_judge.md | 记忆关系判定（same/evolved/contradicts/related + 保守裁决规则） |
-| app/prompts/memory_refine.md | 检索第 2 层精筛（选最相关 2-3 条） |
-| app/prompts/domain_label.md | 领域英文 slug → 2-8 字中文标签 |
-| app/prompts/extract_image.md | 图片内容解析（VLM 完整转写 + 客观描述） |
-| app/prompts/title_gen.md | 会话标题（2-8 字名词/动词短语，禁判断词开头） |
+当前已加载的 Prompt 文件和 LLM 调用点统一登记在 `docs/PROMPT_REGISTRY.md`，并由
+`tests/test_prompt_registry.py` 对账。本附录不再重复旧版文件清单。
 
 ## 附录 B：EventBus 预置事件（11 个）
 

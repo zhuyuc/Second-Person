@@ -156,9 +156,9 @@ ToolExecutor 通过 `ToolSpec.needs_workspace = True` 识别 fs 工具，
 
 ## 测试
 
-`tests/test_projects_m1.py` / `m2.py` / `m3.py` / `m4.py`：全部 76+ 用例
-覆盖数据模型、API 契约、Retriever 隔离、entity_id 分裂、fs 工具 + 沙箱
-四档矩阵、目录浏览、手动归档幂等。全库回归 240+ tests，零失败。
+`tests/test_projects_m1.py` / `m2.py` / `m3.py` / `m4.py` 覆盖数据模型、API 契约、
+Retriever 隔离、entity_id 分裂、fs 工具和沙箱四档矩阵、目录浏览及手动归档幂等。
+测试数量会随项目演进变化，不在本文固定；以当前 CI/本地全量回归结果为准。
 
 ## 已知不做
 

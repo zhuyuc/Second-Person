@@ -24,6 +24,7 @@
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `session_id` | string | 可选，缺省时创建会话 |
+| `project_id` | string | 可选项目工作区；创建会话时绑定项目，已有会话仍以其已保存的项目归属为准 |
 | `message` | string | 当前用户消息 |
 | `client_request_id` | string | 可选重连键，最长 120 字符 |
 | `images` | string[] | 可选图片 data URI |
@@ -35,6 +36,13 @@
 | `reasoning_effort` | `off` / `low` / `high` / `max` | 单轮推理预算；缺省为 `high` |
 
 同一会话的生成串行执行。断线重连使用相同 `client_request_id` 读取服务端缓冲；只有 `POST /api/chat/cancel` 会取消正在执行的任务。
+
+`GET /api/chat/session/{session_id}/metrics` 的 `data.prompt_cache` 提供 Prompt
+前缀观测：`observations` 为已采集 step 数，`prefix_reused_steps` 为 system/tool
+稳定前缀复用的 step 数，`change_reasons` 按原因计数，`latest` 只包含
+`system_prompt_hash`、`tool_schema_hash`、`session_context_hash`、`prefix_hash`、
+`change_reason` 和 `prefix_reused`。hash 是 SHA-256，不包含 Prompt 原文；
+`cache_hit_percent` 仍沿用 provider usage 的现有统计口径。
 
 ## 任务与工具执行
 
@@ -70,21 +78,25 @@ data: <JSON object>
 | --- | --- | --- |
 | `queued` | `session_id` | 同会话排队提示 |
 | `reasoning_delta` | `text`, `source` | Provider 明确返回的原生 reasoning 增量；没有该事件不代表宿主没有执行决策 |
+| `memory_progress` | `stage`, `status`, `summary` | 记忆检索阶段的真实进度与命中摘要 |
 | `decision_notice` | `stage`, `actor`, `source`, `reason_code`, `summary` | 宿主基于工具注册信息和能力目录推断的可验证摘要，不伪造隐藏思维链 |
 | `turn_started` | `turn_id`, `reasoning_effort` | 已创建持久化任务轮次 |
 | `step_started` | `turn_id`, `step` | 模型/工具循环的新步骤 |
+| `step_progress` | `turn_id`, `step`, `phase`, `label` | 当前步骤中的上下文、压缩或模型阶段提示 |
 | `tool_executing` | `tool_name`, `status` | 工具执行状态 |
 | `tool_result` | `turn_id`, `tool_name`, `ok` | 工具结果摘要 |
 | `tool_visual` | `type`, `data` | 工具生成的图形 |
 | `content_delta` | `text` | 回复正文增量 |
+| `content_reset` | `turn_id` | 工具步骤先产生旁白后，将其从用户可见正文撤回，只保留最终答案 |
 | `citations` | `refs` | 回复引用 |
 | `handoff_ready` | `status` | 会话交接摘要状态 |
 | `mood_updated` | `ai_mood` | 人格情绪快照 |
 | `turn_completed` | `message_id` | 本轮持久化完成，附安全 `analysis_metadata` |
+| `step_metrics` | `turn_id`, `step` | 多步骤任务在步骤边界更新用量和会话指标 |
 | `error` | `code`, `message` | 本轮异常或取消 |
 
 `turn_completed` 和 `error` 是生成终态。前端必须兼容未知的附加字段；后端新增事件时，先更新 `SSE_EVENT_SPECS`、本文件和前端处理逻辑。
 
 ## 开发者调试记录
 
-Langfuse 的 `developer_trace` 元数据记录可验证的运行事实（任务 ID、推理等级、步骤数、调用数、耗时和结束原因），不记录模型隐藏推理。调用输入输出全量上报（本地自托管，无隐私外泄）。它是开发分析入口，不属于面向用户的 SSE 内容。
+Langfuse 的 `developer_trace` 元数据记录可验证的运行事实（任务 ID、推理等级、步骤数、调用数、耗时和结束原因），不记录模型隐藏推理。调用输入输出会按配置上报到 Langfuse；手机号、邮箱、地址、密钥等已识别敏感字段在上报前替换为脱敏占位。它是开发分析入口，不属于面向用户的 SSE 内容。

@@ -42,7 +42,7 @@ createdb -U postgres langfuse
 | Public Key | `langfuse.env` 的 `LANGFUSE_INIT_PROJECT_PUBLIC_KEY` |
 | Secret Key | `langfuse.env` 的 `LANGFUSE_INIT_PROJECT_SECRET_KEY` |
 
-重启 Second Person（`python start.py`）后发起对话，几秒后在 `http://localhost:3001` 的 Tracing 页即可看到 `chat.turn` 完整流转树。
+重启 Second Person（`python start.py`）后发起对话，几秒后在 `http://localhost:3001` 的 Tracing 页即可看到 `agent.turn` 完整流转树。
 
 > 说明：Second Person 用的是与 Langfuse v2 完全匹配的 Ingestion API（`/api/public/ingestion`）上报，
 > 埋点覆盖事件化对话运行时（context.assemble / agent.step / agent.decision /

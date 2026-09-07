@@ -101,6 +101,14 @@ langfuse_secret_key: "sk-lf-xxxxxxxx"
 
 正常发起对话即可。稍等几秒（后台批量上报间隔默认 3s），刷新 Langfuse UI 的 Tracing 页面，即可看到名为 `agent.turn` 的完整调用树。
 
+### Prompt 缓存观测
+
+展开 `agent.turn > agent.step > llm.agent_step`，可在 metadata 中查看
+`prompt_cache`：`change_reason` 说明本步前缀为何变化，`prefix_reused` 表示
+system prompt 与工具 schema 是否复用，四个 `*_hash` 用于关联同一前缀而不暴露
+原文。`llm.agent_step` 完成后还会记录 `cache_read_tokens`、
+`cache_write_tokens` 和 `cache_hit_rate`，可与首 token 和整体耗时一起分析。
+
 ## 可选环境变量
 
 | 变量 | 说明 | 默认 |

@@ -2,13 +2,13 @@
 PipelineTracer —— 面向事件化 Agent 运行时的高层追踪器。
 
 层级模型（对齐 Langfuse 的 trace → observation 结构）：
-- trace：一次对话轮次（chat.turn），带 session_id / 用户输入 / 最终输出
+- trace：一次对话轮次（agent.turn），带 session_id / 用户输入 / 最终输出
 - span：Agent 轮次中的一个步骤（上下文组装、模型步骤、工具执行、决策记录）
 - generation：一次 LLM 模型调用（模型名、输入消息、输出、token 用量、延迟）
 
 用法（手动 start/end，避免大范围改动缩进）：
     tr = get_tracer()
-    trace = tr.trace_start(name="chat.turn", session_id=sid, input=message)
+    trace = tr.trace_start(name="agent.turn", session_id=sid, input=message)
     try:
         sp = tr.span_start("context.assemble", input=message)
         ... ; sp.end(output={"count": n})

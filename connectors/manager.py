@@ -84,9 +84,22 @@ class ConnectorManager:
             raise KeyError(connector_id)
         config = self._resolve_config(row)
         client = MCPClient(row["transport"], config, row["timeout"])
-        await client.connect()
-        self._clients[connector_id] = client
-        return await self.refresh_tools(connector_id)
+        previous = self._clients.get(connector_id)
+        try:
+            await client.connect()
+            self._clients[connector_id] = client
+            tools = await self.refresh_tools(connector_id)
+        except Exception:
+            if self._clients.get(connector_id) is client:
+                if previous is None:
+                    self._clients.pop(connector_id, None)
+                else:
+                    self._clients[connector_id] = previous
+            await client.disconnect()
+            raise
+        if previous is not None and previous is not client:
+            await previous.disconnect()
+        return tools
 
     async def refresh_tools(self, connector_id: str) -> list[dict]:
         client = self._clients.get(connector_id)

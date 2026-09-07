@@ -69,7 +69,7 @@
 - 每个 LLM 调用显式声明 `source`，每轮 Agent 任务使用 Langfuse trace/span/generation 链路。
 - 开发者通过 Langfuse 查看结构化调试记录：推理等级、上下文选择、检索、工具、确认、性能和结束原因。
 - `infrastructure/developer_trace.py` 定义调试摘要字段；它只记录可验证的决策和执行证据，不保存原始隐藏推理 token 流。
-- Langfuse 默认使用 `redacted` 内容模式；除非显式启用 `full`，调用输入输出只上传长度和结构元数据。
+- Langfuse 会上传调用输入输出用于排障；手机号、邮箱、地址、密钥等已识别敏感字段在 tracer 上报前脱敏。没有 `redacted/full` 内容模式开关，部署到第三方 Langfuse 前应按此数据边界评估。
 - 面向用户的处理面板只展示工具生命周期、宿主决策通知和可验证结论。
 - `reasoning_delta` 只有在 Provider 明确返回 reasoning block 时才展示；工具选择原因使用 `decision_notice` 单独展示，避免把工具状态混入“模型思考”。
 

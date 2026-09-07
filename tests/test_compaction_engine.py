@@ -238,6 +238,20 @@ def test_compact_now_forces_pass():
     forced = _run(engine.compact_now(
         session_id="s", snap=_Snap(context_window=100000),
         messages=msgs, system="", tools=None, message_ids=ids))
-    # compact_now 目前是 compact_if_needed 的复用，仍受阈值影响 —— 断言当前语义
-    # （如果未来改成真正强制，把 assert None 改成 assert not None）
-    assert forced is None
+    assert forced is not None
+    assert forced.trigger == "manual"
+
+
+def test_protected_message_is_never_shadowed():
+    """关键内容保留原文，压缩水位不能跨过它。"""
+    engine, _, sessions, _ = _engine()
+    pairs = [_msg("user", "old " * 200, 1),
+             _msg("assistant", "important plan " * 200, 2),
+             _msg("user", "new " * 200, 3)]
+    msgs, ids = _split(pairs)
+    result = _run(engine.compact_if_needed(
+        session_id="s", snap=_Snap(context_window=200), messages=msgs,
+        system="", tools=None, message_ids=ids, protected_indices={1}))
+    assert result is not None
+    assert 2 not in result.shadowed_message_ids
+    assert sessions.saved[0]["last"] == 1

@@ -7,6 +7,11 @@ import time
 from typing import Any, Awaitable, Callable
 
 from infrastructure.developer_trace import build_agent_trace
+from infrastructure.prompt_cache import (
+    build_prompt_fingerprint,
+    classify_prompt_change,
+    session_context_payload,
+)
 from infrastructure.session_metrics import add_tool_time, record_step, session_metrics, turn_metrics
 from langfuse.integration import get_tracer
 from .repeat_tool_guard import RepeatToolGuard
@@ -22,6 +27,21 @@ from .turn_runtime_tools import TurnToolRunner
 _extract_web_citations = _tr_helpers.extract_web_citations
 
 logger = logging.getLogger("second_person.turn_runtime")
+
+
+def _is_context_overflow(exc: BaseException) -> bool:
+    """Recognize provider context-limit failures without coupling to one SDK."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    text = str(exc).lower()
+    if response is not None:
+        try:
+            text += " " + response.text.lower()
+        except Exception:  # noqa: BLE001
+            pass
+    markers = ("context length", "context window", "maximum context",
+               "too many tokens", "token limit", "prompt is too long")
+    return status in (400, 413, 422) and any(marker in text for marker in markers)
 
 
 class TurnRuntime:
@@ -46,6 +66,9 @@ class TurnRuntime:
         # v7：token 度量 + 自动压缩（可 None，降级为原有行为）
         self.token_meter = token_meter
         self.compaction_engine = compaction_engine
+        # Process-local state is enough to compare adjacent turns. It contains
+        # hashes only and naturally resets after a process restart.
+        self._prompt_cache_state: dict[tuple[str, str, str], Any] = {}
         self._tool_runner = TurnToolRunner(
             registry=registry, executor=executor, events=self.events)
 
@@ -239,6 +262,10 @@ class TurnRuntime:
             cumulative_model_messages: list[dict[str, Any]] = []
             last_model_seq: int = 0
             cached_system_content: str | None = None
+            prompt_fingerprint = None
+            prompt_cache_reason = "initial"
+            prompt_prefix_reused = False
+            overflow_recovered = False
             turn_body = ""  # 用户可见正文（工具步旁白 content_reset 后会清空）
             step = 0
             for step in range(1, max_steps + 1):
@@ -333,6 +360,10 @@ class TurnRuntime:
                 prompt = [{"role": "system", "content": system_content}]
                 prompt += context["history"] + cumulative_model_messages
                 tools = self._project_tools(session_id)
+                if prompt_fingerprint is None:
+                    prompt_fingerprint = build_prompt_fingerprint(
+                        system_content, tools, session_context_payload(context))
+                compacted_this_step = False
                 # v7：pre-step 自动压缩（step≥2 才检查，step 1 无累积压力）
                 if step >= 2 and self.compaction_engine is not None:
                     await _progress("compact_check", "检查会话上下文容量",
@@ -346,7 +377,8 @@ class TurnRuntime:
                             session_id=session_id, snap=snap,
                             messages=context["history"],
                             system=system_content, tools=tools,
-                            message_ids=context.get("history_ids") or [])
+                            message_ids=context.get("history_ids") or [],
+                            protected_indices=context.get("history_protected") or set())
                     except Exception as compact_exc:  # noqa: BLE001
                         logger.warning("压缩检查异常，跳过本轮", exc_info=True)
                         compact_span.end(
@@ -365,6 +397,7 @@ class TurnRuntime:
                                     compact_result.released_tokens_est,
                             })
                     if compact_result is not None:
+                        compacted_this_step = True
                         await _progress(
                             "compact", "压缩早期对话",
                             f"已收起 {compact_result.shadowed_count} 条早期消息")
@@ -400,14 +433,39 @@ class TurnRuntime:
                         cached_system_content = system_content
                         prompt = [{"role": "system", "content": system_content}]
                         prompt += context["history"] + cumulative_model_messages
+                        prompt_fingerprint = build_prompt_fingerprint(
+                            system_content, tools, session_context_payload(context))
+                cache_key = (session_id, getattr(snap, "provider_id", ""), snap.model_id)
+                prompt_cache_reason, prompt_prefix_reused = classify_prompt_change(
+                    self._prompt_cache_state.get(cache_key), prompt_fingerprint,
+                    compacted=compacted_this_step)
+                self._prompt_cache_state[cache_key] = prompt_fingerprint
+                prompt_cache_trace = {
+                    "version": "prompt-cache-v1",
+                    "system_prompt_hash": prompt_fingerprint.system_prompt_hash,
+                    "tool_schema_hash": prompt_fingerprint.tool_schema_hash,
+                    "session_context_hash": prompt_fingerprint.session_context_hash,
+                    "prefix_hash": prompt_fingerprint.prefix_hash,
+                    "change_reason": prompt_cache_reason,
+                    "prefix_reused": prompt_prefix_reused,
+                }
                 self.events.append(turn_id, "request.header", actor="host", step=step,
                                    payload={"model_id": snap.model_id,
                                             "reasoning_effort": effective_effort,
                                             "tool_names": [t["function"]["name"] for t in tools],
                                             "history_count": len(prompt),
-                                            "prompt_version": PROMPT_VERSION}, model_visible=False)
-                step_span = tracer.span_start("agent.step", input={"turn_id": turn_id, "step": step},
-                                              metadata={"reasoning_effort": reasoning_effort})
+                                            "prompt_version": PROMPT_VERSION,
+                                            "prompt_cache_version": "prompt-cache-v1",
+                                            "system_prompt_hash": prompt_fingerprint.system_prompt_hash,
+                                            "tool_schema_hash": prompt_fingerprint.tool_schema_hash,
+                                            "session_context_hash": prompt_fingerprint.session_context_hash,
+                                            "prefix_hash": prompt_fingerprint.prefix_hash,
+                                            "cache_change_reason": prompt_cache_reason,
+                                            "prefix_reused": prompt_prefix_reused}, model_visible=False)
+                step_span = tracer.span_start(
+                    "agent.step", input={"turn_id": turn_id, "step": step},
+                    metadata={"reasoning_effort": reasoning_effort,
+                              "prompt_cache": prompt_cache_trace})
                 content_parts: list[str] = []
                 tool_calls: list[dict] = []
                 # 本步 reasoning 增量：对齐 deepseek-harness 的 CoT 回传，
@@ -447,7 +505,8 @@ class TurnRuntime:
                             snap, prompt, source="agent_step",
                             session_id=session_id, tools=tools,
                             images=images if step == 1 else None,
-                            extra_body={"reasoning_effort": effective_effort}):
+                            extra_body={"reasoning_effort": effective_effort},
+                            trace_metadata={"prompt_cache": prompt_cache_trace}):
                         # 对齐 deepseek-harness/isTokenDelta：首 token 打点覆盖
                         # 所有 meaningful 流式 chunk（含 reasoning）。这样 ttft_ms
                         # 反映"用户看到第一个字符"的真实时刻；decode_ms 覆盖 reasoning
@@ -481,6 +540,41 @@ class TurnRuntime:
                             step_usage = data.get("usage") or {}
                             break
                     calls += 1
+                except Exception as exc:
+                    # Provider may reject a prompt despite the pre-step estimate.
+                    # Retry once only before any model-visible output, after a forced
+                    # compaction; otherwise preserve the original failure semantics.
+                    if (not overflow_recovered and first_token_at is None
+                            and not content_parts and self.compaction_engine is not None
+                            and _is_context_overflow(exc)):
+                        await _progress("compact_recovery", "上下文超限，压缩后重试")
+                        recovered = await self.compaction_engine.compact_now(
+                            session_id=session_id, snap=snap,
+                            messages=context["history"], system=system_content,
+                            tools=tools, message_ids=context.get("history_ids") or [],
+                            protected_indices=context.get("history_protected") or set())
+                        if recovered is not None:
+                            overflow_recovered = True
+                            self.events.append(
+                                turn_id, "context.compacted", actor="host",
+                                model_visible=False,
+                                payload={"trigger": "overflow",
+                                         "shadowed_count": recovered.shadowed_count,
+                                         "released_tokens_est": recovered.released_tokens_est,
+                                         "total_before": recovered.total_before,
+                                         "total_after_est": recovered.total_after_est})
+                            await runtime_emit("context_compacted", {
+                                "turn_id": turn_id, "step": step, "trigger": "overflow",
+                                "shadowed_count": recovered.shadowed_count,
+                                "released_tokens_est": recovered.released_tokens_est})
+                            turn_context = await self.context_loader(
+                                session_id=session_id, turn_id=turn_id, message=message,
+                                onboarding=onboarding, step=step, handoff_path=handoff_path,
+                                emit=emit)
+                            cached_system_content = None
+                            prompt_fingerprint = None
+                            continue
+                    raise
                 finally:
                     step_span.end()
                 step_completed_at = time.perf_counter()
@@ -497,6 +591,12 @@ class TurnRuntime:
                     cache_read_tokens=step_usage.get("cache_read_tokens", 0),
                     cache_write_tokens=step_usage.get("cache_write_tokens", 0),
                     context_ms=context_ms,
+                    system_prompt_hash=prompt_fingerprint.system_prompt_hash,
+                    tool_schema_hash=prompt_fingerprint.tool_schema_hash,
+                    session_context_hash=prompt_fingerprint.session_context_hash,
+                    prefix_hash=prompt_fingerprint.prefix_hash,
+                    cache_change_reason=prompt_cache_reason,
+                    prefix_reused=prompt_prefix_reused,
                 )
                 # v7：把 provider 精确 usage 折进 TokenMeter 的 session anchor —
                 # 下一 step 的压力判断就用这个 anchor + tiktoken delta 而不是全估算

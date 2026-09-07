@@ -41,6 +41,7 @@ class _Providers:
 class _LLM:
     def __init__(self):
         self.prompts: list[list[dict]] = []
+        self.trace_metadata: list[dict | None] = []
         self.responses = [
             {"content": "", "tool_calls": [{
                 "id": "call_lookup",
@@ -52,6 +53,7 @@ class _LLM:
 
     async def stream_chat(self, _snap, messages, **_kwargs):
         self.prompts.append(messages)
+        self.trace_metadata.append(_kwargs.get("trace_metadata"))
         resp = self.responses.pop(0)
         content = resp.get("content") or ""
         tool_calls = resp.get("tool_calls") or []
@@ -140,6 +142,15 @@ def test_turn_events_project_tool_results_back_into_model_messages(tmp_path: Pat
                 "step.started", "request.header", "assistant.message", "step.finished",
                 "turn.finished",
             ]
+            headers = [event["payload"] for event in TurnEventStore(db).events(
+                outcome["turn_id"]) if event["type"] == "request.header"]
+            assert headers[0]["prompt_cache_version"] == "prompt-cache-v1"
+            assert headers[0]["cache_change_reason"] == "initial"
+            assert len(headers[0]["prefix_hash"]) == 64
+            assert headers[1]["cache_change_reason"] == "stable_prefix_reused"
+            assert headers[1]["prefix_reused"] is True
+            assert llm.trace_metadata[0]["prompt_cache"]["prefix_hash"] == headers[0]["prefix_hash"]
+            assert llm.trace_metadata[1]["prompt_cache"]["change_reason"] == "stable_prefix_reused"
         finally:
             db.close()
 

@@ -248,6 +248,8 @@ class AgentCore:
         history = [{"role": item["role"], "content": item["content"]}
                    for item in history_raw]
         history_ids = [item.get("id") for item in history_raw]
+        history_protected = {index for index, item in enumerate(history_raw)
+                             if item.get("protected")}
         context_text = "\n".join(str(item.get("content", "")) for item in history[-6:])
         session_row = self.db.query_one(
             "SELECT project_id FROM sessions WHERE session_id=?", (session_id,))
@@ -314,6 +316,7 @@ class AgentCore:
             + memory_text) if memory_text else None
         return {"snap": snap, "history": history,
                 "history_ids": history_ids,
+                "history_protected": history_protected,
                 "dynamic_blocks": [],
                 "memory_context": memory_context,
                 "handoff_context": handoff_context,

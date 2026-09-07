@@ -1,6 +1,6 @@
 # Second-Person 通用问题解决系统优化方案
 
-> 本文是历史设计基线。当前实现已采用事件化 Agent 运行时和宿主控制的提示词组装，具体行为以生产代码及专项契约文档为准。
+> 本文是历史设计基线，描述目标能力而非已交付清单。当前实现已采用事件化 Agent 运行时和宿主控制的提示词组装；实际能力见 `docs/CURRENT_PRODUCT_CAPABILITIES.md`，HTTP/SSE 契约见 `docs/API_CONTRACT.md`。文中 `intent_parser.py`、`meta_cognitive.py`、`strategy_engine.py` 和 `response_synthesizer.py` 是目标模块名，当前仓库不存在这些生产模块。
 
 ## 1. 产品定位
 
@@ -359,68 +359,18 @@ flowchart TB
 - 用户中断率。
 - 完整交付率。
 
-## 10. 现有项目落地映射
+## 10. 当前实现与目标的边界
 
-### 10.1 前端
+| 目标 | 当前状态 |
+| --- | --- |
+| 用户可选推理强度 | 已实现 `off` / `low` / `high` / `max`，默认 `high`；没有 `auto`、快速/深度覆盖模式 |
+| 上下文、检索与工具 | 已由 `agent/core.py` 和 `agent/turn_runtime.py` 实现，支持记忆检索、项目上下文、工具循环与流式回答 |
+| 可验证处理进度 | 已通过 SSE 的检索、步骤、工具和决策事件展示；不展示模型隐藏推理 |
+| `RequirementItem`、交付合同和统一问题模型 | 尚未实现为结构化生产对象 |
+| 章节化长文生产与跨章节质量门 | 尚未实现为独立的运行时工作流 |
+| 黄金评测集和指标闭环 | 尚未实现为本方案定义的产品评测系统 |
 
-[`frontend/src/views/ChatView.vue`](../frontend/src/views/ChatView.vue)
-
-- 默认思考模式改为 `auto`，显示为“自动模式”。
-- 保留快速和深度作为用户覆盖选项。
-- 展示模式决策、需求识别、资料状态、章节完成度和文档状态。
-- 不展示原始链式思维。
-
-### 10.2 快速预判
-
-[`agent/intent_parser.py`](../agent/intent_parser.py)
-
-`QuickIntentResult` 负责：
-
-- 自动路由建议。
-- 初步复杂度和风险判断。
-- 是否需要上下文、证据或工具。
-- 是否需要结构化或长文交付。
-
-它不决定最终内容长度，也不作为领域路由器。
-
-### 10.3 收敛与问题模型
-
-[`agent/intent_parser.py`](../agent/intent_parser.py) 与 [`agent/meta_cognitive.py`](../agent/meta_cognitive.py)
-
-将现有丰满意图和认知骨架升级为统一的问题模型，至少包含：
-
-- 显式需求。
-- 用户目标。
-- 事实、假设、约束和未知项。
-- 需求之间的关系。
-- 所需分析动作。
-- 证据需求。
-- 回答与交付结构。
-
-### 10.4 编排主链路
-
-[`agent/core.py`](../agent/core.py)
-
-主链路调整为：
-
-```text
-快速路由
--> 交付合同与需求提取
--> 问题模型
--> 上下文、检索与工具
--> 逐项方案生产
--> 整体方案整合
--> 质量验证
--> 最终交付
-```
-
-收敛后的丰满意图、焦点和问题模型必须传递给后续策略、证据和回答生成环节，避免后续模块只基于用户原句重复判断。
-
-### 10.5 策略与回答生成
-
-[`agent/strategy_engine.py`](../agent/strategy_engine.py) 负责选择通用分析动作、证据需求和交付形式。
-
-[`agent/response_synthesizer.py`](../agent/response_synthesizer.py) 根据交付合同生成普通回答、结构化方案、长篇报告或正式文档，而非仅依据 `brief / normal / detailed` 控制篇幅。
+本方案第 1 至 9 节和第 11 至 13 节仍可作为后续能力设计输入，但不能据此假定相关接口、前端状态或模块已经存在。
 
 ## 11. 评测与反馈闭环
 

@@ -26,6 +26,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
+from typing import Any
 
 from infrastructure.fts import fts_escape as _fts_escape
 from infrastructure.timeutil import now_cst
@@ -120,6 +121,10 @@ class Retriever:
         # v7 精筛 LRU cache：key=(session_id, query, candidate_ids_hash) → (ids, ts)
         # 覆盖重生成/异常重试场景，一 turn 内重复调用直接命中省 2-3s LLM 精筛。
         self._refine_cache: OrderedDict[tuple, tuple[list[str], float]] = OrderedDict()
+        self._refine_inflight: dict[tuple, asyncio.Task[list[str]]] = {}
+        # Query vector 只由完全相同的 embed cue 决定；候选检索和精筛仍实时执行。
+        self._embed_cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._embed_inflight: dict[str, asyncio.Task[Any]] = {}
 
     @staticmethod
     async def _notify_progress(
@@ -149,11 +154,19 @@ class Retriever:
         return None
 
     def _refine_cache_key(self, session_id: str | None, query: str,
-                          candidate_ids: list[str]) -> tuple:
-        """Stable key across attempts: candidate order can shift so we sort ids."""
-        ids_hash = hashlib.sha1(
-            ",".join(sorted(candidate_ids)).encode("utf-8")).hexdigest()[:16]
-        return (session_id or "", query, ids_hash)
+                          candidates: list[Candidate],
+                          context_text: str | None) -> tuple:
+        """Cache only identical refine inputs; context or candidate edits invalidate it."""
+        material = {
+            "context": context_text or "",
+            "candidates": sorted((
+                c.memory_id, c.title, c.summary, c.source_type, c.confidence,
+                c.verification_state, c.freshness_state, c.relation, c.from_seed,
+            ) for c in candidates),
+        }
+        digest = hashlib.sha256(
+            repr(material).encode("utf-8")).hexdigest()[:16]
+        return (session_id or "", query, digest)
 
     def _refine_cache_get(self, key: tuple) -> list[str] | None:
         from . import _constants as _mem_const
@@ -181,6 +194,39 @@ class Retriever:
         self._refine_cache.move_to_end(key)
         while len(self._refine_cache) > max(1, size):
             self._refine_cache.popitem(last=False)
+
+    async def _embed_query(self, cue: str) -> tuple[Any, str]:
+        """Reuse an identical embedding request or await its in-flight owner."""
+        from . import _constants as _mem_const
+        key = hashlib.sha256(cue.encode("utf-8")).hexdigest()
+        ttl = int(self.config.get("retriever_embed_cache_ttl_seconds",
+                                  _mem_const.RETRIEVER_EMBED_CACHE_TTL_SECONDS))
+        cached = self._embed_cache.get(key)
+        if cached is not None and time.monotonic() - cached[1] <= ttl:
+            self._embed_cache.move_to_end(key)
+            return cached[0], "cache"
+        if cached is not None:
+            self._embed_cache.pop(key, None)
+        task = self._embed_inflight.get(key)
+        state = "inflight" if task is not None else "miss"
+        if task is None:
+            async def _run() -> Any:
+                return (await self.embed_fn([cue]))[0]
+            task = asyncio.create_task(_run())
+            self._embed_inflight[key] = task
+        try:
+            vector = await asyncio.shield(task)
+        finally:
+            if task.done() and self._embed_inflight.get(key) is task:
+                self._embed_inflight.pop(key, None)
+        if state == "miss":
+            size = int(self.config.get("retriever_embed_cache_size",
+                                       _mem_const.RETRIEVER_EMBED_CACHE_SIZE))
+            self._embed_cache[key] = (vector, time.monotonic())
+            self._embed_cache.move_to_end(key)
+            while len(self._embed_cache) > max(1, size):
+                self._embed_cache.popitem(last=False)
+        return vector, state
 
     def _archived_project_ids(self) -> set[str]:
         """归档项目的 id 集合，用于 M2 硬过滤。"""
@@ -415,6 +461,7 @@ class Retriever:
         else:
             embed_cue = q_part
         query_vec = None
+        embed_cache = "skipped"
         top_k = self.config.get("retrieval_top_k", 10)
         bm25_floor = _mem_const.BM25_RELATIVE_FLOOR
         embed_span = self._lf_span("memory.embed", input={
@@ -423,13 +470,14 @@ class Retriever:
             self._fts_search, query, top_k, bm25_floor))
         if self.embed_fn:
             try:
-                query_vec = (await self.embed_fn([embed_cue]))[0]
+                query_vec, embed_cache = await self._embed_query(embed_cue)
             except Exception:  # noqa: BLE001
                 result.degraded = "Embedding 不可用，检索降级 FTS5 单路"
                 logger.info(result.degraded)
         fts_hits = await fts_task
         embed_span.end(output={
             "has_vector": query_vec is not None,
+            "cache": embed_cache,
             "fts_hits": len(fts_hits),
             "degraded": result.degraded or None,
         })
@@ -671,7 +719,7 @@ class Retriever:
                 "candidate_pool_hard_cap", _mem_const.CANDIDATE_POOL_HARD_CAP))
             picked = candidates[:pool_cap]
             cache_key = self._refine_cache_key(
-                session_id, query, [c.memory_id for c in picked])
+                session_id, query, picked, context_text)
             cached = self._refine_cache_get(cache_key)
             if cached is not None:
                 result.degraded = "第 2 层精筛 cache 命中"
@@ -694,22 +742,32 @@ class Retriever:
                         "relation": c.relation or "primary",
                         "from_seed": c.from_seed}
                        for c in picked]
-            chosen = await asyncio.wait_for(
-                self.llm_refine_fn(query, payload,
-                                   session_id=session_id,
-                                   context_text=context_text),
-                timeout=timeout)
-            chosen_list = list(chosen)
-            self._refine_cache_put(cache_key, chosen_list)
+            task = self._refine_inflight.get(cache_key)
+            path = "refine_inflight" if task is not None else "full"
+            if task is None:
+                async def _run_refine() -> list[str]:
+                    selected = await asyncio.wait_for(
+                        self.llm_refine_fn(query, payload, session_id=session_id,
+                                           context_text=context_text), timeout=timeout)
+                    selected_list = list(selected)
+                    self._refine_cache_put(cache_key, selected_list)
+                    return selected_list
+                task = asyncio.create_task(_run_refine())
+                self._refine_inflight[cache_key] = task
+            try:
+                chosen_list = await asyncio.shield(task)
+            finally:
+                if task.done() and self._refine_inflight.get(cache_key) is task:
+                    self._refine_inflight.pop(cache_key, None)
             chosen_list = chosen_list[:int(self.config.get(
                 "retrieval_refine_max", _mem_const.RETRIEVAL_REFINE_MAX))]
             await self._notify_progress(on_progress, build_progress_payload(
                 stage="refine", status="ok",
-                summary=refine_start_summary(len(picked), "full"),
-                candidates=len(picked), refine_path="full",
+                summary=refine_start_summary(len(picked), path),
+                candidates=len(picked), refine_path=path,
                 hits=compact_candidates(picked, selected_ids=set(chosen_list)) or None,
             ))
-            return chosen_list, "full"
+            return chosen_list, path
         except asyncio.TimeoutError:
             result.degraded = "第 2 层精筛超时，按得分兜底"
             logger.warning("检索精筛超时")

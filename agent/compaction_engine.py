@@ -84,7 +84,9 @@ class CompactionEngine:
                                  system: str,
                                  tools: list[dict] | None,
                                  message_ids: list[int] | None = None,
+                                 protected_indices: set[int] | None = None,
                                  trigger: str = "pressure",
+                                 force: bool = False,
                                  ) -> CompactionResult | None:
         """Check pressure and compact when needed.
 
@@ -100,12 +102,18 @@ class CompactionEngine:
         retain = int(window * self.retain_ratio)
         measurement = self.meter.measure(session_id, messages, system, tools)
         pressure = self._pressure(measurement)
-        if pressure < threshold:
+        if not force and pressure < threshold:
             return None
+        if force:
+            # Manual/overflow recovery must leave a compactable head even when
+            # the configured window is much larger than the current estimate.
+            retain = min(retain, max(0, pressure - 1))
         result: CompactionResult | None = None
         attempts = 0
         while attempts <= self.max_retries:
-            span = self._select_span(messages, message_ids, measurement, retain)
+            span = self._select_span(messages, message_ids, measurement, retain,
+                                     protected_indices=protected_indices,
+                                     force=force)
             if span is None:
                 if result is not None:
                     return result
@@ -129,6 +137,10 @@ class CompactionEngine:
                                                  span.message_ids[-1])
             except Exception as exc:  # noqa: BLE001
                 logger.warning("摘要落盘失败：%s", exc)
+                try:
+                    await self.sessions.mark_compression_failed(session_id)
+                except Exception:  # noqa: BLE001
+                    pass
                 return result
             # 压缩后锚点必然失效（历史结构变了）
             self.meter.drop_anchor(session_id)
@@ -154,6 +166,11 @@ class CompactionEngine:
                 break
             messages = remaining
             message_ids = remaining_ids
+            if protected_indices:
+                protected_indices = {
+                    index - len(span.messages) for index in protected_indices
+                    if index >= len(span.messages)
+                }
             measurement = remeasure
         return result
 
@@ -164,12 +181,13 @@ class CompactionEngine:
                            messages: list[dict], system: str,
                            tools: list[dict] | None,
                            message_ids: list[int] | None = None,
+                           protected_indices: set[int] | None = None,
                            ) -> CompactionResult | None:
         """Force one compaction pass regardless of threshold (for `/compact`)."""
         return await self.compact_if_needed(
             session_id=session_id, snap=snap, messages=messages,
             system=system, tools=tools, message_ids=message_ids,
-            trigger="manual")
+            protected_indices=protected_indices, trigger="manual", force=True)
 
     # ------------------------------------------------------------------
     # 内部：pressure 与 span 选择
@@ -184,7 +202,9 @@ class CompactionEngine:
     def _select_span(self, messages: list[dict],
                      message_ids: list[int] | None,
                      measurement: TokenMeasurement,
-                     retain_tokens: int) -> _Span | None:
+                     retain_tokens: int,
+                     protected_indices: set[int] | None = None,
+                     force: bool = False) -> _Span | None:
         """Head-anchored range: keep tail ≥ retain_tokens, drop tool-pair-safe head.
 
         If per-message pricing is available, use it directly; otherwise
@@ -204,13 +224,22 @@ class CompactionEngine:
             keep_from = i
             if accumulated >= retain_tokens:
                 break
-        # 尾部就已经装满 retain → 无可压
+        # 普通压缩下，尾部已占满保留预算时不能压缩。强制压缩用于
+        # 手动请求和溢出恢复，此时保留最后一条完整消息并尝试压缩头部。
         if keep_from == 0:
-            return None
+            if not force or len(messages) < 2:
+                return None
+            keep_from = len(messages) - 1
         # 避免劈开 tool_calls / tool result 对：如果 keep_from 位置是 tool 消息，
         # 或者上一条是含 tool_calls 的 assistant，往前退到成对边界之外
         while keep_from > 0 and not self._pair_balanced_before(messages, keep_from):
             keep_from -= 1
+        # 受保护的长方案、代码或用户输入必须作为原文保留。水位不能越过它，
+        # 否则恢复时只剩摘要，违背 protected_from_compression 的语义。
+        protected_before_tail = [index for index in (protected_indices or set())
+                                 if 0 <= index < keep_from]
+        if protected_before_tail:
+            keep_from = min(protected_before_tail)
         if keep_from == 0:
             return None
         head_msgs = messages[:keep_from]

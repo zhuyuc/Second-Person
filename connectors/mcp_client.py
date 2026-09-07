@@ -32,13 +32,20 @@ class MCPClient:
         self.timeout = timeout
         self._proc: asyncio.subprocess.Process | None = None
         self._req_id = 0
+        self._initialized = False
+        self._http_client: httpx.AsyncClient | None = None
+        # Stdio is strictly sequential; serializing both transports also keeps
+        # request ids deterministic when a connector is shared by turns.
+        self._rpc_lock = asyncio.Lock()
 
     # ---- 连接 -------------------------------------------------------------
     async def connect(self) -> None:
-        if self.transport == "stdio":
+        if self._initialized and self.is_alive():
+            return
+        if self.transport == "stdio" and not self.is_alive():
             await self._start_stdio()
-        # HTTP 无需常驻连接
         await self._initialize()
+        self._initialized = True
 
     async def _start_stdio(self) -> None:
         cmd = self.config["command"]
@@ -58,12 +65,13 @@ class MCPClient:
 
     # ---- JSON-RPC ---------------------------------------------------------
     async def _rpc(self, method: str, params: dict) -> Any:
-        self._req_id += 1
-        request = {"jsonrpc": "2.0", "id": self._req_id,
-                   "method": method, "params": params}
-        if self.transport == "stdio":
-            return await self._rpc_stdio(request)
-        return await self._rpc_http(request)
+        async with self._rpc_lock:
+            self._req_id += 1
+            request = {"jsonrpc": "2.0", "id": self._req_id,
+                       "method": method, "params": params}
+            if self.transport == "stdio":
+                return await self._rpc_stdio(request)
+            return await self._rpc_http(request)
 
     async def _rpc_stdio(self, request: dict) -> Any:
         if not self._proc or not self._proc.stdin:
@@ -89,10 +97,16 @@ class MCPClient:
         if auth.get("type") == "api_key":
             headers[auth.get("header", "Authorization")
                     ] = auth.get("value", "")
-        async with httpx.AsyncClient(timeout=self.timeout) as c:
-            r = await c.post(url, json=request, headers=headers)
-            r.raise_for_status()
-            resp = r.json()
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(float(self.timeout)),
+                limits=httpx.Limits(max_connections=10,
+                                    max_keepalive_connections=5,
+                                    keepalive_expiry=60.0),
+            )
+        r = await self._http_client.post(url, json=request, headers=headers)
+        r.raise_for_status()
+        resp = r.json()
         if "error" in resp:
             raise MCPError(str(resp["error"]))
         return resp.get("result")
@@ -119,6 +133,10 @@ class MCPClient:
             except (asyncio.TimeoutError, ProcessLookupError):
                 self._proc.kill()
             self._proc = None
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+        self._initialized = False
 
     def is_alive(self) -> bool:
         if self.transport == "http":
