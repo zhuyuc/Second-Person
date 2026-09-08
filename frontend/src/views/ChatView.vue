@@ -493,9 +493,34 @@ function trimMessagesFromEdit(editMsgId) {
 async function openSession(sid, opts = {}) {
   try {
     if (editingId.value) cancelEdit()
+    // 主对话：会话已不在列表（删除/归档）→ 直接回欢迎页，不再打 metrics/沙箱接口
+    if (!props.asideMode) {
+      if (!sessStore.listLoaded) {
+        try {
+          await sessStore.load()
+        } catch {
+          /* 列表失败时仍尝试打开，由接口结果兜底 */
+        }
+      }
+      if (sessStore.listLoaded && !sessStore.hasSession(sid)) {
+        resetToHome()
+        return
+      }
+    }
     // aside 模式不切换全局当前会话（否则会连累主对话侧栏高亮/加载）
     if (!props.asideMode) sessStore.setCurrent(sid)
     const [msgs, metrics] = await Promise.all([fetchSessionMessages(sid), fetchSessionMetrics(sid)])
+    // 指标接口对已删会话返回 null（silent 404）；若消息也为空且列表无此会话，回欢迎页
+    if (
+      !props.asideMode &&
+      metrics == null &&
+      (!msgs || !msgs.length) &&
+      sessStore.listLoaded &&
+      !sessStore.hasSession(sid)
+    ) {
+      resetToHome()
+      return
+    }
     messages.value = msgs
     resetMessageWindow(msgs.length)
     sessionMetrics.value = metrics
@@ -504,6 +529,11 @@ async function openSession(sid, opts = {}) {
     else scrollBottom()
     tryReattach(sid)
   } catch (e) {
+    // 已删会话等 404：回新对话，不把「会话不存在」当成加载失败打扰用户
+    if (!props.asideMode && (e?.code === 404 || /会话不存在/.test(e?.message || ''))) {
+      resetToHome()
+      return
+    }
     toast.push('error', friendlyError(e?.message, '加载会话失败'))
   }
 }
@@ -2106,12 +2136,17 @@ onMounted(() => {
     // 已有 asideSessionId（同页内复用一个尚未关闭的侧边）则加载其消息 + 续挂进行中生成。
     if (currentSid.value && !messages.value.length) openSession(currentSid.value)
   } else {
-    sessStore.load()
     window.addEventListener('sp-new-chat', resetToHome)
     window.addEventListener('sp-open-session', onOpenSession)
-    // 直接从其他页面进入或刷新后恢复上次会话（currentSid 已从 localStorage 恢复）
-    // → openSession 内部会调 tryReattach 续播进行中的生成，实现刷新不中断
-    if (currentSid.value && !messages.value.length) openSession(currentSid.value)
+    // 先拉列表并丢掉已删除的 currentSid，再决定恢复会话还是留在欢迎页，避免刷新弹 404
+    ;(async () => {
+      try {
+        await sessStore.load()
+      } catch {
+        /* 列表失败时仍按 localStorage 尝试恢复 */
+      }
+      if (currentSid.value && !messages.value.length) openSession(currentSid.value)
+    })()
   }
   initGeolocation()
   document.addEventListener('click', onDocClickEmoji)

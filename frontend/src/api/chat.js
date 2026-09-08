@@ -40,5 +40,6 @@ export const chatApi = {
   importDocument: (form) => api.upload('/import/document', form),
   messages: (sid, { before_id, limit } = {}) =>
     api.get(withQuery('/chat/messages', { session_id: sid, before_id, limit })),
-  sessionMetrics: (sid) => api.get(`/chat/session/${sid}/metrics`),
+  sessionMetrics: (sid) =>
+    api.get(`/chat/session/${sid}/metrics`, { silent: true }),
 }

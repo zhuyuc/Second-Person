@@ -11,7 +11,8 @@ export const projectsApi = {
   browseNative: () => api.post('/projects/browse/native'),
   setSandboxMode: (sid, mode, reason) =>
     api.post(`/chat/session/${sid}/sandbox-mode`, { mode, reason }),
-  getSandboxMode: (sid) => api.get(`/chat/session/${sid}/sandbox-mode`),
+  getSandboxMode: (sid) =>
+    api.get(`/chat/session/${sid}/sandbox-mode`, { silent: true }),
   // M4：项目内文件浏览
   tree: (id, path = '', depth = 1) =>
     api.get(`/projects/${id}/tree?path=${encodeURIComponent(path)}&depth=${depth}`),

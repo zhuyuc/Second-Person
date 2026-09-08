@@ -8,7 +8,7 @@ function getToast() {
   return (_toast ??= useToast())
 }
 
-async function request(method, path, body, isForm) {
+async function request(method, path, body, isForm, options = {}) {
   const opts = { method, headers: {} }
   if (body && !isForm) {
     opts.headers['Content-Type'] = 'application/json'
@@ -25,22 +25,28 @@ async function request(method, path, body, isForm) {
   try {
     resp = await fetch(BASE + path, opts)
   } catch (e) {
-    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
-      getToast().push('error', '请求超时，请稍后重试')
-    } else {
-      getToast().push('error', '网络错误，请检查服务是否运行')
+    if (!options.silent) {
+      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+        getToast().push('error', '请求超时，请稍后重试')
+      } else {
+        getToast().push('error', '网络错误，请检查服务是否运行')
+      }
     }
     throw e
   }
   const data = await resp.json().catch(() => ({}))
   if (data.code && data.code !== 200) {
-    handleError(data, resp.status)
-    throw new Error(data.message || '请求失败')
+    if (!options.silent) handleError(data, resp.status)
+    const err = new Error(data.message || '请求失败')
+    err.code = data.code
+    throw err
   }
   // 非标准响应兑底：HTTP 失败但响应体无 code（如 405/502/网关错误页），
   // 不能静默当成功返回，否则调用方会误报"操作成功"但后端实际未执行
   if (!resp.ok) {
-    getToast().push('error', `请求失败（HTTP ${resp.status}），后端可能未重启或接口不存在`)
+    if (!options.silent) {
+      getToast().push('error', `请求失败（HTTP ${resp.status}），后端可能未重启或接口不存在`)
+    }
     throw new Error(`HTTP ${resp.status}`)
   }
   return data.data
@@ -60,10 +66,10 @@ function handleError(data) {
 }
 
 export const api = {
-  get: (p) => request('GET', p),
-  post: (p, b) => request('POST', p, b),
-  put: (p, b) => request('PUT', p, b),
-  patch: (p, b) => request('PATCH', p, b),
-  del: (p, b) => request('DELETE', p, b),
-  upload: (p, form) => request('POST', p, form, true),
+  get: (p, options) => request('GET', p, null, false, options || {}),
+  post: (p, b, options) => request('POST', p, b, false, options || {}),
+  put: (p, b, options) => request('PUT', p, b, false, options || {}),
+  patch: (p, b, options) => request('PATCH', p, b, false, options || {}),
+  del: (p, b, options) => request('DELETE', p, b, false, options || {}),
+  upload: (p, form, options) => request('POST', p, form, true, options || {}),
 }

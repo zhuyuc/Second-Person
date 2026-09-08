@@ -298,6 +298,21 @@ class AppContainer:
         self.chat_svc = ChatService(self)
         self.memory_svc = MemoryService(self)
 
+        # ---- 运行时预热（启动 / 新建会话触发；不改检索决策）----
+        from infrastructure.runtime_warmup import RuntimeWarmer
+        self.runtime_warmer = RuntimeWarmer(self)
+        _orig_create_session = self.sessions.create_session
+
+        def _create_session_with_warmup(*args, **kwargs):
+            sid = _orig_create_session(*args, **kwargs)
+            try:
+                self.runtime_warmer.schedule("session_create")
+            except Exception:  # noqa: BLE001
+                logger.debug("schedule runtime warmup failed", exc_info=True)
+            return sid
+
+        self.sessions.create_session = _create_session_with_warmup
+
     def _purge_old_signals(self) -> int:
         """清理超保留期的 response_signals。"""
         from memory import _constants as _mem_const
@@ -542,6 +557,10 @@ class AppContainer:
             except Exception:  # noqa: BLE001
                 pass  # 未安装/加载失败时 estimate_tokens 自有降级
         asyncio.create_task(_warm_tiktoken())
+        try:
+            self.runtime_warmer.schedule("startup")
+        except Exception:  # noqa: BLE001
+            logger.debug("schedule startup warmup failed", exc_info=True)
         # 事件循环卡顿哨兵：任何同步重操作阻塞循环（会冻结对话 SSE）
         # 都会在日志中立即现形，防未来回归
         from infrastructure.observability import EventLoopMonitor

@@ -14,6 +14,7 @@ export const useSessions = defineStore('sessions', {
   // 落库，仅记项目 id；首条消息 send 时才 create_session(project_id=?)
   state: () => ({
     list: [],
+    listLoaded: false,
     currentSid: localStorage.getItem('sp_current_sid') || null,
     pendingProjectId: null,
   }),
@@ -22,6 +23,19 @@ export const useSessions = defineStore('sessions', {
       // 侧栏需展示全量会话：显式传大 page_size，避免后端默认 20 条截断
       const d = await chatApi.sessions()
       this.list = d.list
+      this.listLoaded = true
+      // 刷新恢复：localStorage 里的会话若已删除/归档，不再继续请求，清掉回到新对话
+      this.discardMissingCurrent()
+    },
+    discardMissingCurrent() {
+      const sid = this.currentSid
+      if (!sid || !this.listLoaded) return
+      if (!this.list.some((s) => s.session_id === sid)) {
+        this.setCurrent(null)
+      }
+    },
+    hasSession(sid) {
+      return !!sid && this.list.some((s) => s.session_id === sid)
     },
     // 局部更新：pin/rename/archive 等操作后只改对应项，避免全量 load()
     // 重新拉 500 条 + 触发 500 个 v-for 节点 diff

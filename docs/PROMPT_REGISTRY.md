@@ -53,10 +53,9 @@
 | 9 | app/container/wiring.py::merge_judge_fn | chat | system_agent | app/prompts/merge_judge.md | 记忆合并 |
 | 10 | app/services/chat_service.py::_call_llm | chat | title_gen | app/prompts/title_gen.md | 会话标题 |
 | 11 | app/routes/misc.py::test_connection | chat | main_chat | - | 模型连通性 |
-| 12 | app/services/settings_service.py::probe_snapshot | chat | main_chat | - | 模型探活 |
-| 13 | memory/handoff_summary.py::_llm_converge | chat | handoff_summary | agent/prompts/handoff_converge.md | handoff 收敛 |
-| 14 | memory/handoff_summary.py::_llm_generate | chat | handoff_summary | agent/prompts/handoff_summary.md | handoff 生成 |
-| 15 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像冲突识别 |
-| 16 | soul/mood_judge.py::judge_turn_moods | chat | system_agent | agent/prompts/mood_judge.md | turn 结束情绪判定 |
-| 17 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取 |
-| 18 | agent/compaction_engine.py::_summarize | chat | system_agent | agent/prompts/compact_instruction.md | v7 自动压缩摘要生成 |
+| 12 | memory/handoff_summary.py::_llm_converge | chat | handoff_summary | agent/prompts/handoff_converge.md | handoff 收敛 |
+| 13 | memory/handoff_summary.py::_llm_generate | chat | handoff_summary | agent/prompts/handoff_summary.md | handoff 生成 |
+| 14 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像冲突识别 |
+| 15 | soul/mood_judge.py::judge_turn_moods | chat | system_agent | agent/prompts/mood_judge.md | turn 结束情绪判定 |
+| 16 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取 |
+| 17 | agent/compaction_engine.py::_summarize | chat | system_agent | agent/prompts/compact_instruction.md | v7 自动压缩摘要生成 |

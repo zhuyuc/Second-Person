@@ -70,7 +70,6 @@ def test_compact_candidates_marks_selected():
     assert len(rows) == 2
     assert rows[0]["id"] == "a" and rows[0]["selected"] is True
     assert rows[1]["id"] == "b" and rows[1]["selected"] is False
-    # 预筛不传 selected_ids → 不带 selected 字段
     pre = compact_candidates(cands)
     assert "selected" not in pre[0]
     assert pre[0]["title"] == "A" and pre[0]["summary"] == "sa"

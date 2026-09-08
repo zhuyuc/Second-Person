@@ -36,7 +36,6 @@ class _FakeDB:
         return None
 
     def execute(self, sql, params=()):
-        # E7 负样本反馈会调 execute；这里静默接受
         return None
 
 
@@ -129,16 +128,15 @@ async def main() -> int:
         return []
     id_to_vec = {mid: [1.0, 0.0, 0.0, 0.0] for mid in rows}
     vs = _FakeVS(hits, id_to_vec=id_to_vec)
-    # 造 links：mem_a → mem_c（图扩展会拉出 mem_c）
     db = _FakeDB(links=[("mem_a", "mem_c", "related")])
     r = _mk(tmp, vs, _FakePalace(rows), refine_empty, [], db=db,
-             cfg=_Cfg(graph_expand_seed_threshold=0.5))
+            cfg=_Cfg(graph_expand_seed_threshold=0.5))
     res = await r.retrieve("方案3，按上面的格式更新到文档")
     if res.related or res.loaded_ids:
         failures.append(
             f"Δ2：refine 判空时不应注入 extra_related，"
             f"实际注入 {len(res.loaded_ids)} 条 "
-            f"(related_ids={[r['id'] for r in res.related]})")
+            f"(related_ids={[x['id'] for x in res.related]})")
     if res.diagnostics.get("gate") != "refine_empty":
         failures.append(
             f"refine 判空时 gate 应为 refine_empty，"
