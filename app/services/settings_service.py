@@ -6,6 +6,7 @@ import logging
 import tempfile
 import zipfile
 from pathlib import Path
+from urllib.parse import urlparse
 
 from infrastructure.timeutil import now_iso
 
@@ -36,25 +37,23 @@ class SettingsService:
                 raise ValueError(f"请先填写{label}")
 
     async def probe_snapshot(self, snap) -> dict:
-        """连通性探测：先试 chat，失败再试 embed。"""
+        """一次性连通性探测，不污染正式调用的熔断与用量状态。"""
         try:
-            await self.c.llm.chat(snap, [{"role": "user", "content": "ping"}],
-                                  source="main_chat", max_tokens=10)
-            return {"ok": True}
-        except Exception as chat_err:  # noqa: BLE001
-            try:
-                await self.c.llm.embed(snap, ["ping"])
-                return {"ok": True}
-            except Exception:  # noqa: BLE001
-                return {"ok": False, "error": str(chat_err)}
+            return await self.c.llm.probe(snap)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
 
     async def test_provider(self, body: dict) -> dict:
-        from tools.web_fetch import validate_base_url
         from infrastructure.llm_provider import ProviderSnapshot
         body = self.clean_provider_fields(body)
-        url_err = await validate_base_url(body.get("base_url", ""))
-        if url_err:
-            return {"ok": False, "error": url_err}
+        # Provider 可以是本地模型服务（如 127.0.0.1），不能复用网页抓取的
+        # SSRF 校验；真实 LLM 调用本身也直接使用用户配置的地址。
+        base_url = body.get("base_url", "")
+        parsed = urlparse(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return {"ok": False, "error": "Base URL 仅支持带主机名的 http/https 地址"}
+        if not body.get("model_id"):
+            return {"ok": False, "error": "请填写模型 ID"}
         snap = ProviderSnapshot("test", body["provider_type"], body["base_url"],
                                 body["api_key"], body["model_id"])
         return await self.probe_snapshot(snap)

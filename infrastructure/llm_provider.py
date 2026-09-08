@@ -254,6 +254,30 @@ class LLMClient:
             await self._client.aclose()
             self._client = None
 
+    async def probe(self, snap: ProviderSnapshot) -> dict[str, Any]:
+        """一次性探测 Provider，不进入正式调用的重试、熔断和用量统计链路。"""
+        chat_error: Exception | None = None
+        try:
+            # DeepSeek reasoning models can spend a 10-token probe entirely on
+            # hidden reasoning and return no visible content. Disable reasoning
+            # for the connectivity probe so the result tests the API itself.
+            probe_kwargs: dict[str, Any] = {"max_tokens": 32}
+            if "deepseek" in (snap.base_url or "").lower():
+                probe_kwargs["extra_body"] = {"thinking_enabled": False}
+            await self._do_chat(
+                snap, [{"role": "user", "content": "ping"}], None,
+                **probe_kwargs)
+            return {"ok": True, "protocol": "chat"}
+        except Exception as exc:  # noqa: BLE001
+            chat_error = exc
+        try:
+            await self._do_embed(snap, ["ping"])
+            return {"ok": True, "protocol": "embedding"}
+        except Exception as embed_error:  # noqa: BLE001
+            raise LLMError(
+                f"chat 探测失败：{chat_error}; embedding 探测失败：{embed_error}") \
+                from embed_error
+
     def breaker(self, model: str) -> CircuitBreaker:
         return self._breakers.setdefault(model, CircuitBreaker(model))
 

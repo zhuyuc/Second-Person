@@ -79,6 +79,7 @@ class ChatSendRequest(BaseModel):
     message: str = ""
     client_request_id: str | None = None
     images: list[str] | None = None
+    attachment_ids: list[str] | None = None
     regenerate_message_id: int | None = None
     edit_message_id: int | None = None
     # 编辑消息时前端接管附件：声明后后端不再自动重建旧附件，
@@ -108,7 +109,10 @@ class ChatSendRequest(BaseModel):
     @field_validator("message", mode="before")
     @classmethod
     def _validate_message(cls, value: Any) -> str:
-        return _required_string(value, "message", limit=64_000)
+        message = _required_string(value, "message")
+        if len(message) > 64_000:
+            raise ValueError("message must be at most 64000 characters")
+        return message
 
     @field_validator("client_request_id", mode="before")
     @classmethod
@@ -122,6 +126,16 @@ class ChatSendRequest(BaseModel):
             return None
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ValueError("images must be a list of strings")
+        return value
+
+    @field_validator("attachment_ids", mode="before")
+    @classmethod
+    def _validate_attachment_ids(cls, value: Any) -> list[str] | None:
+        if value in (None, []):
+            return None
+        if (not isinstance(value, list) or len(value) > 5
+                or not all(isinstance(item, str) for item in value)):
+            raise ValueError("attachment_ids must be a list of at most 5 strings")
         return value
 
     @field_validator("regenerate_message_id", mode="before")

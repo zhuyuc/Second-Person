@@ -618,6 +618,7 @@ async function uploadFiles(fileList) {
       const d = await chatApi.uploadAttachment(fd)
       attachments.value[idx] = {
         name: d.filename,
+        attachmentId: d.attachment_id,
         chars: d.chars,
         text: d.text,
         truncated: d.truncated,
@@ -1310,7 +1311,8 @@ async function send() {
     return
   }
   const text = input.value.trim()
-  const atts = attachments.value.filter((a) => a.parsed && a.text)
+  const atts = attachments.value.filter((a) => a.parsed && (a.text || a.attachmentId))
+  const attachmentIds = atts.map((a) => a.attachmentId).filter(Boolean)
   const imgs = attachments.value.filter((a) => a.isImage && a.dataUrl).map((a) => a.dataUrl)
   const kbFiles = attachments.value.filter((a) => a.file && !a.isImage).map((a) => a.file)
   if ((!text && !atts.length && !imgs.length) || generating.value) return
@@ -1359,13 +1361,13 @@ async function send() {
   if (handoffStatus.value === 'ready' && messages.value.length === 0) {
     hPath = `artifacts/handoffs/${currentSid.value}.md`
   }
-  // 构造发送给后端的消息：把附件解析文本作为上下文前置（不截断，完整交给模型）
+  // 本地粘贴/引用保留正文；上传文件仅发送受控附件引用，避免解析全文回传浏览器。
   // 引用附件（kind:'quote'）走 【选中的文本】\n{原文} + 可选 \n\n【用户评论】\n{评论}
   // 双标签，让模型清楚地区分"被引用的原文"和"用户对这段的评论"。
   // 其它附件（粘贴/文档）继续 【附件：xxx】 老格式；主输入文字仍用 \n---\n 尾部分隔。
   let backendMsg = text
   if (atts.length) {
-    const blocks = atts
+    const blocks = atts.filter((a) => !a.attachmentId)
       .map((a) => {
         if (a.kind === 'quote') {
           const base = `【选中的文本】\n${a.text || ''}`
@@ -1374,7 +1376,9 @@ async function send() {
         return `【附件：${a.name}】\n${a.text || ''}`
       })
       .join('\n\n')
-    backendMsg = blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
+    backendMsg = blocks
+      ? blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
+      : (text || '请阅读上述附件内容并回应。')
   }
   if (!backendMsg && imgs.length) backendMsg = '请看图并回应。'
   // 气泡附件：保留粘贴全文与原始 File，供发送后点击弹窗回看/下载
@@ -1416,6 +1420,7 @@ async function send() {
     projectId: currentSid.value ? undefined : sessStore.pendingProjectId,
     message: backendMsg,
     images: imgs.length ? imgs : undefined,
+    attachmentIds,
     location: geoEnabled.value ? cachedLocation() : undefined,
     handoffPath: hPath,
     reasoningEffort: reasoningEffort.value,
@@ -1587,7 +1592,8 @@ async function submitEdit() {
     toast.push('warning', '附件解析中，请稍候')
     return
   }
-  const docs = attachments.value.filter((a) => !a.isImage && (a.text || a.kind === 'quote'))
+  const docs = attachments.value.filter((a) => !a.isImage && (a.text || a.attachmentId || a.kind === 'quote'))
+  const attachmentIds = docs.map((a) => a.attachmentId).filter(Boolean)
   const keepImages = attachments.value.filter((a) => a.isImage && a.origin === 'existing')
   const newImageItems = attachments.value.filter((a) => a.isImage && a.origin === 'new' && a.dataUrl)
   const newImages = newImageItems.map((a) => a.dataUrl)
@@ -1609,7 +1615,7 @@ async function submitEdit() {
 
   let backendMsg = text
   if (docs.length) {
-    const blocks = docs
+    const blocks = docs.filter((a) => !a.attachmentId)
       .map((a) => {
         if (a.kind === 'quote') {
           const base = `【选中的文本】\n${a.text || ''}`
@@ -1618,7 +1624,9 @@ async function submitEdit() {
         return `【附件：${a.name}】\n${a.text || ''}`
       })
       .join('\n\n')
-    backendMsg = blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
+    backendMsg = blocks
+      ? blocks + '\n\n---\n' + (text || '请阅读上述附件内容并回应。')
+      : (text || '请阅读上述附件内容并回应。')
   }
   if (!backendMsg && (newImages.length || keepImages.length)) backendMsg = '请看图并回应。'
 
@@ -1684,6 +1692,7 @@ async function submitEdit() {
       attachmentsOverridden: true,
       keepImageNames,
       images: newImages.length ? newImages : undefined,
+      attachmentIds,
       location: geoEnabled.value ? cachedLocation() : undefined,
       reasoningEffort: reasoningEffort.value,
       clientRequestId: streamCrid.value,

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 from agent.decision_summary import build_tool_decision_notice
 from agent.repeat_tool_guard import RepeatToolGuard
+from infrastructure.llm_provider import LLMClient, ProviderSnapshot
 from infrastructure.provider_registry import infer_capabilities
 
 
@@ -32,3 +35,26 @@ def test_provider_capability_inference_distinguishes_native_reasoning():
     assert deepseek["reasoning_efforts"] == ("off", "low", "high", "max")
     assert mimo["native_reasoning"] is False
     assert "tool_call" in mimo["capabilities"]
+
+
+def test_deepseek_probe_disables_reasoning_and_keeps_output_budget():
+    captured = {}
+    client = LLMClient()
+
+    async def fake_chat(_snap, _messages, _tools, **kwargs):
+        captured.update(kwargs)
+        return {"content": "pong", "tool_calls": [], "usage": {}}
+
+    async def unexpected_embed(*_args, **_kwargs):
+        raise AssertionError("chat probe should succeed without embedding fallback")
+
+    client._do_chat = fake_chat
+    client._do_embed = unexpected_embed
+    snap = ProviderSnapshot(
+        "test", "openai_compatible", "https://api.deepseek.com", "key", "deepseek-v4")
+
+    result = asyncio.run(client.probe(snap))
+
+    assert result == {"ok": True, "protocol": "chat"}
+    assert captured["max_tokens"] == 32
+    assert captured["extra_body"] == {"thinking_enabled": False}

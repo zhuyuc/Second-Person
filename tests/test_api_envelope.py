@@ -69,6 +69,26 @@ def test_non_object_json_body_uses_unified_error_envelope(client: TestClient):
     _assert_error_envelope(resp, 400, "request body must be an object")
 
 
+def test_provider_connection_test_allows_local_provider_url(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """Provider 连通性测试不能套用网页抓取的内网地址拦截。"""
+    service = get_container().settings_svc
+
+    async def fake_test_provider(body):
+        assert body["base_url"] == "http://127.0.0.1:8100"
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "test_provider", fake_test_provider)
+    resp = client.post("/api/settings/providers/test-connection", json={
+        "provider_type": "openai_compatible",
+        "base_url": "http://127.0.0.1:8100",
+        "api_key": "",
+        "model_id": "bge-m3",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"ok": True}
+
+
 def test_success_response_keeps_code_data_envelope(client: TestClient):
     resp = client.post("/api/chat/session/create")
     assert resp.status_code == 200

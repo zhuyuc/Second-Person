@@ -130,6 +130,8 @@ class AppContainer:
         self.ctx_entry = ContextEntryManager(d)
         self.sessions = SessionStore(self.db, d)
         self.projects = ProjectStore(self.db, d)
+        from app.attachment_store import AttachmentStore
+        self.attachments = AttachmentStore(d)
         self.notifications = NotificationManager(self.db, self.sessions)
 
         setup_notifier(self)
@@ -353,7 +355,7 @@ class AppContainer:
                             ((now_cst() - timedelta(days=1))
                              .isoformat(timespec="seconds"),)))
         s.register_task("temp_cleanup", "接收文件缓存清理",
-                        lambda: (self.ingest.cleanup_temp_attachments(7),
+                        lambda: (self.attachments.cleanup(7),
                                  self._cleanup_exports(7),
                                  self._cleanup_spills(7)))
         s.register_task("log_cleanup", "日志清理", lambda: (

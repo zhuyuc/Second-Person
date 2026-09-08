@@ -174,6 +174,7 @@ async def chat_send(request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     sid = payload.session_id
     message = payload.message
+    attachment_ids = payload.attachment_ids or []
     crid = payload.client_request_id
     images = payload.images
     regen_id = payload.regenerate_message_id
@@ -184,6 +185,15 @@ async def chat_send(request: Request):
     handoff_path = payload.handoff_path
     reasoning_effort = payload.reasoning_effort
     c = _c()
+    if attachment_ids:
+        try:
+            attachment_context = c.attachments.context_for(
+                attachment_ids, max_chars=max(0, 64_000 - len(message) - 512))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if attachment_context:
+            message = attachment_context + "\n\n---\n" + (
+                message or "请阅读上述附件内容并回应。")
 
     await _gc_buffers()
     # 断线重连/刷新重挂：已有缓冲则从头回放并续跟（生成在后台继续，不重复计费）。
@@ -638,54 +648,24 @@ async def pin(body: SessionPinRequest):
     return {"code": 200, "data": {}}
 
 
-# 对话附件：上传并解析为文本（供当前提问作为上下文，不入记忆库）
-# 不对解析文本做截断：现代模型上下文窗口足够（百万级），完整交给模型。
-ATTACH_MAX_MB = 20
-
-
 @router.post("/chat/attachment")
 async def upload_attachment(file: UploadFile = File(...)):
-    import tempfile
-    import os
-    from pathlib import Path
-    from scheduler.ingest import extract_text
     from langfuse.integration import get_tracer
     tr = get_tracer().trace_start("attachment_upload", input={
         "filename": file.filename,
         "size_bytes": file.size if file.size is not None else 0})
-    content = await file.read()
-    if len(content) > ATTACH_MAX_MB * 1024 * 1024:
-        tr.end(level="ERROR", output={"ok": False, "error": "超过 20MB 上限"})
-        raise HTTPException(status_code=400, detail=f"文件超过 {ATTACH_MAX_MB} MB 上限")
-    suffix = Path(file.filename or "file").suffix
-    tmp = Path(tempfile.gettempdir()) / \
-        f"sp_attach_{os.getpid()}_{int(time.time()*1000)}{suffix}"
-
-    def _parse() -> str:
-        # 临时文件写盘（最大 20MB）与 docx/pdf 解析均为同步重操作，
-        # 整体丢工作线程，避免上传附件冻结自己与其他会话的 SSE 流
-        try:
-            tmp.write_bytes(content)
-            # 仅针对文档抽文本；图片不走此路（前端直接作多模态图发送）
-            return extract_text(tmp) or ""
-        finally:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
-
     try:
-        text = await asyncio.to_thread(_parse)
+        result = await _c().attachments.upload_and_parse(file)
+    except ValueError as e:
+        tr.end(level="ERROR", output={"ok": False, "error": str(e)[:500]})
+        raise HTTPException(status_code=413 if "50MB" in str(e) else 400,
+                            detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         tr.end(level="ERROR", output={"ok": False, "error": str(e)[:500]})
         raise
-    tr.end(output={"ok": bool(text.strip()), "chars": len(text),
-                   "parsed": bool(text.strip()), "truncated": False})
-    return {"code": 200, "data": {
-        "filename": file.filename, "chars": len(text),
-        "text": text, "truncated": False,
-        "parsed": bool(text.strip()),
-    }}
+    tr.end(output={"ok": result["parsed"], "chars": result["chars"],
+                   "parsed": result["parsed"], "truncated": result["truncated"]})
+    return {"code": 200, "data": result}
 
 
 @router.delete("/chat/session/{session_id}")
