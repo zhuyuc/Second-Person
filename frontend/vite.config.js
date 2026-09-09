@@ -51,6 +51,10 @@ export default defineConfig({
         cssMinify: 'esbuild',
         rollupOptions: {
             output: {
+                // Keep the preload helper in the entry graph. Without this, Rollup's
+                // implicit dependency hoisting places it in the manual diagram chunk,
+                // which makes the browser preload Mermaid before any chart is shown.
+                onlyExplicitManualChunks: true,
                 manualChunks(id) {
                     // mermaid 全家桶保持单一 chunk，避免子拆分产生循环引用
                     if (id.includes('node_modules/mermaid') || id.includes('node_modules/dagre') || id.includes('node_modules/cytoscape')) {

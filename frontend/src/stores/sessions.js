@@ -4,6 +4,7 @@ import { chatApi } from '@/api/chat'
 
 const DEFAULT_SESSION_TITLE = '新对话'
 const TITLE_REFRESH_DELAYS = [0, 800, 2000, 4500, 9000, 18000, 30000, 60000]
+const SESSION_PAGE_SIZE = 50
 const autoTitleRefreshes = new Map()
 
 export const useSessions = defineStore('sessions', {
@@ -15,21 +16,48 @@ export const useSessions = defineStore('sessions', {
   state: () => ({
     list: [],
     listLoaded: false,
+    listLoading: false,
+    page: 0,
+    nextCursor: null,
+    hasMore: true,
     currentSid: localStorage.getItem('sp_current_sid') || null,
     pendingProjectId: null,
   }),
   actions: {
-    async load() {
-      // 侧栏需展示全量会话：显式传大 page_size，避免后端默认 20 条截断
-      const d = await chatApi.sessions()
-      this.list = d.list
-      this.listLoaded = true
+    async load({ reset = true } = {}) {
+      if (this.listLoading || (!reset && !this.hasMore)) return
+      this.listLoading = true
+      const page = reset ? 1 : this.page + 1
+      try {
+        const d = await chatApi.sessions({
+          // 空游标明确进入后端 keyset 模式，避免首次请求意外退回 OFFSET 兼容路径。
+          cursor: reset ? '' : this.nextCursor,
+          page,
+          pageSize: SESSION_PAGE_SIZE,
+        })
+        const incoming = d.list || []
+        if (reset) this.list = incoming
+        else {
+          const existing = new Set(this.list.map((session) => session.session_id))
+          this.list.push(...incoming.filter((session) => !existing.has(session.session_id)))
+        }
+        this.page = page
+        this.nextCursor = d.next_cursor || null
+        this.hasMore = this.nextCursor ? true : this.list.length < (d.total || 0)
+        this.listLoaded = true
+      } finally {
+        this.listLoading = false
+      }
       // 刷新恢复：localStorage 里的会话若已删除/归档，不再继续请求，清掉回到新对话
       this.discardMissingCurrent()
     },
+    loadMore() {
+      return this.load({ reset: false })
+    },
     discardMissingCurrent() {
       const sid = this.currentSid
-      if (!sid || !this.listLoaded) return
+      // 分页首屏未命中不代表会话已删除，只有所有页都读取完才清除恢复态。
+      if (!sid || !this.listLoaded || this.hasMore) return
       if (!this.list.some((s) => s.session_id === sid)) {
         this.setCurrent(null)
       }
@@ -37,8 +65,7 @@ export const useSessions = defineStore('sessions', {
     hasSession(sid) {
       return !!sid && this.list.some((s) => s.session_id === sid)
     },
-    // 局部更新：pin/rename/archive 等操作后只改对应项，避免全量 load()
-    // 重新拉 500 条 + 触发 500 个 v-for 节点 diff
+    // 局部更新：pin/rename/archive 等操作后只改对应项，避免刷新整个侧栏。
     applyPatch(sid, patch) {
       const s = this.list.find((x) => x.session_id === sid)
       if (s) Object.assign(s, patch)
@@ -97,9 +124,15 @@ export const useSessions = defineStore('sessions', {
         const timer = window.setTimeout(async () => {
           timers.delete(timer)
           try {
-            await this.load()
-            const session = this.list.find((s) => s.session_id === sid)
-            if (!session || (session.title && session.title !== DEFAULT_SESSION_TITLE)) {
+            // 标题生成是单会话状态变化，定向读取摘要而不是轮询整个会话列表。
+            const summary = await chatApi.sessionSummary(sid)
+            const session = this.list.find((item) => item.session_id === sid)
+            if (!session || summary.archived) {
+              stop()
+              return
+            }
+            this.applyPatch(sid, summary)
+            if (summary.title && summary.title !== DEFAULT_SESSION_TITLE) {
               stop()
               return
             }

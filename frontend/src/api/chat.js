@@ -15,7 +15,17 @@ export const chatApi = {
   memoryFeedback: (payload) => api.post('/memory/feedback', payload),
 
   // ---- 会话列表/操作（SessionSidebar）----
-  sessions: (pageSize = 500) => api.get(`/chat/sessions?page_size=${pageSize}`),
+  sessions: ({ cursor = '', page = 1, pageSize = 50 } = {}) => {
+    // withQuery intentionally omits empty values. Here an empty cursor is meaningful:
+    // it opts the sidebar into the server's keyset-pagination contract.
+    const query = new URLSearchParams({
+      cursor,
+      page: String(page),
+      page_size: String(pageSize),
+    })
+    return api.get(`/chat/sessions?${query}`)
+  },
+  sessionSummary: (sessionId) => api.get(`/chat/session/${sessionId}/summary`, { silent: true }),
   archiveSession: (sessionId) => api.post('/chat/session/archive', { session_id: sessionId }),
   renameSession: (sessionId, title) => api.post('/chat/session/rename', { session_id: sessionId, title }),
   pinSession: (sessionId, pinned) => api.post('/chat/session/pin', { session_id: sessionId, pinned }),

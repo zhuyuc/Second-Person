@@ -53,6 +53,14 @@ def test_chat_request_contract_uses_only_reasoning_effort():
         parse_chat_send({"message": "测试", "regenerate_message_id": 0})
 
 
+def test_chat_request_contract_accepts_only_non_negative_resume_cursor():
+    request = parse_chat_send({"message": "测试", "last_event_id": "42"})
+    assert request.last_event_id == 42
+    assert parse_chat_send({"message": "测试"}).last_event_id == 0
+    with pytest.raises(ContractValidationError, match="non-negative"):
+        parse_chat_send({"message": "测试", "last_event_id": -1})
+
+
 def test_chat_request_edit_attachment_override_fields():
     """编辑消息接管附件：attachments_overridden / keep_image_names 契约。"""
     # 默认值：未升级前端不携带这两个字段

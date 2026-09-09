@@ -33,6 +33,7 @@ declare module 'vue' {
     SessionSearchPanel: typeof import('./components/SessionSearchPanel.vue')['default']
     SessionSidebar: typeof import('./components/SessionSidebar.vue')['default']
     SideChatDrawer: typeof import('./components/SideChatDrawer.vue')['default']
+    TabbedPageHeader: typeof import('./components/TabbedPageHeader.vue')['default']
     ThinkingTimeline: typeof import('./components/ThinkingTimeline.vue')['default']
   }
 }

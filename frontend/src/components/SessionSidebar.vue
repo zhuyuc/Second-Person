@@ -395,6 +395,13 @@ async function onProjectsChanged() {
   await projStore.load()
   await sess.load()
 }
+async function loadMoreSessions() {
+  try {
+    await sess.loadMore()
+  } catch {
+    toast.push('error', '加载更多会话失败')
+  }
+}
 </script>
 
 <template>
@@ -654,6 +661,16 @@ async function onProjectsChanged() {
           style="position: fixed; inset: 0; z-index: var(--z-menu)"
           @click="menuId = null"
         ></div>
+        <button
+          v-if="sess.hasMore && sess.list.length"
+          type="button"
+          class="sess-load-more"
+          :disabled="sess.listLoading"
+          @click="loadMoreSessions"
+        >
+          <i class="ti" :class="sess.listLoading ? 'ti-loader-2' : 'ti-chevron-down'"></i>
+          {{ sess.listLoading ? '加载中…' : '加载更多会话' }}
+        </button>
       </div>
     </div>
 
@@ -719,6 +736,23 @@ async function onProjectsChanged() {
   gap: 6px;
   cursor: pointer;
   user-select: none;
+}
+.sess-load-more {
+  width: calc(100% - 16px);
+  margin: 4px 8px 10px;
+  padding: 6px 8px;
+  color: var(--sec);
+  background: transparent;
+  border: 1px solid var(--bd);
+  font-size: var(--fs-sm);
+}
+.sess-load-more:hover:not(:disabled) {
+  color: var(--acctx);
+  background: var(--surface-2);
+}
+.sess-load-more:disabled {
+  cursor: wait;
+  opacity: 0.65;
 }
 .sess-hd:hover {
   color: var(--fg);

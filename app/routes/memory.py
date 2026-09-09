@@ -79,7 +79,7 @@ async def memory_list(request: Request):
             rows = []
         else:
             idph = ",".join("?" * len(ids))
-            rows = c.db.query_all(
+            rows = await c.db.query_all_async(
                 f"SELECT * FROM memories WHERE id IN ({idph}) AND {clause}",
                 (*ids, *params))
             order = {mid: i for i, mid in enumerate(ids)}
@@ -89,15 +89,17 @@ async def memory_list(request: Request):
         page_rows = rows[start:start + page_size]
     else:
         # SQL 级分页：避免记忆库增长后全表拉取在事件循环上线性变慢
-        page_rows = c.db.query_all(
+        page_rows = await c.db.query_all_async(
             f"SELECT * FROM memories WHERE {clause} "
             f"ORDER BY updated_at DESC LIMIT ? OFFSET ?",
             (*params, page_size, start))
         # 非 keyword 路径：total 用带相同 WHERE 的 COUNT(*)，分页计数才正确
-        total = c.db.query_one(
-            f"SELECT COUNT(*) cnt FROM memories WHERE {clause}", params)["cnt"]
-    stats = c.palace.stats()
-    score, _ = c.lint.health_score()
+        total_row = await c.db.query_one_async(
+            f"SELECT COUNT(*) cnt FROM memories WHERE {clause}", params)
+        total = total_row["cnt"]
+    stats, counts = await asyncio.gather(
+        asyncio.to_thread(c.palace.stats), asyncio.to_thread(c.lint.counts))
+    score, _ = await asyncio.to_thread(c.lint.health_score, counts)
     return {"code": 200, "data": {
         "total": total,
         "stats": {"total_active": stats["total_active"],
@@ -199,17 +201,18 @@ async def detail(id: str):
             linked.append(
                 {"id": lr["id"], "title": lr["title"], "type": lk.get("type")})
     # 被引用记录：记忆资产的使用凭证（时间 + 所在会话，可跳转回对话）
-    cites = c.db.query_all(
+    cites, evidence, revisions = await asyncio.gather(
+        c.db.query_all_async(
         "SELECT ce.message_id, ce.session_id, ce.cited_at, s.title AS session_title "
         "FROM citation_events ce LEFT JOIN sessions s ON ce.session_id=s.session_id "
-        "WHERE ce.memory_id=? ORDER BY ce.cited_at DESC LIMIT 50", (id,))
-    evidence = c.db.query_all(
+        "WHERE ce.memory_id=? ORDER BY ce.cited_at DESC LIMIT 50", (id,)),
+        c.db.query_all_async(
         "SELECT evidence_id,source_type,source_ref,locator,excerpt,captured_at,status "
         "FROM memory_evidence WHERE memory_id=? AND status='active' "
-        "ORDER BY captured_at DESC LIMIT 50", (id,))
-    revisions = c.db.query_all(
+        "ORDER BY captured_at DESC LIMIT 50", (id,)),
+        c.db.query_all_async(
         "SELECT revision_id,revision_no,operation,reason,created_at "
-        "FROM memory_revisions WHERE memory_id=? ORDER BY revision_no DESC LIMIT 20", (id,))
+        "FROM memory_revisions WHERE memory_id=? ORDER BY revision_no DESC LIMIT 20", (id,)))
     return {"code": 200, "data": {
         "id": id, "frontmatter": doc.frontmatter, "summary": doc.summary,
         "detail": doc.detail, "change_history": doc.change_history,
@@ -229,7 +232,7 @@ async def detail(id: str):
 @router.get("/memory/{mid}/revisions")
 async def revisions(mid: str):
     c = _c()
-    rows = c.db.query_all(
+    rows = await c.db.query_all_async(
         "SELECT revision_id,revision_no,operation,before_json,after_json,reason,created_at "
         "FROM memory_revisions WHERE memory_id=? ORDER BY revision_no DESC", (mid,))
     return {"code": 200, "data": [{**r,
@@ -277,7 +280,7 @@ async def memory_feedback(request: Request):
 async def governance(status: str = "open", limit: int = 100):
     c = _c()
     limit = min(max(1, limit), 200)
-    rows = c.db.query_all(
+    rows = await c.db.query_all_async(
         "SELECT g.*,m.title,m.summary,m.confidence,m.lifecycle FROM memory_governance_items g "
         "LEFT JOIN memories m ON m.id=g.primary_memory_id WHERE g.status=? "
         "ORDER BY g.priority DESC,g.created_at DESC LIMIT ?", (status, limit))
@@ -389,18 +392,20 @@ async def graph(limit: int = None, project_id: str = None,
             proj_where = " WHERE (e.project_id=? OR e.project_id IS NULL)"
             proj_params.append(project_id)
 
-    total_count = c.db.query_one(
+    total_row, nodes = await asyncio.gather(
+        c.db.query_one_async(
         "SELECT COUNT(*) cnt FROM memory_entities e" + proj_where,
-        proj_params)["cnt"]
-    nodes = c.db.query_all(
+        proj_params),
+        c.db.query_all_async(
         "SELECT e.entity_id,e.entity_name,e.entity_type,e.primary_domain,"
         "e.memory_count,g.x,g.y "
         "FROM memory_entities e LEFT JOIN graph_layout g ON e.entity_id=g.entity_id"
         + proj_where +
         " ORDER BY e.memory_count DESC LIMIT ?",
-        (*proj_params, max_nodes))
+        (*proj_params, max_nodes)))
+    total_count = total_row["cnt"]
     node_ids = {n["entity_id"] for n in nodes}
-    edges = c.db.query_all(
+    edges = await c.db.query_all_async(
         "SELECT a.entity_id src, b.entity_id tgt, COUNT(*) w "
         "FROM memory_entity_links a JOIN memory_entity_links b "
         "ON a.memory_id=b.memory_id AND a.entity_id < b.entity_id "
@@ -419,7 +424,7 @@ async def graph(limit: int = None, project_id: str = None,
 @router.get("/memory/graph/entity/{entity_id}/memories")
 async def entity_memories(entity_id: str):
     c = _c()
-    rows = c.db.query_all(
+    rows = await c.db.query_all_async(
         "SELECT m.id,m.title,m.summary FROM memory_entity_links l "
         "JOIN memories m ON l.memory_id=m.id WHERE l.entity_id=?", (entity_id,))
     return {"code": 200, "data": [dict(r) for r in rows]}
@@ -433,11 +438,11 @@ async def entity_neighbors(entity_id: str, limit: int = 30, exclude_ids: str = "
     excluded = {x for x in exclude_ids.split(",") if x}
     from memory.graph_layout import place_missing
     try:
-        place_missing(c.db)
+        await asyncio.to_thread(place_missing, c.db)
     except Exception:  # noqa: BLE001
         logger.warning("邻居扩展前增量布点失败", exc_info=True)
 
-    center = c.db.query_one(
+    center = await c.db.query_one_async(
         "SELECT e.entity_id,e.entity_name,e.entity_type,e.primary_domain,"
         "e.memory_count,g.x,g.y FROM memory_entities e "
         "LEFT JOIN graph_layout g ON e.entity_id=g.entity_id WHERE e.entity_id=?",
@@ -445,7 +450,7 @@ async def entity_neighbors(entity_id: str, limit: int = 30, exclude_ids: str = "
     if not center:
         raise HTTPException(status_code=404, detail="实体不存在")
     # 共现邻居按 co_count 降序
-    nb_rows = c.db.query_all(
+    nb_rows = await c.db.query_all_async(
         "SELECT b.entity_id tgt, COUNT(*) w FROM memory_entity_links a "
         "JOIN memory_entity_links b ON a.memory_id=b.memory_id AND b.entity_id!=a.entity_id "
         "WHERE a.entity_id=? GROUP BY b.entity_id ORDER BY w DESC", (entity_id,))
@@ -454,7 +459,7 @@ async def entity_neighbors(entity_id: str, limit: int = 30, exclude_ids: str = "
     neighbors = []
     if picked:
         ph = ",".join("?" * len(picked))
-        nrows = c.db.query_all(
+        nrows = await c.db.query_all_async(
             f"SELECT e.entity_id,e.entity_name,e.entity_type,e.primary_domain,"
             f"e.memory_count,g.x,g.y FROM memory_entities e "
             f"LEFT JOIN graph_layout g ON e.entity_id=g.entity_id "
@@ -466,7 +471,7 @@ async def entity_neighbors(entity_id: str, limit: int = 30, exclude_ids: str = "
     edges = []
     if len(node_set) > 1:
         ph = ",".join("?" * len(node_set))
-        erows = c.db.query_all(
+        erows = await c.db.query_all_async(
             f"SELECT a.entity_id src, b.entity_id tgt, COUNT(*) w "
             f"FROM memory_entity_links a JOIN memory_entity_links b "
             f"ON a.memory_id=b.memory_id AND a.entity_id < b.entity_id "
@@ -500,7 +505,7 @@ async def timeline(event_type: str = None, days: int = 7):
         q += " AND t.event_type=?"
         params.append(event_type)
     q += " ORDER BY t.event_time DESC"
-    rows = c.db.query_all(q, params)
+    rows = await c.db.query_all_async(q, params)
     result = []
     for r in rows:
         result.append({"memory_id": r["memory_id"], "event_type": r["event_type"],
@@ -513,9 +518,9 @@ async def timeline(event_type: str = None, days: int = 7):
 @router.get("/memory/health")
 async def health():
     c = _c()
-    counts = c.lint.counts()
-    score, breakdown = c.lint.health_score(counts)
-    stats = c.palace.stats()
+    counts, stats = await asyncio.gather(
+        asyncio.to_thread(c.lint.counts), asyncio.to_thread(c.palace.stats))
+    score, breakdown = await asyncio.to_thread(c.lint.health_score, counts)
     return {"code": 200, "data": {
         "health_score": score, "score_breakdown": breakdown,
         "stats": {"total": stats["total"], "archived": stats["total_archived"],

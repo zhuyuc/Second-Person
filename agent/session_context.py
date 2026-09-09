@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import re
+import base64
+import binascii
 from pathlib import Path
 
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
@@ -86,7 +88,8 @@ class SessionStore:
     def list_sessions(self, keyword: str = None, page: int = 1,
                       page_size: int = 20, *,
                       project_id: str | object = _UNSET,
-                      include_archived: bool = False) -> dict:
+                      include_archived: bool = False,
+                      cursor: str | None = None) -> dict:
         """
         project_id:
           _UNSET（默认）→ 不按 project 过滤（返回所有）
@@ -108,7 +111,22 @@ class SessionStore:
             params.append(project_id)
         base_where = (" WHERE " + " AND ".join(where)) if where else ""
         # SQL 层分页：避免拉全表再内存切片（会话量大时读放大 + 内存峰值）
+        # cursor 走 keyset，避免深页 OFFSET 随会话数线性退化；保留 page 参数
+        # 以兼容已上线客户端。
+        page_size = min(max(1, int(page_size)), 100)
         offset = (page - 1) * page_size
+        cursor_mode = cursor is not None
+        cursor_values = self._decode_session_cursor(cursor) if cursor else None
+        cursor_sql = ""
+        cursor_params: list = []
+        if cursor_values:
+            pinned, last_active, session_id = cursor_values
+            # 排序键必须包含唯一的 session_id，才能在同一秒内更新的会话间稳定翻页。
+            cursor_sql = (
+                " AND (pinned < ? OR (pinned = ? AND "
+                "(COALESCE(last_active,'') < ? OR "
+                "(COALESCE(last_active,'') = ? AND session_id < ?))))")
+            cursor_params = [pinned, pinned, last_active, last_active, session_id]
         if keyword:
             match_expr = fts_escape(keyword)
             if not match_expr:
@@ -127,18 +145,30 @@ class SessionStore:
             total = self.db.query_one(
                 f"SELECT COUNT(*) cnt FROM sessions{full_where}",
                 full_params)["cnt"]
-            page_rows = self.db.query_all(
-                f"SELECT * FROM sessions{full_where} "
-                f"ORDER BY pinned DESC, last_active DESC LIMIT ? OFFSET ?",
-                full_params + [page_size, offset])
+            if cursor_values:
+                page_rows = self.db.query_all(
+                    f"SELECT * FROM sessions{full_where}{cursor_sql} "
+                    f"ORDER BY pinned DESC, COALESCE(last_active,'') DESC, session_id DESC LIMIT ?",
+                    full_params + cursor_params + [page_size])
+            else:
+                page_rows = self.db.query_all(
+                    f"SELECT * FROM sessions{full_where} "
+                    f"ORDER BY pinned DESC, last_active DESC LIMIT ? OFFSET ?",
+                    full_params + [page_size, offset])
         else:
             total = self.db.query_one(
                 f"SELECT COUNT(*) cnt FROM sessions{base_where}", params)["cnt"]
-            page_rows = self.db.query_all(
-                f"SELECT * FROM sessions{base_where} "
-                f"ORDER BY pinned DESC, last_active DESC LIMIT ? OFFSET ?",
-                params + [page_size, offset])
-        return {"total": total, "list": [{
+            if cursor_values:
+                page_rows = self.db.query_all(
+                    f"SELECT * FROM sessions{base_where}{cursor_sql} "
+                    f"ORDER BY pinned DESC, COALESCE(last_active,'') DESC, session_id DESC LIMIT ?",
+                    params + cursor_params + [page_size])
+            else:
+                page_rows = self.db.query_all(
+                    f"SELECT * FROM sessions{base_where} "
+                    f"ORDER BY pinned DESC, last_active DESC LIMIT ? OFFSET ?",
+                    params + [page_size, offset])
+        result = [{
             "session_id": r["session_id"], "title": r["title"],
             "last_active": r["last_active"], "message_count": r["message_count"],
             "compressed": bool(r["compressed_summary_path"]),
@@ -153,7 +183,52 @@ class SessionStore:
             "archived": bool(r["archived"]) if "archived" in r.keys() else False,
             "archived_source": r["archived_source"] if "archived_source" in r.keys() else None,
             "sandbox_mode": r["sandbox_mode"] if "sandbox_mode" in r.keys() else None,
-        } for r in page_rows]}
+        } for r in page_rows]
+        response = {"total": total, "list": result}
+        if cursor_mode:
+            response["next_cursor"] = (
+                self._encode_session_cursor(page_rows[-1])
+                if len(page_rows) == page_size else None)
+        return response
+
+    @staticmethod
+    def _encode_session_cursor(row: dict) -> str:
+        """不泄露 SQL 表达式的可传输游标，包含完整且稳定的排序键。"""
+        payload = json.dumps([
+            int(bool(row["pinned"])), row.get("last_active") or "", row["session_id"]],
+            separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _decode_session_cursor(cursor: str) -> tuple[int, str, str]:
+        try:
+            padded = cursor + "=" * (-len(cursor) % 4)
+            pinned, last_active, session_id = json.loads(
+                base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+            if pinned not in (0, 1) or not isinstance(last_active, str) or not isinstance(session_id, str):
+                raise ValueError
+            return pinned, last_active, session_id
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError,
+                binascii.Error) as exc:
+            raise ValueError("无效的会话分页游标") from exc
+
+    def get_session_summary(self, sid: str) -> dict | None:
+        """Read the compact session projection used by background title refresh."""
+        row = self.db.query_one(
+            "SELECT session_id,title,title_source,last_active,message_count,"
+            "project_id,archived,pinned FROM sessions WHERE session_id=?", (sid,))
+        if not row:
+            return None
+        return {
+            "session_id": row["session_id"],
+            "title": row["title"],
+            "title_source": row["title_source"],
+            "last_active": row["last_active"],
+            "message_count": row["message_count"],
+            "project_id": row.get("project_id"),
+            "archived": bool(row.get("archived", 0)),
+            "pinned": bool(row.get("pinned", 0)),
+        }
 
     def set_pinned(self, sid: str, pinned: bool) -> None:
         self.db.execute(

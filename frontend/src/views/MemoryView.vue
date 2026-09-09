@@ -730,20 +730,7 @@ onActivated(() => selectTab(tab.value))
 </script>
 
 <template>
-  <h1>记忆中心</h1>
-  <div class="tabs-sticky">
-    <div class="tabs">
-      <button
-        v-for="(t, i) in tabs"
-        :key="i"
-        class="tab"
-        :class="{ active: tab === i }"
-        @click="selectTab(i)"
-      >
-        {{ t }}
-      </button>
-    </div>
-  </div>
+  <TabbedPageHeader title="记忆中心" :tabs="tabs" :active-tab="tab" @select="selectTab" />
 
   <!-- 知识图谱 -->
   <div v-if="tab === 0">

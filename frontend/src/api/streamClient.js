@@ -65,14 +65,16 @@ export async function postFormStream(path, form, { signal } = {}) {
 export function parseSSE(chunk) {
   let event = 'message'
   let data = ''
+  let id = null
   for (const line of chunk.split(/\r?\n/)) {
     if (line.startsWith('event:')) event = line.slice(6).trim()
     else if (line.startsWith('data:')) data += line.slice(5).trim()
+    else if (line.startsWith('id:')) id = line.slice(3).trim()
   }
   if (!data) return null
   try {
-    return { event, data: JSON.parse(data) }
+    return { id, event, data: JSON.parse(data) }
   } catch {
-    return { event, data: {} }
+    return { id, event, data: {} }
   }
 }

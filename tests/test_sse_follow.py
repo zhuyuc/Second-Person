@@ -18,6 +18,8 @@ from app.routes.chat import _follow
 def _mkbuf(events=None, *, dropped=0, done=False):
     return {
         "events": events or [],
+        "next_event_id": len(events or []),
+        "size": 0,
         "dropped": dropped,
         "done": done,
         "nudge": asyncio.Event(),
@@ -124,5 +126,23 @@ def test_follow_reader_disconnect_does_not_corrupt_buffer():
         async for e in gen2:
             events.append(e["event"])
         assert events == ["a", "b"]
+
+    asyncio.run(scenario())
+
+
+def test_follow_resume_cursor_skips_events_already_rendered():
+    """A reconnect cursor must not replay partial assistant output to the UI."""
+
+    async def scenario():
+        buf = _mkbuf([
+            {"id": 1, "event": "turn_started", "data": {"turn_id": "t1"}},
+            {"id": 2, "event": "content_delta", "data": {"text": "already"}},
+            {"id": 3, "event": "content_delta", "data": {"text": "new"}},
+            {"id": 4, "event": "turn_completed", "data": {}},
+        ], done=True)
+        received = []
+        async for event in _follow(buf, after_event_id=2):
+            received.append((event["id"], event["event"]))
+        assert received == [("3", "content_delta"), ("4", "turn_completed")]
 
     asyncio.run(scenario())

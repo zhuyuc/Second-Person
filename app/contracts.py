@@ -66,6 +66,21 @@ def _optional_id(value: Any, field: str) -> int | None:
     return parsed
 
 
+def _non_negative_int(value: Any, field: str) -> int:
+    """Parse a resumable-stream cursor without treating ``0`` as absent."""
+    if value in (None, ""):
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{field} must be a non-negative integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a non-negative integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return parsed
+
+
 class ChatSendRequest(BaseModel):
     """Public contract for ``POST /api/chat/send``.
 
@@ -78,6 +93,9 @@ class ChatSendRequest(BaseModel):
     project_id: str | None = None
     message: str = ""
     client_request_id: str | None = None
+    # SSE reader's last fully processed event sequence.  Reusing a request id
+    # then resumes after this point instead of replaying already rendered data.
+    last_event_id: int = 0
     images: list[str] | None = None
     attachment_ids: list[str] | None = None
     regenerate_message_id: int | None = None
@@ -118,6 +136,11 @@ class ChatSendRequest(BaseModel):
     @classmethod
     def _validate_request_id(cls, value: Any) -> str | None:
         return _optional_text(value, "client_request_id", 120)
+
+    @field_validator("last_event_id", mode="before")
+    @classmethod
+    def _validate_last_event_id(cls, value: Any) -> int:
+        return _non_negative_int(value, "last_event_id")
 
     @field_validator("images", mode="before")
     @classmethod

@@ -33,6 +33,7 @@ export function useSSE() {
     const MAX_RETRY = 2
     let attempt = 0
     let done = false
+    let lastEventId = 0
     while (attempt <= MAX_RETRY && !done) {
       controller = new AbortController()
       let gotFirst = false
@@ -49,6 +50,7 @@ export function useSSE() {
             images,
             attachment_ids: attachmentIds || undefined,
             client_request_id: crid,
+            last_event_id: lastEventId,
             regenerate_message_id: regenerateMessageId,
             edit_message_id: editMessageId || undefined,
             attachments_overridden: attachmentsOverridden || undefined,
@@ -65,14 +67,19 @@ export function useSSE() {
         while (true) {
           const { done: rdone, value } = await reader.read()
           if (rdone) break
-          gotFirst = true
-          clearTimeout(timeout)
           buffer += decoder.decode(value, { stream: true })
           const parts = buffer.split(/\r?\n\r?\n/)
           buffer = parts.pop()
           for (const part of parts) {
             const evt = parseSSE(part)
             if (evt) {
+              gotFirst = true
+              clearTimeout(timeout)
+              const eventId = Number(evt.id)
+              if (Number.isSafeInteger(eventId) && eventId <= lastEventId) continue
+              if (Number.isSafeInteger(eventId) && eventId > lastEventId) {
+                lastEventId = eventId
+              }
               onEvent && onEvent(evt.event, evt.data)
               if (evt.event === 'turn_completed' || evt.event === 'error') done = true
             }

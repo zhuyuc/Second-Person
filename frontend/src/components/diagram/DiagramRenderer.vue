@@ -4,8 +4,8 @@
 
 import { defineAsyncComponent } from 'vue'
 
-const FlowChartSVG = defineAsyncComponent(() => import('./FlowChartSVG.vue'))
-const MermaidChart = defineAsyncComponent(() => import('./MermaidChart.vue'))
+const AsyncFlowChart = defineAsyncComponent(() => import('./FlowChartSVG.vue'))
+const AsyncMermaidChart = defineAsyncComponent(() => import('./MermaidChart.vue'))
 
 const props = defineProps({
   type: { type: String, required: true },
@@ -37,14 +37,14 @@ function isEmpty() {
     <div v-if="isEmpty()" class="dr-empty"><i class="ti ti-chart-dots"></i> 图表数据为空</div>
 
     <!-- 按类型分发 -->
-    <FlowChartSVG
+    <AsyncFlowChart
       v-else-if="type === 'flowchart'"
       :nodes="data.nodes || []"
       :edges="data.edges || []"
       @node-click="onNodeClick"
     />
 
-    <MermaidChart
+    <AsyncMermaidChart
       v-else-if="type === 'mermaid'"
       :diagram_type="data.diagram_type || 'flowchart'"
       :code="data.mermaid_code || ''"

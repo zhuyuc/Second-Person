@@ -69,6 +69,31 @@ def test_non_object_json_body_uses_unified_error_envelope(client: TestClient):
     _assert_error_envelope(resp, 400, "request body must be an object")
 
 
+def test_onboarding_connection_test_reuses_settings_probe(
+        client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    """首次引导与设置页复用同一 Provider 测试逻辑。"""
+    service = get_container().settings_svc
+    captured = {}
+
+    async def fake_test_provider(body):
+        captured["body"] = body
+        return {"ok": True, "protocol": "chat"}
+
+    monkeypatch.setattr(service, "test_provider", fake_test_provider)
+    resp = client.post("/api/onboarding/test-connection", json={
+        "provider_config": {
+            "provider_type": "openai_compatible",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-test",
+            "model_id": "deepseek-v4-flash-vision-exp",
+        },
+    })
+
+    assert resp.status_code == 200
+    assert resp.json()["data"] == {"ok": True, "protocol": "chat"}
+    assert captured["body"]["model_id"] == "deepseek-v4-flash-vision-exp"
+
+
 def test_provider_connection_test_allows_local_provider_url(
         client: TestClient, monkeypatch: pytest.MonkeyPatch):
     """Provider 连通性测试不能套用网页抓取的内网地址拦截。"""

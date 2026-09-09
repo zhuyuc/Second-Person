@@ -514,14 +514,20 @@ def _count_memory_md(data_dir) -> int:
 @router.get("/settings/status")
 async def status():
     c = _c()
-    stats = c.palace.stats()
-    sess = c.db.query_one("SELECT count(*) c FROM sessions")["c"]
+    stats, sess_row = await asyncio.gather(
+        asyncio.to_thread(c.palace.stats),
+        c.db.query_one_async("SELECT count(*) c FROM sessions"))
+    sess = sess_row["c"]
     # 真实探测：PRAGMA 完整性检查与磁盘 md 计数均为同步重操作，丢工作线程
-    db_ok = await asyncio.to_thread(c.db.integrity_check)
+    db_ok, fk_violations = await asyncio.gather(
+        asyncio.to_thread(c.db.integrity_check),
+        asyncio.to_thread(c.db.foreign_key_check))
     md_count = await asyncio.to_thread(_count_memory_md, c.data_dir)
     # FTS5：探测查询（表缺失/损坏会直接抛异常）
     try:
-        fts_count = c.db.query_one("SELECT count(*) c FROM memories_fts")["c"]
+        fts_row = await c.db.query_one_async(
+            "SELECT count(*) c FROM memories_fts")
+        fts_count = fts_row["c"]
         fts_ok = True
     except Exception:  # noqa: BLE001
         fts_count, fts_ok = 0, False
@@ -531,14 +537,19 @@ async def status():
     fw_depth = c.fw._queue.qsize()
     sched_running = getattr(c.scheduler, "_running", False)
     # md-SQLite 一致性：索引计数与磁盘 md 文件数对比（lifecycle 全量口径）
-    idx_count = c.db.query_one("SELECT count(*) c FROM memories")["c"]
+    idx_row = await c.db.query_one_async("SELECT count(*) c FROM memories")
+    idx_count = idx_row["c"]
     consistent = idx_count == md_count
     # 最近一次已应用的迁移脚本作为真实 schema 版本
-    mig = c.db.query_one(
+    mig = await c.db.query_one_async(
         "SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1")
     subsystems = [
         {"name": "数据库（SQLite）", "status": "healthy" if db_ok else "unhealthy",
-         "detail": "WAL 模式", "metric": ""},
+         "detail": "WAL 模式" if db_ok else "完整性检查失败", "metric": ""},
+        {"name": "外键一致性", "status": "healthy" if not fk_violations else "degraded",
+         "detail": "未发现已声明外键孤儿记录" if not fk_violations
+         else f"发现 {len(fk_violations)} 条外键违规（最多展示 100 条）",
+         "metric": ""},
         {"name": "向量缓存", "status": "healthy" if c.vs.loaded else "degraded",
          "detail": "numpy 内存", "metric": f"{c.vs.memory_mb():.1f}MB"},
         {"name": "FTS5 全文搜索", "status": "healthy" if fts_ok else "unhealthy",

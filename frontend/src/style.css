@@ -206,6 +206,17 @@ body {
   background: rgba(123, 92, 255, 0.22);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -847,25 +858,6 @@ code {
     opacity: 1;
     transform: none;
   }
-}
-
-/* 欢迎对话气泡 */
-.wbubble {
-  padding: 10px 14px;
-  border-radius: 16px;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
-.wbubble.user {
-  margin-left: auto;
-  background: var(--brand-soft);
-  color: var(--acctx);
-}
-
-.wbubble.assistant {
-  margin-right: auto;
-  background: var(--surface-2);
 }
 
 .mt {
@@ -3489,29 +3481,6 @@ button.btn-danger:hover {
 }
 .mt-16 {
   margin-top: 16px;
-}
-.welcome-scroll {
-  max-height: 300px;
-  overflow-y: auto;
-  margin-bottom: 12px;
-  border: 1px solid var(--bd);
-  border-radius: 8px;
-  padding: 10px;
-  background: var(--surface-2);
-}
-.welcome-empty {
-  text-align: center;
-  padding: 30px 0;
-}
-.wbubble {
-  margin-bottom: 8px;
-  max-width: 85%;
-}
-.wbubble-role {
-  font-size: var(--fs-xs);
-  color: var(--muted);
-  display: block;
-  margin-bottom: 2px;
 }
 .soul-textarea {
   width: 100%;

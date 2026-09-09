@@ -20,6 +20,7 @@ import logging
 import queue
 import sqlite3
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -31,6 +32,10 @@ logger = logging.getLogger("second_person.db")
 GROUP_COMMIT_MAX = 64
 # 队列深度告警阈值（写压力仪表，配合事件循环哨兵观测）
 QUEUE_WARN_DEPTH = 200
+# 读查询预算用于诊断，而不是中断 SQLite 正在执行的语句。SQLite 的 Python
+# 驱动无法安全取消工作线程中的单条语句；将查询移出事件循环并记录超预算情况，
+# 比取消后遗留不可控连接更可靠。
+DEFAULT_READ_QUERY_BUDGET_MS = 300
 
 
 class WriteResult:
@@ -272,6 +277,34 @@ class Database:
     def query_all(self, sql: str, params: Iterable[Any] = ()) -> list[dict]:
         return [dict(r) for r in self._conn().execute(sql, tuple(params)).fetchall()]
 
+    async def query_one_async(self, sql: str, params: Iterable[Any] = (), *,
+                              budget_ms: int | None = DEFAULT_READ_QUERY_BUDGET_MS
+                              ) -> dict | None:
+        """在线程池执行单行读，避免 async 路由被 SQLite I/O 占住。
+
+        ``budget_ms`` 是观测预算：超过时会有带 SQL 指纹的告警，但仍返回正确
+        结果。这样既能让状态页识别慢读，又不会因取消线程中的 SQLite 调用导致
+        连接状态不可预期。
+        """
+        return await self._query_async(self.query_one, sql, params, budget_ms)
+
+    async def query_all_async(self, sql: str, params: Iterable[Any] = (), *,
+                              budget_ms: int | None = DEFAULT_READ_QUERY_BUDGET_MS
+                              ) -> list[dict]:
+        """在线程池执行多行读；见 :meth:`query_one_async` 的预算语义。"""
+        return await self._query_async(self.query_all, sql, params, budget_ms)
+
+    async def _query_async(self, fn, sql: str, params: Iterable[Any],
+                           budget_ms: int | None):
+        started = time.perf_counter()
+        result = await asyncio.to_thread(fn, sql, tuple(params))
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if budget_ms is not None and elapsed_ms > budget_ms:
+            fingerprint = " ".join(sql.split())[:160]
+            logger.warning("读查询超出预算：%.1fms > %dms; %s",
+                           elapsed_ms, budget_ms, fingerprint)
+        return result
+
     def write_queue_depth(self) -> int:
         """写队列深度（写压力仪表，供健康页/哨兵观测）。"""
         return self._queue.qsize()
@@ -326,6 +359,26 @@ class Database:
                 conn.close()
         except sqlite3.OperationalError:
             return True
+
+    def foreign_key_check(self, limit: int = 100) -> list[dict]:
+        """返回 SQLite 已声明外键的违规项，不改变当前连接的外键开关。
+
+        当前存量 schema 的关系大多仍由应用层清理，直接打开
+        ``PRAGMA foreign_keys`` 会改变历史数据的写入语义。健康检查先持续暴露
+        已声明约束的孤儿项，待迁移逐表补齐约束后再收紧策略。
+        """
+        limit = max(1, min(int(limit), 1000))
+        conn = sqlite3.connect(self._path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            return [dict(row) for row in conn.execute(
+                "SELECT * FROM pragma_foreign_key_check LIMIT ?", (limit,))]
+        except sqlite3.OperationalError:
+            # 旧 SQLite 不支持 pragma_* 表值函数时，使用等价 PRAGMA 回退。
+            rows = conn.execute("PRAGMA foreign_key_check").fetchmany(limit)
+            return [dict(row) for row in rows]
+        finally:
+            conn.close()
 
     def vacuum_into(self, target: str | Path) -> None:
         """VACUUM INTO 一致性快照（备份用）：独立连接读快照写入新文件，

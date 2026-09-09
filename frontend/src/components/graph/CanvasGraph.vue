@@ -16,8 +16,8 @@ const emit = defineEmits(['node-click'])
 const canvasRef = ref(null)
 let ctx = null
 let dpr = 1
-let animFrame = 0
-let startTime = 0
+let animFrame = null
+let active = false
 
 // 初始化标记
 let initialized = false
@@ -94,6 +94,13 @@ const interaction = useCanvasInteraction(canvasRef, {
 let dirty = true
 function markDirty() {
   dirty = true
+  requestFrame()
+}
+
+// 空闲图谱不需要持续占用一条 60fps 的渲染循环。所有会改变画面的操作
+// 通过 markDirty() 请求一帧；力仿真、进场和定位动效会在运行期间续帧。
+function requestFrame() {
+  if (active && !animFrame) animFrame = requestAnimationFrame(loop)
 }
 
 // ---- 进场动画状态 ----
@@ -219,9 +226,6 @@ function draw(now) {
     const st = props.focus.nodeState(node.entity_id)
     const alpha = getNodeAlpha(node.entity_id, now)
     let r = getNodeAnimR(node.entity_id, now, node.r)
-    if (alpha < 1) {
-      dirty = true
-    }
     if (st === 'focused') r *= THEME.size.focusedMultiplier
     if (props.focus.draggingId.value === node.entity_id) r *= THEME.size.draggingMultiplier
 
@@ -329,14 +333,13 @@ function drawPulse(now) {
   ctx.stroke()
   ctx.globalAlpha = 1
   ctx.restore()
-  dirty = true
 }
 
 // ---- 主循环 ----
 let lastW = 0,
   lastH = 0
 function loop(now) {
-  if (!startTime) startTime = now
+  animFrame = null
 
   // 力仿真 tick
   if (simulation.running.value) {
@@ -363,7 +366,8 @@ function loop(now) {
     dirty = false
   }
 
-  animFrame = requestAnimationFrame(loop)
+  const entryAnimating = [...nodeAlpha.values()].some((animation) => now < animation.start + animation.duration)
+  if (simulation.running.value || pulseNode || entryAnimating) requestFrame()
 }
 
 // ---- 生命周期 ----
@@ -384,12 +388,15 @@ function init() {
     simulation.coldStart()
   }
 
-  animFrame = requestAnimationFrame(loop)
+  active = true
+  requestFrame()
 }
 
 function cleanup() {
   interaction.unbindEvents()
   if (animFrame) cancelAnimationFrame(animFrame)
+  animFrame = null
+  active = false
   simulation.freeze()
 }
 
@@ -496,15 +503,16 @@ let deactivatedCleaned = false
 onDeactivated(() => {
   if (animFrame) cancelAnimationFrame(animFrame)
   animFrame = null
+  active = false
   simulation.freeze()
   deactivatedCleaned = true
 })
 onActivated(() => {
   if (deactivatedCleaned && canvasRef.value) {
     deactivatedCleaned = false
+    active = true
     simulation.coldStart()
     markDirty()
-    animFrame = requestAnimationFrame(loop)
   }
 })
 

@@ -8,9 +8,11 @@
 //  - 内容隔离：aside 会话独立成话、不进列表/搜索（后端 channel='aside' 保证）。
 //
 // 实例常驻（v-show 而非 v-if）以保活消息 + 进行中流 + 未发草稿；切主会话仅切换可见性。
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, defineAsyncComponent, nextTick } from 'vue'
 import { useSessions } from '@/stores/sessions'
-import ChatView from '@/views/ChatView.vue'
+// 侧边会话只有用户主动划词后才会出现；不要因抽屉常驻而把完整 ChatView
+// （及其图表依赖）并入首屏入口。
+const ChatView = defineAsyncComponent(() => import('@/views/ChatView.vue'))
 
 const sessStore = useSessions()
 const activeMainSid = computed(() => sessStore.currentSid)

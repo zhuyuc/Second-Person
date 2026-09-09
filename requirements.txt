@@ -7,6 +7,8 @@ sse-starlette>=2.0.0
 
 # 数据与计算
 numpy>=1.26.0
+# 中大规模向量召回（HNSW）；VectorStore 在索引不可用时自动回退精确检索。
+usearch>=2.15,<3
 
 # LLM Provider
 openai>=1.30.0

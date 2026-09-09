@@ -10,6 +10,9 @@
         "subset-icons": "python scripts/subset-icons.py",
         "test:response-presentation": "node scripts/verify-response-presentation.mjs",
         "test:inline-mermaid": "node scripts/verify-inline-mermaid-interactions.mjs",
+        "test:frontend-regressions": "node scripts/verify-frontend-regressions.mjs",
+        "test:unit": "vitest run",
+        "test:e2e": "playwright test",
         "lint": "eslint src --ext .js,.vue --max-warnings 0",
         "lint:fix": "eslint src --ext .js,.vue --fix",
         "format": "prettier --write \"src/**/*.{js,css}\""
@@ -23,14 +26,20 @@
         "vue-router": "^4.3.0"
     },
     "devDependencies": {
+        "@axe-core/playwright": "^4.13.0",
         "@eslint/js": "^9.39.5",
+        "@playwright/test": "^1.63.0",
         "@tabler/icons-webfont": "^3.6.0",
         "@vitejs/plugin-vue": "^5.0.0",
+        "@vue/test-utils": "^2.5.0",
+        "axe-core": "^4.13.0",
         "eslint": "^9.14.0",
         "eslint-config-prettier": "^9.1.0",
         "eslint-plugin-vue": "^9.31.0",
+        "jsdom": "^25.0.1",
         "prettier": "^3.5.3",
         "unplugin-vue-components": "^32.1.0",
-        "vite": "^5.2.0"
+        "vite": "^5.2.0",
+        "vitest": "^2.1.9"
     }
 }

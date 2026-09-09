@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, defineAsyncComponent, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { chatApi } from '@/api/chat'
 import { useSSE } from '@/composables/useSSE'
 import { useLiveThroughput } from '@/composables/useLiveThroughput'
@@ -9,7 +9,6 @@ import { useProjects } from '@/stores/projects'
 import { projectsApi } from '@/api/projects'
 import { memoryApi } from '@/api/memory'
 import { resolveLocation, cachedLocation } from '@/composables/useGeolocation'
-import DiagramRenderer from '@/components/diagram/DiagramRenderer.vue'
 import { marked } from '@/utils/chatMarkedRenderer'
 import { useMessageSelection } from '@/composables/useMessageSelection'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
@@ -34,6 +33,9 @@ import {
 import { useChatStream } from '@/composables/useChatStream'
 import { formatTimelineSummary } from '@/utils/timelineSummary'
 import { loadMermaid } from '@/utils/mermaidLoader'
+
+// Mermaid/flowchart 渲染器会携带较大的依赖，只在回复实际包含图表时才下载。
+const AsyncDiagramRenderer = defineAsyncComponent(() => import('@/components/diagram/DiagramRenderer.vue'))
 
 // Mermaid 主题：CSS 变量驱动（与 MermaidChart 同源），自动跟随系统深浅色；手动触发 run
 // 注意：mermaid 库已改为懒加载，主题初始化在首次渲染前异步执行
@@ -105,13 +107,13 @@ const filePickerRef = ref(null)
 function onComposerInput(e) {
   // 复用原有 autoGrow；这里叠加 @ 触发面板逻辑
   autoGrow()
-  const ta = e?.target || document.querySelector('textarea')
-  if (!ta || !currentProject.value) {
+  const inputEl = e?.target || ta.value
+  if (!inputEl || !currentProject.value) {
     filePickerVisible.value = false
     return
   }
-  const val = ta.value || ''
-  const pos = ta.selectionStart || 0
+  const val = inputEl.value || ''
+  const pos = inputEl.selectionStart || 0
   // 找到光标前最近的 @，判定是否处于「@词」状态
   const before = val.slice(0, pos)
   const atIdx = before.lastIndexOf('@')
@@ -129,10 +131,10 @@ function onComposerInput(e) {
 }
 
 function onFilePicked(f) {
-  const ta = document.querySelector('textarea')
-  if (!ta) return
-  const val = ta.value || ''
-  const pos = ta.selectionStart || 0
+  const inputEl = ta.value
+  if (!inputEl) return
+  const val = inputEl.value || ''
+  const pos = inputEl.selectionStart || 0
   const before = val.slice(0, pos)
   const atIdx = before.lastIndexOf('@')
   if (atIdx < 0) return
@@ -142,8 +144,8 @@ function onFilePicked(f) {
   filePickerVisible.value = false
   nextTick(() => {
     const newPos = atIdx + insertion.length
-    ta.focus()
-    ta.setSelectionRange(newPos, newPos)
+    inputEl.focus()
+    inputEl.setSelectionRange(newPos, newPos)
   })
 }
 
@@ -230,6 +232,8 @@ const handoffStatus = ref(null) // null / 'generating' / 'ready' / 'failed'
 const handoffData = ref(null) // { summary_tokens, original_turns }
 const handoffPreview = ref(null)
 const pendingMessage = ref(null) // 摘要生成中暂存的消息
+let openSessionToken = 0
+let sendStarting = false
 
 function stripTail(t, visuals) {
   let s = (t || '').replace(/\s*\{\s*"citations"\s*:\s*\[[^\]]*\]\s*\}\s*/g, '\n')
@@ -491,6 +495,8 @@ function trimMessagesFromEdit(editMsgId) {
 }
 
 async function openSession(sid, opts = {}) {
+  const requestToken = ++openSessionToken
+  const isCurrentRequest = () => requestToken === openSessionToken
   try {
     if (editingId.value) cancelEdit()
     // 主对话：会话已不在列表（删除/归档）→ 直接回欢迎页，不再打 metrics/沙箱接口
@@ -502,7 +508,8 @@ async function openSession(sid, opts = {}) {
           /* 列表失败时仍尝试打开，由接口结果兜底 */
         }
       }
-      if (sessStore.listLoaded && !sessStore.hasSession(sid)) {
+      if (!isCurrentRequest()) return
+      if (sessStore.listLoaded && !sessStore.hasMore && !sessStore.hasSession(sid)) {
         resetToHome()
         return
       }
@@ -510,12 +517,14 @@ async function openSession(sid, opts = {}) {
     // aside 模式不切换全局当前会话（否则会连累主对话侧栏高亮/加载）
     if (!props.asideMode) sessStore.setCurrent(sid)
     const [msgs, metrics] = await Promise.all([fetchSessionMessages(sid), fetchSessionMetrics(sid)])
+    if (!isCurrentRequest()) return
     // 指标接口对已删会话返回 null（silent 404）；若消息也为空且列表无此会话，回欢迎页
     if (
       !props.asideMode &&
-      metrics == null &&
+      metrics === null &&
       (!msgs || !msgs.length) &&
       sessStore.listLoaded &&
+      !sessStore.hasMore &&
       !sessStore.hasSession(sid)
     ) {
       resetToHome()
@@ -529,6 +538,7 @@ async function openSession(sid, opts = {}) {
     else scrollBottom()
     tryReattach(sid)
   } catch (e) {
+    if (!isCurrentRequest()) return
     // 已删会话等 404：回新对话，不把「会话不存在」当成加载失败打扰用户
     if (!props.asideMode && (e?.code === 404 || /会话不存在/.test(e?.message || ''))) {
       resetToHome()
@@ -1351,6 +1361,10 @@ async function send() {
     pendingMessage.value = { text, atts: attachments.value }
     return
   }
+  // 创建新会话前 generating 尚未置位；同步锁避免用户连按 Enter 产生两个会话。
+  if (sendStarting) return
+  sendStarting = true
+  try {
   // 无当前会话（新对话/欢迎页）：新建一条全新会话，不复用旧空会话，
   // 避免消息落进以前的会话记录
   if (!currentSid.value) {
@@ -1469,6 +1483,9 @@ async function send() {
   if (hPath) {
     handoffStatus.value = null
     handoffData.value = null
+  }
+  } finally {
+    sendStarting = false
   }
 }
 
@@ -2514,7 +2531,7 @@ onUnmounted(() => {
                     </template>
                   </div>
                 </div>
-                <DiagramRenderer
+                <AsyncDiagramRenderer
                   v-for="(v, vi) in m.visuals || []"
                   :key="'hv' + vi"
                   :type="v.type"
@@ -2654,7 +2671,7 @@ onUnmounted(() => {
                 <span class="think-dots"><span></span><span></span><span></span></span>
               </div>
               <!-- 图形组件 -->
-              <DiagramRenderer
+              <AsyncDiagramRenderer
                 v-for="(v, vi) in streamVisuals"
                 :key="'sv' + vi"
                 :type="v.type"
@@ -2944,10 +2961,24 @@ onUnmounted(() => {
                   </template>
                 </div>
               </div>
-              <button v-if="!generating" class="send-btn" @click="send">
+              <button
+                v-if="!generating"
+                type="button"
+                class="send-btn"
+                aria-label="发送消息"
+                title="发送消息"
+                @click="send"
+              >
                 <i class="ti ti-arrow-up"></i>
               </button>
-              <button v-else class="send-btn" @click="abort">
+              <button
+                v-else
+                type="button"
+                class="send-btn"
+                aria-label="停止生成"
+                title="停止生成"
+                @click="abort"
+              >
                 <i class="ti ti-player-stop-filled"></i>
               </button>
             </div>

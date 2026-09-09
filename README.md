@@ -37,8 +37,8 @@ python start.py
 | 可选 | Node 18+ | 仅修改前端时需要（`cd frontend && npm install && npm run build`） |
 | 可选 | PostgreSQL / Redis / pnpm | 仅自托管 Langfuse 链路观测时需要，参照 `langfuse/deploy/README.md` |
 
-首次启动进入引导：配置对话模型（必填，测试通过才继续）→ 配置 Embedding（可跳过，先用全文搜索）
-→ 欢迎对话 → 确认初始人格。首启会自动生成 `data/` 目录骨架与默认配置，无需手动准备。
+首次启动进入两步引导：配置对话模型（必填，测试通过才继续）→ 确认初始人格（可编辑）。
+Embedding 等其他模型统一在设置页配置；首启会自动生成 `data/` 目录骨架与默认配置，无需手动准备。
 
 > 敏感信息隔离：`data/`（含密钥与全部用户数据）、`embedding/models/`、所有 venv、
 > `langfuse/deploy/langfuse.env`（真实密钥）均已被 `.gitignore` 排除，不会随仓库传播；

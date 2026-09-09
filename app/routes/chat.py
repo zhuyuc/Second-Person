@@ -82,7 +82,7 @@ def _load_images_as_data_uri(data_dir, filenames: list[str]) -> list[str]:
     return out or None
 
 
-# client_request_id -> {events, dropped, done, started, finished, size, sid, task}
+# client_request_id -> {events, next_event_id, dropped, done, started, ...}
 _BUFFERS: dict[str, dict] = {}
 # 保护 _BUFFERS dict 本身的结构变更（增删/遍历/命中判断），不覆盖 buf 内部字段。
 # 只包裹**纯 dict 操作**的短临界区，绝不在持锁时 await 长耗时协程（如 _follow 的 nudge
@@ -134,10 +134,29 @@ async def _gc_buffers():
                 _BUFFERS.pop(k, None)
 
 
-async def _follow(buf: dict):
-    """从头回放缓冲事件并持续跟读到 done（首连与断线重连同一条路径）。
+def _buffer_event(buf: dict, event: str, data: dict) -> None:
+    """Append one SSE event with a monotonic cursor and wake all readers."""
+    event_id = int(buf.get("next_event_id", 0)) + 1
+    buf["next_event_id"] = event_id
+    buf["events"].append({"id": event_id, "event": event, "data": data})
+    buf["size"] += len(json.dumps(data, ensure_ascii=False))
+    if buf["size"] > BUFFER_MAX:
+        cut = len(buf["events"]) - 50
+        if cut > 0:
+            buf["events"] = buf["events"][-50:]
+            buf["dropped"] += cut
+    buf["nudge"].set()
+
+
+async def _follow(buf: dict, after_event_id: int = 0):
+    """Replay only events after a client cursor, then follow until done.
+
+    The sequence is monotonic for the lifetime of a request buffer.  A reader
+    that reconnects after processing event N never sees events 1..N again;
+    readers with no cursor retain the historical full-replay behaviour.
     读者断开只终止本生成器，不影响后台生成任务。"""
     idx = 0
+    last_seen = max(0, after_event_id)
     while True:
         local = idx - buf.get("dropped", 0)
         if local < 0:
@@ -147,7 +166,13 @@ async def _follow(buf: dict):
         if local < len(buf["events"]):
             e = buf["events"][local]
             idx += 1
-            yield {"event": e["event"],
+            # ``id`` fallback preserves compatibility with pre-sequence test
+            # fixtures and any buffer created by an older in-process request.
+            event_id = int(e.get("id", buf.get("dropped", 0) + local + 1))
+            if event_id <= last_seen:
+                continue
+            last_seen = event_id
+            yield {"id": str(event_id), "event": e["event"],
                    "data": json.dumps(e["data"], ensure_ascii=False)}
             continue
         if buf["done"]:
@@ -196,14 +221,15 @@ async def chat_send(request: Request):
                 message or "请阅读上述附件内容并回应。")
 
     await _gc_buffers()
-    # 断线重连/刷新重挂：已有缓冲则从头回放并续跟（生成在后台继续，不重复计费）。
+    # 断线重连/刷新重挂：已有缓冲仅回放客户端未确认的事件并续跟，
+    # 生成在后台继续，不重复计费。
     # 只在临界区做 dict 查询，拿到 buf 引用后立即释放锁再返回 SSE 流 —— 不能持锁
     # 进入 _follow，否则读者阻塞在 nudge 等待会锁死所有其他 buffer 操作。
     if crid:
         async with _buffers_lock():
             existing = _BUFFERS.get(crid)
         if existing is not None:
-            return EventSourceResponse(_follow(existing), ping=5)
+            return EventSourceResponse(_follow(existing, payload.last_event_id), ping=5)
 
     if not sid:
         # M5.1：project_id 从请求带入，实现「新建项目会话」延迟创建
@@ -216,7 +242,7 @@ async def chat_send(request: Request):
         sid = c.sessions.create_session(project_id=pid)
         c.notifications.flush_pending()
 
-    buf = {"events": [], "dropped": 0, "done": False, "started": time.time(),
+    buf = {"events": [], "next_event_id": 0, "dropped": 0, "done": False, "started": time.time(),
            "finished": None, "size": 0, "sid": sid, "task": None,
            "nudge": asyncio.Event(), "reasoning_effort": reasoning_effort}
     if crid:
@@ -373,20 +399,12 @@ async def chat_send(request: Request):
                 except SSEContractError as exc:
                     logging.getLogger("second_person.chat").error(
                         "SSE event contract violation: %s", exc)
-                    buf["events"].append({"event": "error", "data": {
-                        "code": 500, "message": "服务端事件协议错误"}})
+                    _buffer_event(buf, "error", {
+                        "code": 500, "message": "服务端事件协议错误"})
                     break
-                buf["events"].append(evt)
-                buf["size"] += len(json.dumps(evt.get("data", {})))
-                if buf["size"] > BUFFER_MAX:
-                    cut = len(buf["events"]) - 50
-                    if cut > 0:
-                        buf["events"] = buf["events"][-50:]
-                        buf["dropped"] += cut
-                buf["nudge"].set()   # 唤醒跟读者
+                _buffer_event(buf, evt["event"], evt["data"])
         except asyncio.CancelledError:
-            buf["events"].append({"event": "error",
-                                  "data": {"code": 499, "message": "已停止生成"}})
+            _buffer_event(buf, "error", {"code": 499, "message": "已停止生成"})
             raise
         finally:
             buf["done"] = True
@@ -488,8 +506,29 @@ async def active_request(session_id: str):
 
 
 @router.get("/chat/sessions")
-async def sessions(keyword: str = None, page: int = 1, page_size: int = 20):
-    return {"code": 200, "data": _c().sessions.list_sessions(keyword, page, page_size)}
+async def sessions(keyword: str = None, page: int = 1, page_size: int = 20,
+                   cursor: str | None = None):
+    """List sessions with keyset pagination for the sidebar.
+
+    ``cursor`` is optional so older clients retain their page/offset contract;
+    clients that send an empty cursor opt into a response containing
+    ``next_cursor`` and can then walk the list without deep OFFSET scans.
+    """
+    try:
+        data = _c().sessions.list_sessions(
+            keyword, page, page_size, cursor=cursor)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"code": 200, "data": data}
+
+
+@router.get("/chat/session/{session_id}/summary")
+async def session_summary(session_id: str):
+    """Return the small mutable subset needed by title refreshes."""
+    row = _c().sessions.get_session_summary(session_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"code": 200, "data": row}
 
 
 @router.get("/chat/search")

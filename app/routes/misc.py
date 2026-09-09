@@ -26,20 +26,9 @@ async def test_connection(request: Request):
     body = await read_json_object(request)
     c = _c()
     cfg = body.get("provider_config", {})
-    from tools.web_fetch import validate_base_url
-    url_err = await validate_base_url(cfg.get("base_url", ""))
-    if url_err:
-        return {"code": 200, "data": {"ok": False, "error": url_err}}
-    from infrastructure.llm_provider import ProviderSnapshot
-    snap = ProviderSnapshot("onboard", cfg.get("provider_type", "openai_compatible"),
-                            cfg.get("base_url", ""), cfg.get("api_key", ""),
-                            cfg.get("model_id", ""))
-    try:
-        await c.llm.chat(snap, [{"role": "user", "content": "ping"}],
-                         source="main_chat", max_tokens=10)
-        return {"code": 200, "data": {"ok": True}}
-    except Exception as e:  # noqa: BLE001
-        return {"code": 200, "data": {"ok": False, "error": str(e)}}
+    # Reuse the Settings provider test end-to-end: field cleaning, URL/model
+    # validation and provider-specific probe behavior must remain identical.
+    return {"code": 200, "data": await c.settings_svc.test_provider(cfg)}
 
 
 @router.post("/onboarding/test-embedding")
