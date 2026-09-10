@@ -3,6 +3,7 @@
 import { computed, ref } from 'vue'
 import { fmtDuration } from '@/utils/format'
 import { formatMemoryStageBadge } from '@/utils/timelineSummary'
+import { confidenceLabel } from '@/utils/enumLabel'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -75,6 +76,7 @@ function isExpandable(item) {
 function memoryRelationLabel(rel) {
   return (
     {
+      primary: '主记忆',
       evolved_from: '演变',
       contradicts: '冲突',
       related: '相关',
@@ -107,6 +109,28 @@ function memorySelectedLabel(hit) {
   if (hit?.selected === true) return '精选'
   if (hit?.selected === false) return '未入选'
   return ''
+}
+
+/** 各阶段统一打标签：预筛看置信度，精筛看入选，注入看关系。 */
+function memoryHitTag(hit, stage) {
+  if (!hit) return { label: '', tone: '' }
+  const selected = memorySelectedLabel(hit)
+  if (selected) {
+    return {
+      label: selected,
+      tone: hit.selected === true ? 'is-selected' : 'is-rejected',
+    }
+  }
+  const rel = memoryRelationLabel(hit.relation)
+  if (rel) return { label: rel, tone: '' }
+  if (stage === 'done') return { label: '主记忆', tone: 'is-selected' }
+  if (stage === 'presearch') {
+    const conf = hit.confidence ? confidenceLabel(hit.confidence) : ''
+    if (conf && conf !== hit.confidence) return { label: conf, tone: '' }
+    if (hit.confidence) return { label: String(hit.confidence), tone: '' }
+    return { label: '候选', tone: '' }
+  }
+  return { label: '', tone: '' }
 }
 
 function onMemoryClick(mid) {
@@ -201,6 +225,24 @@ function toolRow(item) {
   }
   if (name === 'fs_list') {
     return { label: '列出目录', pill: basename(args.path) || args.path || null, running, ok }
+  }
+  if (name === 'generate_image') {
+    return {
+      label: running ? '本地生成图片（可能需要十几秒）' : '生成图片',
+      preview: truncate(args.prompt, 72),
+      running,
+      ok,
+      fail: item.status === 'fail',
+    }
+  }
+  if (name === 'generate_video') {
+    return {
+      label: running ? '本地生成短视频（可能需要几分钟）' : '生成视频',
+      preview: truncate(args.prompt, 72),
+      running,
+      ok,
+      fail: item.status === 'fail',
+    }
   }
 
   return {
@@ -324,7 +366,7 @@ function toolCitations(item) {
             <span v-if="item.hit_count != null">注入 {{ item.hit_count }}</span>
             <span v-if="item.elapsed_ms != null">{{ fmtDuration(item.elapsed_ms) }}</span>
           </div>
-          <!-- 预筛/精筛/注入：默认折叠，展开后可见标题+摘要；精筛带精选/未入选标记 -->
+          <!-- 预筛/精筛/注入：默认折叠，展开后可见标题+摘要；各阶段统一打标签 -->
           <div v-if="memoryHitCount(item)" class="tl-memory-block">
             <div class="tl-memory-heading">{{ memoryListHeading(item) }}</div>
             <ul class="tl-memory-list">
@@ -342,15 +384,12 @@ function toolCitations(item) {
                   <i class="ti ti-book-2 tl-memory-icon"></i>
                   <span class="tl-memory-title">{{ hit.title || hit.id || '未命名记忆' }}</span>
                   <span
-                    v-if="memorySelectedLabel(hit)"
+                    v-for="tag in [memoryHitTag(hit, item.stage)]"
+                    :key="tag.label"
+                    v-show="tag.label"
                     class="tl-memory-tag"
-                    :class="hit.selected ? 'is-selected' : 'is-rejected'"
-                    >{{ memorySelectedLabel(hit) }}</span
-                  >
-                  <span
-                    v-else-if="memoryRelationLabel(hit.relation)"
-                    class="tl-memory-tag"
-                    >{{ memoryRelationLabel(hit.relation) }}</span
+                    :class="tag.tone"
+                    >{{ tag.label }}</span
                   >
                 </div>
                 <div v-if="hit.summary" class="tl-memory-summary">{{ hit.summary }}</div>

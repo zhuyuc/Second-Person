@@ -31,14 +31,22 @@ class SettingsService:
         return out
 
     def validate_provider_required(self, body: dict) -> None:
-        for field, label in (("base_url", "Base URL"), ("model_id", "模型 ID"),
-                             ("api_key", "API Key")):
+        ptype = (body.get("provider_type") or "").strip()
+        required = [("base_url", "Base URL"), ("model_id", "模型 ID")]
+        if ptype != "comfyui":
+            required.append(("api_key", "API Key"))
+        for field, label in required:
             if not (body.get(field) or "").strip():
                 raise ValueError(f"请先填写{label}")
+        if ptype == "comfyui" and not (body.get("api_key") or "").strip():
+            body["api_key"] = "local"
 
     async def probe_snapshot(self, snap) -> dict:
         """一次性连通性探测，不污染正式调用的熔断与用量状态。"""
         try:
+            if getattr(snap, "provider_type", "") == "comfyui":
+                from infrastructure.image_gen import probe_comfyui
+                return await probe_comfyui(snap.base_url)
             return await self.c.llm.probe(snap)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
@@ -54,8 +62,13 @@ class SettingsService:
             return {"ok": False, "error": "Base URL 仅支持带主机名的 http/https 地址"}
         if not body.get("model_id"):
             return {"ok": False, "error": "请填写模型 ID"}
-        snap = ProviderSnapshot("test", body["provider_type"], body["base_url"],
-                                body["api_key"], body["model_id"])
+        ptype = body.get("provider_type") or "openai_compatible"
+        if ptype == "comfyui" and not (body.get("api_key") or "").strip():
+            body["api_key"] = "local"
+        elif ptype != "comfyui" and not (body.get("api_key") or "").strip():
+            return {"ok": False, "error": "请填写 API Key"}
+        snap = ProviderSnapshot("test", ptype, body["base_url"],
+                                body.get("api_key") or "local", body["model_id"])
         return await self.probe_snapshot(snap)
 
     def add_or_update_provider(self, body: dict) -> dict:

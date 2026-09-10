@@ -4,6 +4,7 @@
 1. Embedding 槽位一次短文本向量化
 2. 精筛槽位一次最小 payload（走与线上相同的 llm_refine_fn）
 3. 主对话槽位 probe（建连 / 可选前缀侧热身，不改正式 prompt）
+4. 本地 ComfyUI（image_gen / video_gen）连通性探测
 
 失败一律吞掉并打 debug/warning，不阻塞启动或建会话。
 """
@@ -35,7 +36,7 @@ _WARMUP_REFINE_CANDIDATES = [
 
 
 class RuntimeWarmer:
-    """Coalesced background warmer for embed / refine / chat providers."""
+    """Coalesced background warmer for embed / refine / chat / local ComfyUI."""
 
     def __init__(self, container: Any,
                  coalesce_seconds: float = _DEFAULT_COALESCE_SECONDS) -> None:
@@ -86,19 +87,25 @@ class RuntimeWarmer:
 
     async def _warm_all(self, reason: str) -> dict[str, Any]:
         started = time.perf_counter()
+        comfy = await self._warm_comfyui()
         results = {
             "reason": reason,
             "embed": await self._warm_embed(),
             "refine": await self._warm_refine(),
             "chat": await self._warm_chat(),
+            "image_gen": comfy.get("image_gen") or {"ok": False, "error": "missing"},
+            "video_gen": comfy.get("video_gen") or {"ok": False, "error": "missing"},
         }
         results["elapsed_ms"] = round((time.perf_counter() - started) * 1000)
         logger.info(
-            "runtime warmup done reason=%s embed=%s refine=%s chat=%s elapsed_ms=%s",
+            "runtime warmup done reason=%s embed=%s refine=%s chat=%s "
+            "image_gen=%s video_gen=%s elapsed_ms=%s",
             reason,
             results["embed"].get("ok"),
             results["refine"].get("ok"),
             results["chat"].get("ok"),
+            results["image_gen"].get("ok"),
+            results["video_gen"].get("ok"),
             results["elapsed_ms"],
         )
         return results
@@ -147,3 +154,46 @@ class RuntimeWarmer:
         except Exception as exc:  # noqa: BLE001
             logger.debug("chat warmup failed: %s", exc, exc_info=True)
             return {"ok": False, "error": str(exc)[:200]}
+
+    async def _warm_comfyui(self) -> dict[str, dict[str, Any]]:
+        """探测 image_gen / video_gen 绑定的本地 ComfyUI（同 URL 只探一次）。"""
+        providers = getattr(self._container, "providers", None)
+        out: dict[str, dict[str, Any]] = {
+            "image_gen": {"ok": False, "error": "providers_missing"},
+            "video_gen": {"ok": False, "error": "providers_missing"},
+        }
+        if providers is None:
+            return out
+
+        try:
+            from infrastructure.image_gen import probe_comfyui
+        except Exception as exc:  # noqa: BLE001
+            err = {"ok": False, "error": f"probe_import:{exc}"[:200]}
+            return {"image_gen": dict(err), "video_gen": dict(err)}
+
+        url_cache: dict[str, dict[str, Any]] = {}
+        for slot in ("image_gen", "video_gen"):
+            snap = providers.snapshot_for(slot)
+            if snap is None:
+                out[slot] = {"ok": False, "error": "unconfigured"}
+                continue
+            ptype = (getattr(snap, "provider_type", "") or "").strip().lower()
+            if ptype != "comfyui":
+                out[slot] = {"ok": False, "error": f"unsupported_type:{ptype}"}
+                continue
+            base = (getattr(snap, "base_url", "") or "").rstrip("/")
+            if not base:
+                out[slot] = {"ok": False, "error": "empty_base_url"}
+                continue
+            if base not in url_cache:
+                try:
+                    url_cache[base] = await probe_comfyui(base)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("comfyui warmup failed slot=%s: %s",
+                                 slot, exc, exc_info=True)
+                    url_cache[base] = {"ok": False, "error": str(exc)[:200]}
+            probe = dict(url_cache[base])
+            probe["base_url"] = base
+            probe["model_id"] = getattr(snap, "model_id", "") or ""
+            out[slot] = probe
+        return out

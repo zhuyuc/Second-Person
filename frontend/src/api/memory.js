@@ -17,7 +17,7 @@ export const memoryApi = {
         ...(eventType ? { event_type: eventType } : {}),
       })
     ),
-  health: () => api.get('/memory/health'),
+  health: () => api.get('/memory/health', { silent: true }),
   governance: () => api.get('/memory/governance'),
   candidates: (status = 'pending', limit = 100) =>
     api.get(withQuery('/memory/candidates', { status, limit })),

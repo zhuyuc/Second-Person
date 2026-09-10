@@ -128,6 +128,12 @@ def create_app(data_dir: str | Path) -> FastAPI:
     app.mount("/chat-images", StaticFiles(directory=str(img_dir)),
               name="chat_images")
 
+    # 对话生成视频（文生视频落盘，历史消息回看）
+    vid_dir = Path(data_dir) / "chat_videos"
+    vid_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/chat-videos", StaticFiles(directory=str(vid_dir)),
+              name="chat_videos")
+
     # 浏览器默认探测 /favicon.ico，统一重定向到 favicon.svg，避免 404 噪音
     @app.get("/favicon.ico", include_in_schema=False)
     async def favicon():

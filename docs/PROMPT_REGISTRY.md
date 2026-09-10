@@ -30,13 +30,17 @@
 | 19 | app/prompts/merge_judge.md | 记忆合并判定 | app/container | A |
 | 20 | app/prompts/title_gen.md | 会话标题生成 | app/services/chat_service.py | A |
 | 21 | app/prompts/base_rules_fs.md | fs 工具族使用规则（M3 项目工作区） | agent/core.py | B |
-| 22 | soul/prompts/default_soul_core.md | SOUL 核心默认值 | soul/constants.py | B |
-| 23 | soul/prompts/default_soul_style_dialog.md | SOUL 对话风格默认值 | soul/constants.py | B |
-| 24 | soul/prompts/default_soul_style_output.md | SOUL 输出样式默认值 | soul/constants.py | B |
-| 25 | soul/prompts/onboarding_persona.md | 引导期人格 | soul/constants.py | B |
-| 26 | soul/prompts/output_style_meta_rule.md | 输出样式元规则 | soul/constants.py | B |
-| 27 | agent/prompts/compact_instruction.md | 自动压缩 8 段摘要指令（v7 CompactionEngine） | agent/compaction_engine.py | A |
-| 28 | agent/prompts/compact_preamble.md | 压缩摘要 checkpoint 前言 + `<compacted-summary>` 框架 | agent/compaction_engine.py | A |
+| 22 | app/prompts/base_rules_image_gen.md | 文生图工具使用规则（本地 ComfyUI） | agent/core.py | B |
+| 23 | agent/prompts/image_prompt_refine.md | 文生图 prompt 中英润色 | tools/builtin.py | A |
+| 24 | app/prompts/base_rules_video_gen.md | 文生视频工具使用规则（本地 ComfyUI） | agent/core.py | B |
+| 25 | agent/prompts/video_prompt_refine.md | 文生视频 prompt 中英润色 | tools/builtin.py | A |
+| 26 | soul/prompts/default_soul_core.md | SOUL 核心默认值 | soul/constants.py | B |
+| 27 | soul/prompts/default_soul_style_dialog.md | SOUL 对话风格默认值 | soul/constants.py | B |
+| 28 | soul/prompts/default_soul_style_output.md | SOUL 输出样式默认值 | soul/constants.py | B |
+| 29 | soul/prompts/onboarding_persona.md | 引导期人格 | soul/constants.py | B |
+| 30 | soul/prompts/output_style_meta_rule.md | 输出样式元规则 | soul/constants.py | B |
+| 31 | agent/prompts/compact_instruction.md | 自动压缩 8 段摘要指令（v7 CompactionEngine） | agent/compaction_engine.py | A |
+| 32 | agent/prompts/compact_preamble.md | 压缩摘要 checkpoint 前言 + `<compacted-summary>` 框架 | agent/compaction_engine.py | A |
 
 ## LLM 调用点
 
@@ -52,10 +56,11 @@
 | 8 | app/container/wiring.py::llm_refine | chat | agent | app/prompts/memory_refine.md | 记忆精筛 |
 | 9 | app/container/wiring.py::merge_judge_fn | chat | system_agent | app/prompts/merge_judge.md | 记忆合并 |
 | 10 | app/services/chat_service.py::_call_llm | chat | title_gen | app/prompts/title_gen.md | 会话标题 |
-| 11 | app/routes/misc.py::test_connection | chat | main_chat | - | 模型连通性 |
-| 12 | memory/handoff_summary.py::_llm_converge | chat | handoff_summary | agent/prompts/handoff_converge.md | handoff 收敛 |
-| 13 | memory/handoff_summary.py::_llm_generate | chat | handoff_summary | agent/prompts/handoff_summary.md | handoff 生成 |
-| 14 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像冲突识别 |
-| 15 | soul/mood_judge.py::judge_turn_moods | chat | system_agent | agent/prompts/mood_judge.md | turn 结束情绪判定 |
-| 16 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取 |
-| 17 | agent/compaction_engine.py::_summarize | chat | system_agent | agent/prompts/compact_instruction.md | v7 自动压缩摘要生成 |
+| 11 | memory/handoff_summary.py::_llm_converge | chat | handoff_summary | agent/prompts/handoff_converge.md | handoff 收敛 |
+| 12 | memory/handoff_summary.py::_llm_generate | chat | handoff_summary | agent/prompts/handoff_summary.md | handoff 生成 |
+| 13 | soul/profile_conflict_scanner.py::scan_profile_rebuild | chat | profile_conflict | agent/prompts/profile_conflict_scan.md | 画像冲突识别 |
+| 14 | soul/mood_judge.py::judge_turn_moods | chat | system_agent | agent/prompts/mood_judge.md | turn 结束情绪判定 |
+| 15 | tools/builtin.py::format_template_save | chat | system_agent | app/prompts/format_skeleton.md | 格式骨架提取 |
+| 16 | agent/compaction_engine.py::_summarize | chat | system_agent | agent/prompts/compact_instruction.md | v7 自动压缩摘要生成 |
+| 17 | tools/builtin.py::generate_image | chat | image_prompt_refine | agent/prompts/image_prompt_refine.md | 文生图 prompt 润色 |
+| 18 | tools/builtin.py::generate_video | chat | video_prompt_refine | agent/prompts/video_prompt_refine.md | 文生视频 prompt 润色 |

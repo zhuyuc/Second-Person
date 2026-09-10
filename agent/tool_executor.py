@@ -29,7 +29,7 @@ class ToolExecutor:
                            emit: Callable[[str, dict], Awaitable[None]] | None = None,
                            session_id: str = "") -> dict[str, Any]:
         """Validate, execute, redact, and return one tool result."""
-        del intent_summary, emit
+        del intent_summary
         from langfuse.integration import get_tracer, mark_preview
         import json
 
@@ -56,7 +56,11 @@ class ToolExecutor:
                 return {"ok": False, "error": error}
             ctx = self.workspace_resolver.resolve(session_id)
             params = {**params, "_ws_ctx": ctx}
-        result, error = await self._run_with_empty_retry(tool, params)
+        # 文生图/文生视频：注入 emit / session_id，并使用更长超时
+        if tool_name in ("generate_image", "generate_video"):
+            params = {**params, "_emit": emit, "_session_id": session_id}
+        result, error = await self._run_with_empty_retry(
+            tool, params, tool_name=tool_name)
         if error:
             span.end(level="ERROR", output={"ok": False, "error": error})
             return {"ok": False, "error": error}
@@ -83,8 +87,17 @@ class ToolExecutor:
                          "result": mark_preview(redacted, content_type="tool_result")})
         return {"ok": True, "result": redacted}
 
-    async def _run_with_empty_retry(self, tool, params) -> tuple[Any, str | None]:
+    async def _run_with_empty_retry(self, tool, params, *,
+                                    tool_name: str = "") -> tuple[Any, str | None]:
         timeout = self.config.get("tool_timeout_seconds", 60)
+        if tool_name == "generate_image":
+            timeout = max(
+                int(timeout or 60),
+                int(self.config.get("image_gen_timeout_sec", 180) or 180) + 30)
+        elif tool_name == "generate_video":
+            timeout = max(
+                int(timeout or 60),
+                int(self.config.get("video_gen_timeout_sec", 600) or 600) + 60)
         for attempt in range(2):
             try:
                 result = await asyncio.wait_for(tool.run(**params), timeout=timeout)

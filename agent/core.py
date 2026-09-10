@@ -523,8 +523,14 @@ class AgentCore:
             fs_rules = PROMPTS.load_raw("app/prompts/base_rules_fs")
             if fs_rules and fs_rules.strip():
                 static.append(PromptBlock("文件操作规则", fs_rules.strip(), 35))
+            img_rules = PROMPTS.load_raw("app/prompts/base_rules_image_gen")
+            if img_rules and img_rules.strip():
+                static.append(PromptBlock("文生图规则", img_rules.strip(), 36))
+            vid_rules = PROMPTS.load_raw("app/prompts/base_rules_video_gen")
+            if vid_rules and vid_rules.strip():
+                static.append(PromptBlock("文生视频规则", vid_rules.strip(), 37))
         except Exception:  # noqa: BLE001
-            logger.debug("加载 fs rules 失败", exc_info=True)
+            logger.debug("加载 fs/image_gen/video_gen rules 失败", exc_info=True)
         if onboarding:
             static.append(PromptBlock("引导期人格", ONBOARDING_PERSONA, 40))
         else:

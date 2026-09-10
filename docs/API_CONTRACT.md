@@ -87,7 +87,7 @@ data: <JSON object>
 | `step_progress` | `turn_id`, `step`, `phase`, `label` | 当前步骤中的上下文、压缩或模型阶段提示 |
 | `tool_executing` | `tool_name`, `status` | 工具执行状态 |
 | `tool_result` | `turn_id`, `tool_name`, `ok` | 工具结果摘要 |
-| `tool_visual` | `type`, `data` | 工具生成的图形 |
+| `tool_visual` | `type`, `data` | 工具生成的图形；`type` 可为 `flowchart` / `mermaid` / `generated_image`（文生图）/ `generated_video`（文生视频） |
 | `content_delta` | `text` | 回复正文增量 |
 | `content_reset` | `turn_id` | 工具步骤先产生旁白后，将其从用户可见正文撤回，只保留最终答案 |
 | `citations` | `refs` | 回复引用 |

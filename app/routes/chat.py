@@ -485,6 +485,13 @@ async def chat_cancel(body: ChatCancelRequest):
     async with _buffers_lock():
         buf = _BUFFERS.get(body.client_request_id or "")
         task = buf.get("task") if buf else None
+        sid = buf.get("sid") if buf else None
+    if sid:
+        try:
+            from infrastructure.image_gen import interrupt_session
+            await interrupt_session(sid)
+        except Exception:  # noqa: BLE001
+            pass
     if task and not task.done():
         task.cancel()
         return {"code": 200, "data": {"cancelled": True}}

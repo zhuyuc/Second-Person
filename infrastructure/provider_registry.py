@@ -9,9 +9,11 @@ Provider 注册表 —— 从 providers / model_assignment / credentials 解析 
 
 槽位治理（TASK_SLOTS 单一事实来源）：
 - 全部槽位统一注册：label/desc 供设置页清晰展示"这个槽位做什么"，fallback 定义回退链
-- ensure_slot_assignments：启动时幂等补齐缺失槽位（仅补缺失，绝不覆盖用户配置）
+- ensure_slot_assignments：启动时幂等补齐缺失槽位（仅补缺失，绝不覆盖用户配置）；
+  其中 video_gen 无对话回退链，会自动绑定/创建本地 Wan ComfyUI Provider
 - audit_slot_assignments：启动时健康检查（未配置/悬空引用/轻量槽位误配慢模型）汇总告警
 - lightweight 槽位解析时跳过 slow_model_ids 慢模型候选，防止轻量任务耗时放大数倍
+- RuntimeWarmer：启动预热含 image_gen / video_gen 的 ComfyUI 连通性探测
 """
 from __future__ import annotations
 
@@ -85,6 +87,20 @@ TASK_SLOTS: dict[str, TaskSlot] = {
              "未配置时回退到系统 Agent。",
         fallback=("agent", "chat"),
         lightweight=True,
+    ),
+    "image_gen": TaskSlot(
+        key="image_gen",
+        label="文生图模型（本地 ComfyUI）",
+        desc="对话中本地生图。须配置类型 ComfyUI 的 Provider："
+             "base_url 如 http://127.0.0.1:8188，model_id 为 SDXL checkpoint 文件名。"
+             "无对话模型回退，避免误用识图/对话槽。",
+    ),
+    "video_gen": TaskSlot(
+        key="video_gen",
+        label="文生视频模型（本地 ComfyUI）",
+        desc="对话中本地生视频。须配置类型 ComfyUI 的 Provider："
+             "base_url 如 http://127.0.0.1:8188，model_id 为 Wan 2.1 T2V 权重文件名。"
+             "无对话模型回退；可与文生图共用同一 ComfyUI 地址。",
     ),
 
 }
@@ -257,7 +273,75 @@ def ensure_slot_assignments(registry: ProviderRegistry) -> list[str]:
                                slot.key, slot.label, fb, pid)
                 filled.append(slot.key)
                 break
+    # 本地 ComfyUI 槽位：video_gen 无回退链，需单独幂等补齐
+    filled.extend(ensure_video_gen_assignment(registry))
     return filled
+
+
+_DEFAULT_VIDEO_MODEL_ID = "wan2.1_t2v_1.3B_fp16.safetensors"
+_DEFAULT_COMFYUI_URL = "http://127.0.0.1:8188"
+
+
+def ensure_video_gen_assignment(registry: ProviderRegistry) -> list[str]:
+    """启动时为 video_gen 幂等补齐 Provider 绑定（不覆盖已有配置）。
+
+    优先级：
+    1. 已有类型 comfyui 且 model_id 含 wan 的 Provider
+    2. 复用 image_gen / 任一 comfyui Provider 的 base_url，新建 Wan Provider 并绑定
+    """
+    if registry.assignment("video_gen"):
+        return []
+    if "video_gen" not in TASK_SLOTS:
+        return []
+
+    providers = registry.list_providers()
+    comfy = [
+        p for p in providers
+        if (p.get("provider_type") or "").strip().lower() == "comfyui"
+    ]
+    wan_like = [
+        p for p in comfy
+        if "wan" in (p.get("model_id") or "").lower()
+    ]
+    if wan_like:
+        pid = wan_like[0]["id"]
+        registry.set_assignment("video_gen", pid)
+        logger.warning(
+            "槽位 video_gen 未配置，已自动绑定已有 Wan ComfyUI Provider %s（%s）",
+            pid, wan_like[0].get("model_id"))
+        return ["video_gen"]
+
+    base_url = _DEFAULT_COMFYUI_URL
+    img_pid = registry.assignment("image_gen")
+    if img_pid:
+        img = registry.snapshot(img_pid)
+        if img and (img.provider_type or "").lower() == "comfyui" and img.base_url:
+            base_url = img.base_url.rstrip("/")
+    elif comfy:
+        base_url = (comfy[0].get("base_url") or base_url).rstrip("/")
+
+    seq = registry.next_provider_seq()
+    pid = f"prov_{seq:03d}"
+    try:
+        registry.add_provider(
+            pid=pid,
+            display_name="ComfyUI 本地文生视频（Wan）",
+            provider_type="comfyui",
+            base_url=base_url,
+            model_id=_DEFAULT_VIDEO_MODEL_ID,
+            api_key="local",
+            input_price=None,
+            output_price=None,
+            context_window=0,
+        )
+        registry.set_assignment("video_gen", pid)
+        logger.warning(
+            "槽位 video_gen 未配置，已自动创建 Provider %s（%s @ %s）并绑定",
+            pid, _DEFAULT_VIDEO_MODEL_ID, base_url)
+        return ["video_gen"]
+    except Exception:  # noqa: BLE001
+        logger.warning("自动补齐 video_gen 槽位失败", exc_info=True)
+        return []
 
 
 def audit_slot_assignments(registry: ProviderRegistry) -> None:

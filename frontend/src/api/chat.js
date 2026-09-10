@@ -6,7 +6,7 @@ export const chatApi = {
   // ---- 会话生命周期 ----
   createSession: (payload) => api.post('/chat/session/create', payload),
   handoff: (fromSessionId) => api.post('/chat/session/handoff', { from_session_id: fromSessionId }),
-  activeRequest: (sid) => api.get(`/chat/session/${sid}/active-request`),
+  activeRequest: (sid) => api.get(`/chat/session/${sid}/active-request`, { silent: true }),
   cancel: (clientRequestId) => api.post('/chat/cancel', { client_request_id: clientRequestId }),
   feedback: (payload) => api.post('/chat/feedback', payload),
   switchVersion: (payload) => api.post('/chat/switch-version', payload),
@@ -35,7 +35,8 @@ export const chatApi = {
   search: (params) => api.get(withQuery('/chat/search', params)),
 
   // ---- 系统/引导 ----
-  health: () => api.get('/health'),
+  // 健康检查为后台轮询：超时/失败只更新状态，不弹 toast（避免生视频等长任务期间误报）
+  health: () => api.get('/health', { silent: true }),
   onboardingStatus: () => api.get('/onboarding/status'),
 
   // ---- 模型/参数 ----

@@ -78,7 +78,7 @@ class BackupManager:
                 # M5：projects/ 是项目工作区 md 主副本，恢复后 --rebuild-index
                 # 能从 md 重建 projects 表
                 for sub in ("memories", "sessions", "profile", "soul", "skills",
-                            "chat_images", "projects"):
+                            "chat_images", "chat_videos", "projects"):
                     base = self.data_dir / sub
                     if not base.exists():
                         continue

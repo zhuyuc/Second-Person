@@ -11,13 +11,14 @@ from infrastructure.runtime_warmup import RuntimeWarmer
 
 
 class _FakeProviders:
-    def __init__(self, snap="chat-snap"):
+    def __init__(self, snap="chat-snap", media=None):
         self._snap = snap
+        self._media = media or {}
 
     def snapshot_for(self, key):
         if key in ("chat", "agent") and self._snap:
             return self._snap
-        return None
+        return self._media.get(key)
 
 
 class _FakeLLM:
@@ -69,6 +70,9 @@ def test_warmup_runs_three_paths():
         assert out["embed"]["ok"] is True
         assert out["refine"]["ok"] is True
         assert out["chat"]["ok"] is True
+        assert out["image_gen"]["ok"] is False
+        assert out["video_gen"]["ok"] is False
+        assert out["video_gen"].get("error") == "unconfigured"
         assert c.embed_calls == 1
         assert c.refine_calls == 1
         assert c.llm.probe_calls == 1
@@ -84,6 +88,34 @@ def test_warmup_failures_isolated():
         assert out["embed"]["ok"] is False
         assert out["refine"]["ok"] is False
         assert out["chat"]["ok"] is False
+
+    asyncio.run(scenario())
+
+
+def test_warmup_comfyui_video_gen_probed(monkeypatch):
+    async def scenario():
+        class _Snap:
+            provider_type = "comfyui"
+            base_url = "http://127.0.0.1:8188"
+            model_id = "wan2.1_t2v_1.3B_fp16.safetensors"
+
+        c = _FakeContainer()
+        c.providers = _FakeProviders(media={"video_gen": _Snap(), "image_gen": _Snap()})
+        calls = {"n": 0}
+
+        async def fake_probe(url, timeout=8.0):
+            calls["n"] += 1
+            assert url.startswith("http://127.0.0.1:8188")
+            return {"ok": True}
+
+        monkeypatch.setattr(
+            "infrastructure.image_gen.probe_comfyui", fake_probe)
+        warmer = RuntimeWarmer(c, coalesce_seconds=0)
+        out = await warmer.warm(reason="comfy")
+        assert out["video_gen"]["ok"] is True
+        assert out["image_gen"]["ok"] is True
+        # 同 base_url 只探测一次
+        assert calls["n"] == 1
 
     asyncio.run(scenario())
 

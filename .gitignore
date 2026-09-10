@@ -16,6 +16,13 @@ dist/
 /embedding/models/
 /embedding/venv/
 
+# 本地文生图引擎与 SDXL 权重（ComfyUI 便携包 + checkpoints，体积大不入库）
+/image_gen/comfyui/
+/image_gen/_downloads/
+/video_gen/_downloads/
+/data/chat_videos/
+/chat_videos/
+
 # 前端（构建产物 app/static 入库，使用者免装 Node）
 /frontend/node_modules/
 

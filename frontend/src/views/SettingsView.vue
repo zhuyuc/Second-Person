@@ -1509,6 +1509,7 @@ onActivated(() => selectTab(tab.value))
         <option value="openai_compatible">OpenAI 兼容</option>
         <option value="anthropic">Anthropic</option>
         <option value="google">Google</option>
+        <option value="comfyui">ComfyUI（本地文生图/视频）</option>
         <option value="custom">自定义</option>
       </select>
     </div>
@@ -1866,6 +1867,7 @@ onActivated(() => selectTab(tab.value))
         <option value="openai_compatible">OpenAI 兼容</option>
         <option value="anthropic">Anthropic</option>
         <option value="google">Google</option>
+        <option value="comfyui">ComfyUI（本地文生图/视频）</option>
         <option value="custom">自定义</option>
       </select>
     </div>

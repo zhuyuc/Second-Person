@@ -12,17 +12,30 @@ from .repeat_tool_guard import RepeatToolGuard
 from .turn_events import TurnEventStore
 from .turn_runtime_helpers import extract_web_citations
 
+_GPU_GEN_TOOLS = frozenset({"generate_image", "generate_video"})
+_VISUAL_TOOLS = frozenset({
+    "render_flowchart", "render_mermaid", "generate_image", "generate_video",
+})
+
 
 class TurnToolRunner:
     def __init__(self, *, registry, executor, events: TurnEventStore) -> None:
         self.registry = registry
         self.executor = executor
         self.events = events
+        # turn_id -> 本轮已成功 generate_image / generate_video 次数
+        self._image_gen_ok: dict[str, int] = {}
+        self._video_gen_ok: dict[str, int] = {}
 
     async def run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict],
                              emit: Callable[[str, dict], Awaitable[None]],
                              repeat_guard: RepeatToolGuard) -> list[dict]:
+        prior_image_ok = self._image_gen_ok.get(turn_id, 0)
+        prior_video_ok = self._video_gen_ok.get(turn_id, 0)
+        turn_max = 1
+
         async def run_one(raw: dict, index: int) -> dict:
+            nonlocal prior_image_ok, prior_video_ok
             function = raw.get("function") or {}
             name = function.get("name") or raw.get("name") or ""
             call_id = raw.get("id") or f"call_{step}_{index}_{uuid.uuid4().hex[:8]}"
@@ -60,6 +73,30 @@ class TurnToolRunner:
             if tool is None:
                 return await self.record_result(turn_id, step, call_id, name, False,
                                                 "工具不存在", emit)
+            if name == "generate_image" and prior_image_ok >= turn_max:
+                return await self.record_result(
+                    turn_id, step, call_id, name, False,
+                    "本轮已成功出图一次；若要另一张请新开一轮再说"
+                    "（当前策略一次一张）。",
+                    emit, arguments=params)
+            if name == "generate_video" and prior_video_ok >= turn_max:
+                return await self.record_result(
+                    turn_id, step, call_id, name, False,
+                    "本轮已成功生成一条视频；若要另一条请新开一轮再说"
+                    "（当前策略一次一条）。",
+                    emit, arguments=params)
+            if name == "generate_video" and prior_image_ok > 0:
+                return await self.record_result(
+                    turn_id, step, call_id, name, False,
+                    "本轮已生成图片，请新开一轮再生成视频"
+                    "（本地显存策略：同轮图/视频互斥）。",
+                    emit, arguments=params)
+            if name == "generate_image" and prior_video_ok > 0:
+                return await self.record_result(
+                    turn_id, step, call_id, name, False,
+                    "本轮已生成视频，请新开一轮再生成图片"
+                    "（本地显存策略：同轮图/视频互斥）。",
+                    emit, arguments=params)
             try:
                 args_preview = json.dumps(params, ensure_ascii=False, default=str)[:200]
             except Exception:  # noqa: BLE001
@@ -73,6 +110,12 @@ class TurnToolRunner:
                                                       session_id=turn.get("session_id", ""))
             duration_ms = max(0, round((time.perf_counter() - tool_started_at) * 1000))
             if result.get("ok"):
+                if name == "generate_image":
+                    prior_image_ok += 1
+                    self._image_gen_ok[turn_id] = prior_image_ok
+                elif name == "generate_video":
+                    prior_video_ok += 1
+                    self._video_gen_ok[turn_id] = prior_video_ok
                 recorded = await self.record_result(
                     turn_id, step, call_id, name, True,
                     result.get("result"), emit, arguments=params)
@@ -86,7 +129,11 @@ class TurnToolRunner:
 
         resolved = [self.registry.get((raw.get("function") or {}).get("name") or raw.get("name", ""))
                     for raw in tool_calls]
-        if all(tool is not None and tool.spec.parallel_safe for tool in resolved):
+        force_serial = any(
+            ((raw.get("function") or {}).get("name") or raw.get("name")) in _GPU_GEN_TOOLS
+            for raw in tool_calls)
+        if (not force_serial
+                and all(tool is not None and tool.spec.parallel_safe for tool in resolved)):
             return await asyncio.gather(*(run_one(raw, i) for i, raw in enumerate(tool_calls, 1)))
         return [await run_one(raw, i) for i, raw in enumerate(tool_calls, 1)]
 
@@ -109,9 +156,8 @@ class TurnToolRunner:
             if cites:
                 payload["citations"] = cites
         await emit("tool_result", payload)
-        # 图形工具执行成功 → 发射 tool_visual 事件供前端 DiagramRenderer 渲染。
-        # （render_flowchart/render_mermaid 产出 {type, ...}；前端据 type 选 SVG/Mermaid）
-        if ok and name in ("render_flowchart", "render_mermaid") \
+        # 图形/生图/生视频工具执行成功 → 发射 tool_visual
+        if ok and name in _VISUAL_TOOLS \
                 and isinstance(result, dict) and result.get("type"):
             await emit("tool_visual", {"type": result["type"], "data": result})
         return {"tool": name, "ok": ok, "result": result if ok else None,

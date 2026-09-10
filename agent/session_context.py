@@ -246,6 +246,9 @@ class SessionStore:
         self._cleanup_images(
             "SELECT images FROM conversations WHERE session_id=? AND images IS NOT NULL",
             (sid,))
+        self._cleanup_visuals(
+            "SELECT visuals FROM conversations WHERE session_id=? AND visuals IS NOT NULL",
+            (sid,))
         with self.db.transaction() as conn:
             # SQLite 外键在本项目由应用层维护；长文交付任务必须随会话删除，
             # 否则章节正文和问题模型会成为不可访问的孤立数据。
@@ -507,6 +510,9 @@ class SessionStore:
         self._cleanup_images(
             f"SELECT images FROM conversations WHERE id IN ({ph}) "
             "AND images IS NOT NULL", tuple(ids))
+        self._cleanup_visuals(
+            f"SELECT visuals FROM conversations WHERE id IN ({ph}) "
+            "AND visuals IS NOT NULL", tuple(ids))
         self.db.execute(
             f"DELETE FROM conversations WHERE id IN ({ph})", tuple(ids))
         self.db.execute(
@@ -598,6 +604,42 @@ class SessionStore:
                     p = self.data_dir / "chat_images" / fname
                     if p.exists():
                         p.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _cleanup_visuals(self, sql: str, params: tuple) -> None:
+        """删除消息前清理文生图/文生视频落盘文件（visuals[].data.filenames）。"""
+        try:
+            for r in self.db.query_all(sql, params):
+                visuals = json.loads(r["visuals"] or "[]")
+                if not isinstance(visuals, list):
+                    continue
+                for item in visuals:
+                    if not isinstance(item, dict):
+                        continue
+                    vtype = item.get("type")
+                    data = item.get("data") if isinstance(item.get("data"), dict) else None
+                    if data is None:
+                        continue
+                    if vtype == "generated_image":
+                        subdir = "chat_images"
+                    elif vtype == "generated_video":
+                        subdir = "chat_videos"
+                    else:
+                        continue
+                    for fname in data.get("filenames") or []:
+                        if not fname or "/" in str(fname) or "\\" in str(fname):
+                            continue
+                        p = self.data_dir / subdir / str(fname)
+                        if p.exists():
+                            p.unlink()
+                    poster = data.get("poster_url") or ""
+                    if isinstance(poster, str) and poster.startswith("/chat-videos/thumbs/"):
+                        thumb = poster.rsplit("/", 1)[-1]
+                        if thumb and "/" not in thumb and "\\" not in thumb:
+                            tp = self.data_dir / "chat_videos" / "thumbs" / thumb
+                            if tp.exists():
+                                tp.unlink()
         except Exception:  # noqa: BLE001
             pass
 

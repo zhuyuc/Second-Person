@@ -678,7 +678,8 @@ class TurnRuntime:
                 # 收集图形工具产出，随最终消息持久化（刷新后可恢复渲染）
                 for _tr in results:
                     if _tr.get("ok") and _tr.get("tool") in (
-                            "render_flowchart", "render_mermaid"):
+                            "render_flowchart", "render_mermaid",
+                            "generate_image", "generate_video"):
                         _vd = _tr.get("result")
                         if isinstance(_vd, dict) and _vd.get("type"):
                             turn_visuals.append({"type": _vd["type"], "data": _vd})

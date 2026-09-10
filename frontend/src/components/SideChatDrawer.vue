@@ -8,11 +8,12 @@
 //  - 内容隔离：aside 会话独立成话、不进列表/搜索（后端 channel='aside' 保证）。
 //
 // 实例常驻（v-show 而非 v-if）以保活消息 + 进行中流 + 未发草稿；切主会话仅切换可见性。
-import { ref, computed, defineAsyncComponent, nextTick } from 'vue'
+import { ref, computed, defineAsyncComponent, nextTick, onMounted, onUnmounted } from 'vue'
 import { useSessions } from '@/stores/sessions'
+import { loadAsideChatView } from '@/components/asideChatLoader'
 // 侧边会话只有用户主动划词后才会出现；不要因抽屉常驻而把完整 ChatView
 // （及其图表依赖）并入首屏入口。
-const ChatView = defineAsyncComponent(() => import('@/views/ChatView.vue'))
+const ChatView = defineAsyncComponent(loadAsideChatView)
 
 const sessStore = useSessions()
 const activeMainSid = computed(() => sessStore.currentSid)
@@ -21,9 +22,33 @@ const activeMainSid = computed(() => sessStore.currentSid)
 const entries = ref([])
 // mainSid -> ChatView 实例（用于 injectQuote）
 const asideRefs = new Map()
+// 异步 ChatView 尚未挂载时暂存待注入引用队列；挂载后由 setAsideRef 消费
+const pendingQuotes = new Map()
+function applyQuote(inst, quote) {
+  if (!inst || !quote?.text) return
+  inst.injectQuote({
+    text: quote.text,
+    comment: quote.comment || '',
+    sourceMsgId: quote.sourceMsgId,
+    sourceRole: quote.sourceRole,
+  })
+}
+function flushPendingQuotes(mainSid, inst) {
+  const queue = pendingQuotes.get(mainSid)
+  if (!queue?.length || !inst) return
+  pendingQuotes.delete(mainSid)
+  // 下一帧再注入，确保 aside 实例内部 composer/attachments 已就绪
+  nextTick(() => {
+    for (const quote of queue) applyQuote(inst, quote)
+  })
+}
 function setAsideRef(mainSid, el) {
-  if (el) asideRefs.set(mainSid, el)
-  else asideRefs.delete(mainSid)
+  if (el) {
+    asideRefs.set(mainSid, el)
+    flushPendingQuotes(mainSid, el)
+  } else {
+    asideRefs.delete(mainSid)
+  }
 }
 
 const activeEntry = computed(
@@ -31,12 +56,77 @@ const activeEntry = computed(
 )
 const visible = computed(() => !!activeEntry.value)
 
+// 抽屉宽度：可拖拽调整，localStorage 记住下次打开复用
+const WIDTH_KEY = 'sp_aside_drawer_width'
+const DEFAULT_WIDTH = 460
+const MIN_WIDTH = 320
+function maxWidth() {
+  return Math.max(MIN_WIDTH, Math.floor(window.innerWidth * 0.92))
+}
+function clampWidth(w) {
+  return Math.min(maxWidth(), Math.max(MIN_WIDTH, Math.round(w)))
+}
+function loadWidth() {
+  const raw = Number(localStorage.getItem(WIDTH_KEY))
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : DEFAULT_WIDTH
+}
+// preferredWidth 是用户偏好；显示宽度再按当前视口钳制，窗口缩小不覆盖偏好
+const preferredWidth = ref(loadWidth())
+const resizing = ref(false)
+// 视口变化时强制重算钳制（maxWidth 依赖 innerWidth）
+const viewportTick = ref(0)
+const drawerWidth = computed(() => {
+  void viewportTick.value
+  return clampWidth(preferredWidth.value)
+})
+
+function persistWidth() {
+  localStorage.setItem(WIDTH_KEY, String(preferredWidth.value))
+}
+
+function onResizeMove(e) {
+  // 从右侧贴边往左拉：宽度 = 视口右缘 − 指针 x
+  preferredWidth.value = clampWidth(window.innerWidth - e.clientX)
+}
+function onResizeEnd() {
+  if (!resizing.value) return
+  resizing.value = false
+  document.body.style.cursor = ''
+  document.body.style.userSelect = ''
+  window.removeEventListener('pointermove', onResizeMove)
+  window.removeEventListener('pointerup', onResizeEnd)
+  window.removeEventListener('pointercancel', onResizeEnd)
+  persistWidth()
+}
+function onResizeStart(e) {
+  if (e.button != null && e.button !== 0) return
+  e.preventDefault()
+  resizing.value = true
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('pointermove', onResizeMove)
+  window.addEventListener('pointerup', onResizeEnd)
+  window.addEventListener('pointercancel', onResizeEnd)
+}
+
+function onWindowResize() {
+  viewportTick.value++
+}
+
+onMounted(() => window.addEventListener('resize', onWindowResize))
+onUnmounted(() => {
+  window.removeEventListener('resize', onWindowResize)
+  onResizeEnd()
+})
+
 function resolveProject(mainSid) {
   const s = sessStore.list.find((x) => x.session_id === mainSid)
   return (s && s.project_id) || null
 }
 
 // 由主视图 @open-aside 调用：确保当前主会话有侧边条目，显示并注入选中文本。
+// ChatView 为 defineAsyncComponent：刷新后首次打开时 nextTick 仍拿不到实例，
+// 故已挂载则立即注入，否则写入 pendingQuotes，等 setAsideRef 再消费。
 async function openAside(quote) {
   const mainSid = activeMainSid.value
   if (!mainSid) return // 欢迎页无主会话，无从划词，忽略
@@ -45,15 +135,15 @@ async function openAside(quote) {
     entry = { mainSid, projectId: resolveProject(mainSid), sessionId: null }
     entries.value.push(entry)
   }
+  if (!quote?.text) return
   await nextTick()
   const inst = asideRefs.get(mainSid)
-  if (inst && quote && quote.text) {
-    inst.injectQuote({
-      text: quote.text,
-      comment: quote.comment || '',
-      sourceMsgId: quote.sourceMsgId,
-      sourceRole: quote.sourceRole,
-    })
+  if (inst) {
+    applyQuote(inst, quote)
+  } else {
+    const queue = pendingQuotes.get(mainSid) || []
+    queue.push(quote)
+    pendingQuotes.set(mainSid, queue)
   }
 }
 
@@ -67,13 +157,27 @@ function closeActive() {
   const mainSid = activeMainSid.value
   entries.value = entries.value.filter((e) => e.mainSid !== mainSid)
   asideRefs.delete(mainSid)
+  pendingQuotes.delete(mainSid)
 }
 
 defineExpose({ openAside })
 </script>
 
 <template>
-  <div class="aside-drawer" :class="{ open: visible }" aria-label="侧边会话">
+  <div
+    class="aside-drawer"
+    :class="{ open: visible, resizing }"
+    :style="{ width: drawerWidth + 'px' }"
+    aria-label="侧边会话"
+  >
+    <div
+      class="aside-resize"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="拖动调整侧边会话宽度"
+      title="拖动调整宽度"
+      @pointerdown="onResizeStart"
+    />
     <div class="aside-head">
       <span class="aside-title"><i class="ti ti-messages"></i> 侧边会话</span>
       <button
@@ -107,7 +211,8 @@ defineExpose({ openAside })
   top: 0;
   right: 0;
   height: 100vh;
-  width: min(460px, 92vw);
+  width: 460px;
+  max-width: 92vw;
   background: var(--surface, var(--bg));
   border-left: 1px solid var(--bd);
   box-shadow: var(--shadow-2);
@@ -120,6 +225,34 @@ defineExpose({ openAside })
 }
 .aside-drawer.open {
   transform: translateX(0);
+}
+.aside-drawer.resizing {
+  transition: none;
+  user-select: none;
+}
+.aside-resize {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+.aside-resize::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+.aside-resize:hover::after,
+.aside-drawer.resizing .aside-resize::after {
+  background: var(--acc);
 }
 .aside-head {
   flex: 0 0 auto;
