@@ -265,37 +265,65 @@ async def web_fetch_result(
     timeout_cfg = httpx.Timeout(
         connect=_web.connect, read=read_timeout, write=read_timeout, pool=_web.pool)
 
-    async with httpx.AsyncClient(
-            timeout=timeout_cfg, follow_redirects=True, max_redirects=5,
-            headers={"User-Agent": UA}) as client:
-        async with client.stream("GET", fetch_url) as response:
-            final_url = str(response.url)
-            status = response.status_code
-            ctype_full = response.headers.get("content-type", "")
-            ctype = ctype_full.split(";")[0].strip().lower()
-            content_length = _parse_content_length(response.headers)
-            kind = _classify_content_type(ctype)
+    last_timeout: Exception | None = None
+    raw = b""
+    truncated_by_bytes = False
+    final_url = fetch_url
+    status = 0
+    ctype = ""
+    content_length = None
+    kind: str | None = "html"
+    encoding = None
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(
+                    timeout=timeout_cfg, follow_redirects=True, max_redirects=5,
+                    headers={"User-Agent": UA}) as client:
+                async with client.stream("GET", fetch_url) as response:
+                    final_url = str(response.url)
+                    status = response.status_code
+                    ctype_full = response.headers.get("content-type", "")
+                    ctype = ctype_full.split(";")[0].strip().lower()
+                    content_length = _parse_content_length(response.headers)
+                    kind = _classify_content_type(ctype)
 
-            if kind is None:
-                await response.aclose()
-                return FetchResult(
-                    url=original_url, final_url=final_url, status_code=status,
-                    content_type=ctype, body_kind="unsupported",
-                    text=f"[内容类型 {ctype or 'unknown'}，不下载正文]",
-                    truncated=False, reason=None, bytes_received=0,
-                    content_length=content_length, rewrite_note=rewrite_note)
+                    if kind is None:
+                        await response.aclose()
+                        return FetchResult(
+                            url=original_url, final_url=final_url,
+                            status_code=status,
+                            content_type=ctype, body_kind="unsupported",
+                            text=f"[内容类型 {ctype or 'unknown'}，不下载正文]",
+                            truncated=False, reason=None, bytes_received=0,
+                            content_length=content_length,
+                            rewrite_note=rewrite_note)
 
-            if content_length is not None and content_length > max_bytes:
-                await response.aclose()
+                    if content_length is not None and content_length > max_bytes:
+                        await response.aclose()
+                        raise FetchError(
+                            f"响应超过上限 {max_bytes} 字节"
+                            f"（Content-Length={content_length}）；"
+                            f"请改抓更小页面或 PDF/分段 URL")
+
+                    encoding = response.charset_encoding
+                    raw, truncated_by_bytes = await _read_capped(
+                        response, max_bytes)
+            break
+        except httpx.TimeoutException as exc:
+            last_timeout = exc
+            if attempt >= max_attempts:
                 raise FetchError(
-                    f"响应超过上限 {max_bytes} 字节（Content-Length={content_length}）；"
-                    f"请改抓更小页面或 PDF/分段 URL")
-
-            encoding = response.charset_encoding
-            try:
-                raw, truncated_by_bytes = await _read_capped(response, max_bytes)
-            except httpx.TimeoutException as exc:
-                raise FetchError(f"网页抓取超时（>{read_timeout}s）：{fetch_url}") from exc
+                    f"网页抓取超时（>{read_timeout}s，已重试 {max_attempts} 次）："
+                    f"{fetch_url}"
+                ) from exc
+            await asyncio.sleep(min(1.5 * attempt, 3.0))
+            continue
+    else:
+        if last_timeout is not None:
+            raise FetchError(
+                f"网页抓取超时（>{read_timeout}s）：{fetch_url}"
+            ) from last_timeout
 
     bytes_received = len(raw)
     truncated = truncated_by_bytes
@@ -332,7 +360,7 @@ async def web_fetch_result(
 
     return FetchResult(
         url=original_url, final_url=final_url, status_code=status,
-        content_type=ctype, body_kind=kind, text=text,
+        content_type=ctype, body_kind=kind or "text", text=text,
         truncated=truncated, reason=reason, bytes_received=bytes_received,
         content_length=content_length, rewrite_note=rewrite_note)
 

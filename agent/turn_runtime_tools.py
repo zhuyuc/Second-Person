@@ -19,13 +19,26 @@ _VISUAL_TOOLS = frozenset({
 
 
 class TurnToolRunner:
-    def __init__(self, *, registry, executor, events: TurnEventStore) -> None:
+    def __init__(self, *, registry, executor, events: TurnEventStore,
+                 gpu_mutex_enabled=None) -> None:
         self.registry = registry
         self.executor = executor
         self.events = events
+        self._gpu_mutex_enabled = gpu_mutex_enabled or (lambda: True)
         # turn_id -> 本轮已成功 generate_image / generate_video 次数
         self._image_gen_ok: dict[str, int] = {}
         self._video_gen_ok: dict[str, int] = {}
+        # turn_id -> 本轮用户落盘图片文件名（供图生视频）
+        self._turn_images: dict[str, list[str]] = {}
+
+    def set_turn_images(self, turn_id: str, names: list[str] | None) -> None:
+        if not turn_id:
+            return
+        cleaned = [str(n).strip() for n in (names or []) if str(n).strip()]
+        if cleaned:
+            self._turn_images[turn_id] = cleaned
+        else:
+            self._turn_images.pop(turn_id, None)
 
     async def run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict],
                              emit: Callable[[str, dict], Awaitable[None]],
@@ -85,13 +98,13 @@ class TurnToolRunner:
                     "本轮已成功生成一条视频；若要另一条请新开一轮再说"
                     "（当前策略一次一条）。",
                     emit, arguments=params)
-            if name == "generate_video" and prior_image_ok > 0:
+            if name == "generate_video" and prior_image_ok > 0 and self._gpu_mutex_enabled():
                 return await self.record_result(
                     turn_id, step, call_id, name, False,
                     "本轮已生成图片，请新开一轮再生成视频"
                     "（本地显存策略：同轮图/视频互斥）。",
                     emit, arguments=params)
-            if name == "generate_image" and prior_video_ok > 0:
+            if name == "generate_image" and prior_video_ok > 0 and self._gpu_mutex_enabled():
                 return await self.record_result(
                     turn_id, step, call_id, name, False,
                     "本轮已生成视频，请新开一轮再生成图片"
@@ -106,8 +119,10 @@ class TurnToolRunner:
                                             "arguments": args_preview})
             turn = self.events.get_turn(turn_id) or {}
             tool_started_at = time.perf_counter()
-            result = await self.executor.execute_tool(name, params, emit=emit,
-                                                      session_id=turn.get("session_id", ""))
+            result = await self.executor.execute_tool(
+                name, params, emit=emit,
+                session_id=turn.get("session_id", ""),
+                turn_image_names=self._turn_images.get(turn_id) or [])
             duration_ms = max(0, round((time.perf_counter() - tool_started_at) * 1000))
             if result.get("ok"):
                 if name == "generate_image":

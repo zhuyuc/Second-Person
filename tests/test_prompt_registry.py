@@ -20,8 +20,19 @@ from pathlib import Path
 ROOT = Path(__file__).parent.parent
 
 # 扫描范围：全部后端包（新增包自动纳入：凡含 __init__.py 的顶层目录）
-SCAN_DIRS = [d for d in ROOT.iterdir()
-             if d.is_dir() and (d / "__init__.py").exists()]
+# langfuse 顶层含 server/node_modules，只扫 integration 业务包
+SCAN_DIRS: list[Path] = []
+for _d in ROOT.iterdir():
+    if not (_d.is_dir() and (_d / "__init__.py").exists()):
+        continue
+    if _d.name == "langfuse":
+        SCAN_DIRS.append(_d / "integration")
+    else:
+        SCAN_DIRS.append(_d)
+_SKIP_DIR_PARTS = frozenset({
+    "node_modules", ".venv", "venv", "__pycache__", ".git",
+    "dist", "build", ".pnpm", "site-packages",
+})
 # prompts 目录约定位置（新增模块的 prompts/ 目录需在此登记）
 PROMPT_DIRS = ["agent/prompts", "app/prompts", "soul/prompts"]
 REGISTRY_DOC = ROOT / "docs" / "PROMPT_REGISTRY.md"
@@ -31,40 +42,47 @@ _PLACEHOLDER_RE = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}"
                              r"|([A-Za-z_][A-Za-z0-9_]*))")
 
 
+def _iter_scan_py():
+    for pkg in SCAN_DIRS:
+        if not pkg.is_dir():
+            continue
+        for py in pkg.rglob("*.py"):
+            if any(part in _SKIP_DIR_PARTS for part in py.parts):
+                continue
+            yield py
+
+
 def collect_code_refs() -> dict[str, list[tuple[str, str, set | None]]]:
     """AST 扫描全部 .py，收集 PROMPTS.load_raw/render 引用。
 
     返回 {prompt名: [(文件, 方法, kwargs集合或None表示**动态展开)]}。
     """
     refs: dict[str, list[tuple[str, str, set | None]]] = {}
-    for pkg in SCAN_DIRS:
-        for py in pkg.rglob("*.py"):
-            if "__pycache__" in py.parts:
+    for py in _iter_scan_py():
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("load_raw", "render")
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "PROMPTS"):
                 continue
-            try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
-            except SyntaxError:
-                continue
-            for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.attr in ("load_raw", "render")
-                        and isinstance(node.func.value, ast.Name)
-                        and node.func.value.id == "PROMPTS"):
-                    continue
-                if not (node.args and isinstance(node.args[0], ast.Constant)
-                        and isinstance(node.args[0].value, str)):
-                    raise AssertionError(
-                        f"{py.relative_to(ROOT)}: PROMPTS.{node.func.attr} 的 "
-                        f"prompt 名必须是字符串字面量（静态对账依赖此约定）")
-                kwargs: set | None = set()
-                for kw in node.keywords:
-                    if kw.arg is None:  # **展开，无法静态解析
-                        kwargs = None
-                        break
-                    kwargs.add(kw.arg)
-                refs.setdefault(node.args[0].value, []).append(
-                    (str(py.relative_to(ROOT)), node.func.attr, kwargs))
+            if not (node.args and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                raise AssertionError(
+                    f"{py.relative_to(ROOT)}: PROMPTS.{node.func.attr} 的 "
+                    f"prompt 名必须是字符串字面量（静态对账依赖此约定）")
+            kwargs: set | None = set()
+            for kw in node.keywords:
+                if kw.arg is None:  # **展开，无法静态解析
+                    kwargs = None
+                    break
+                kwargs.add(kw.arg)
+            refs.setdefault(node.args[0].value, []).append(
+                (str(py.relative_to(ROOT)), node.func.attr, kwargs))
     return refs
 
 
@@ -100,32 +118,29 @@ LLM_METHODS = ("chat", "stream", "stream_chat", "function_call")
 def collect_llm_call_sites() -> dict[str, set[str]]:
     """AST 扫描全部 .py，收集 LLM 调用点。返回 {文件::函数: {方法}}。"""
     sites: dict[str, set[str]] = {}
-    for pkg in SCAN_DIRS:
-        for py in pkg.rglob("*.py"):
-            if "__pycache__" in py.parts:
-                continue
-            try:
-                tree = ast.parse(py.read_text(encoding="utf-8"))
-            except SyntaxError:
-                continue
-            rel = str(py.relative_to(ROOT)).replace("\\", "/")
+    for py in _iter_scan_py():
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        rel = str(py.relative_to(ROOT)).replace("\\", "/")
 
-            def walk(node, func_stack):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    func_stack = func_stack + [node.name]
-                if (isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Attribute)
-                        and node.func.attr in LLM_METHODS):
-                    r = node.func.value
-                    if ((isinstance(r, ast.Name) and r.id == "llm")
-                            or (isinstance(r, ast.Attribute) and r.attr == "llm")):
-                        fn = func_stack[-1] if func_stack else "<module>"
-                        sites.setdefault(f"{rel}::{fn}", set()).add(
-                            node.func.attr)
-                for ch in ast.iter_child_nodes(node):
-                    walk(ch, func_stack)
+        def walk(node, func_stack):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                func_stack = func_stack + [node.name]
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in LLM_METHODS):
+                r = node.func.value
+                if ((isinstance(r, ast.Name) and r.id == "llm")
+                        or (isinstance(r, ast.Attribute) and r.attr == "llm")):
+                    fn = func_stack[-1] if func_stack else "<module>"
+                    sites.setdefault(f"{rel}::{fn}", set()).add(
+                        node.func.attr)
+            for ch in ast.iter_child_nodes(node):
+                walk(ch, func_stack)
 
-            walk(tree, [])
+        walk(tree, [])
     return sites
 
 

@@ -64,7 +64,7 @@ def _engine(threshold_ratio=0.8, retain_ratio=0.2):
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------- threshold
@@ -255,3 +255,22 @@ def test_protected_message_is_never_shadowed():
     assert result is not None
     assert 2 not in result.shadowed_message_ids
     assert sessions.saved[0]["last"] == 1
+
+
+def test_recall_context_injected_into_summary_and_prompt():
+    """working_set recall 必须进入压缩 prompt，并机械追加到摘要末尾。"""
+    engine, llm, sessions, _ = _engine()
+    pairs = [_msg("user", "old " * 400, 1),
+             _msg("assistant", "reply " * 400, 2),
+             _msg("user", "new " * 400, 3)]
+    msgs, ids = _split(pairs)
+    recall = "[文件工作集]\n- edit `/demo.html` (v=1)"
+    result = _run(engine.compact_if_needed(
+        session_id="s", snap=_Snap(context_window=200), messages=msgs,
+        system="sys", tools=None, message_ids=ids, recall_context=recall))
+    assert result is not None
+    assert llm.calls, "应调用摘要模型"
+    prompt = llm.calls[0]["prompt"]
+    assert any(recall in (m.get("content") or "") for m in prompt)
+    assert "## 可召回定位" in sessions.saved[0]["body"]
+    assert "/demo.html" in sessions.saved[0]["body"]

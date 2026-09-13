@@ -7,6 +7,7 @@ into ``app.routes``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
@@ -24,12 +25,15 @@ class ContractValidationError(ValueError):
 async def read_json_object(request: Request) -> dict[str, Any]:
     """Read one JSON object and preserve the application's 400 error contract.
 
-    请求体大小上限：防止超大 JSON 拖垮内存。chat/send 的图片走 multipart
-    上传（有独立大小限制），JSON 体本身不应超过 2MB。
+    请求体大小上限：防止超大 JSON 拖垮内存。chat/send 的图片若以 base64 塞进 JSON，
+    很容易触达此上限；文档附件应走独立上传接口。
     """
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > 2_000_000:
-        raise HTTPException(status_code=413, detail="请求体过大")
+        raise HTTPException(
+            status_code=413,
+            detail="图片或内容过大（单次上限约 2MB），请压缩图片、少传几张后再试",
+        )
     try:
         body = await request.json()
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -106,6 +110,9 @@ class ChatSendRequest(BaseModel):
     # 编辑时需保留的原图文件名（basename）。仅在 attachments_overridden 时生效：
     # 后端从同 version_group 里筛选命中项加载回来，再拼接前端新上传的 images。
     keep_image_names: list[str] | None = None
+    # 已落盘的 chat_images 文件名（与 keep_image_names 同类）；服务端读盘转 dataURI，
+    # 避免前端把大图再塞进 JSON（工坊代写 / 复用历史图）。
+    image_names: list[str] | None = None
     location: str | None = None
     handoff_path: str | None = None
     reasoning_effort: str | None = None
@@ -161,6 +168,35 @@ class ChatSendRequest(BaseModel):
             raise ValueError("attachment_ids must be a list of at most 5 strings")
         return value
 
+    @field_validator("keep_image_names", mode="before")
+    @classmethod
+    def _validate_keep_image_names(cls, value: Any) -> list[str] | None:
+        if value in (None, []):
+            return None
+        if (not isinstance(value, list) or len(value) > 6
+                or not all(isinstance(item, str) for item in value)):
+            raise ValueError("keep_image_names must be a list of at most 6 strings")
+        return value
+
+    @field_validator("image_names", mode="before")
+    @classmethod
+    def _validate_image_names(cls, value: Any) -> list[str] | None:
+        if value in (None, []):
+            return None
+        if (not isinstance(value, list) or len(value) > 6
+                or not all(isinstance(item, str) for item in value)):
+            raise ValueError("image_names must be a list of at most 6 strings")
+        cleaned: list[str] = []
+        for item in value:
+            raw = str(item).strip().replace("\\", "/")
+            if not raw or ".." in raw or "/" in raw:
+                continue
+            name = Path(raw).name
+            if not name or name != raw:
+                continue
+            cleaned.append(name)
+        return cleaned or None
+
     @field_validator("regenerate_message_id", mode="before")
     @classmethod
     def _validate_regenerate_message_id(cls, value: Any) -> int | None:
@@ -178,15 +214,6 @@ class ChatSendRequest(BaseModel):
             return False
         if not isinstance(value, bool):
             raise ValueError("attachments_overridden must be a boolean")
-        return value
-
-    @field_validator("keep_image_names", mode="before")
-    @classmethod
-    def _validate_keep_image_names(cls, value: Any) -> list[str] | None:
-        if value in (None, []):
-            return None
-        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-            raise ValueError("keep_image_names must be a list of strings")
         return value
 
     @field_validator("location", mode="before")

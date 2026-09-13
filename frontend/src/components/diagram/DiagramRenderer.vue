@@ -70,7 +70,7 @@ const videoFilename = computed(() => {
 
 const imageCaption = computed(() => {
   const d = props.data || {}
-  return d.summary || (d.latency_ms != null ? `本地生成 · ${Math.round(d.latency_ms / 1000)}s` : '')
+  return d.summary || (d.latency_ms != null ? `已生成 · ${Math.round(d.latency_ms / 1000)}s` : '')
 })
 
 const videoCaption = computed(() => {
@@ -79,8 +79,35 @@ const videoCaption = computed(() => {
   const parts = []
   if (d.duration_sec != null) parts.push(`约 ${d.duration_sec}s`)
   if (d.latency_ms != null) parts.push(`耗时 ${Math.round(d.latency_ms / 1000)}s`)
-  return parts.length ? `本地短视频 · ${parts.join(' · ')}` : ''
+  return parts.length ? `短视频 · ${parts.join(' · ')}` : ''
 })
+
+function guessMime(filename) {
+  const lower = String(filename || '').toLowerCase()
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.gif')) return 'image/gif'
+  if (lower.endsWith('.mp4')) return 'video/mp4'
+  if (lower.endsWith('.webm')) return 'video/webm'
+  return 'application/octet-stream'
+}
+
+async function saveBlobWithPicker(blob, filename) {
+  if (typeof window.showSaveFilePicker !== 'function') return false
+  const mime = blob.type || guessMime(filename)
+  const handle = await window.showSaveFilePicker({
+    suggestedName: filename,
+    types: [{
+      description: '文件',
+      accept: { [mime]: [`.${String(filename).split('.').pop() || 'bin'}`] },
+    }],
+  })
+  const writable = await handle.createWritable()
+  await writable.write(blob)
+  await writable.close()
+  return true
+}
 
 async function downloadBlob(src, filename, successMsg) {
   if (!src || downloading.value) return
@@ -89,15 +116,30 @@ async function downloadBlob(src, filename, successMsg) {
     const resp = await fetch(src)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const blob = await resp.blob()
+    try {
+      const saved = await saveBlobWithPicker(blob, filename)
+      if (saved) {
+        toast.push('success', successMsg)
+        return
+      }
+    } catch (e) {
+      // 用户取消保存对话框：不提示成功也不报错
+      if (e?.name === 'AbortError') return
+      // 选择器不可用/被拒 → 走传统下载
+    }
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = filename
+    a.rel = 'noopener'
+    document.body.appendChild(a)
     a.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-    toast.push('success', successMsg)
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 30_000)
+    // a.click 只能触发浏览器下载，无法确认落盘完成
+    toast.push('success', '已开始下载')
   } catch {
-    toast.push('error', '下载失败')
+    toast.push('error', '下载失败，请稍后重试或检查浏览器下载权限')
   } finally {
     downloading.value = false
   }

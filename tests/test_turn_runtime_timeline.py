@@ -81,7 +81,7 @@ class _TwoStepLLM:
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ------------------------------------------------------------ core shape ----

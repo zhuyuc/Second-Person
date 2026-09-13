@@ -50,6 +50,7 @@ function prefetchRoutes() {
   const load = () => {
     import('./views/MemoryView.vue')
     import('./views/SettingsView.vue')
+    import('./views/VideoWorkshopView.vue')
   }
   if (typeof window.requestIdleCallback === 'function') {
     window.requestIdleCallback(load, { timeout: 3000 })

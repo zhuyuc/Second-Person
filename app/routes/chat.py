@@ -206,10 +206,18 @@ async def chat_send(request: Request):
     edit_message_id = payload.edit_message_id
     attachments_overridden = payload.attachments_overridden
     keep_image_names = payload.keep_image_names
+    image_names = payload.image_names
     location = payload.location
     handoff_path = payload.handoff_path
     reasoning_effort = payload.reasoning_effort
     c = _c()
+    # 已落盘图片：服务端读盘转 dataURI（与编辑消息 keep_image_names 同源）
+    if image_names:
+        loaded = await asyncio.to_thread(
+            _load_images_as_data_uri, c.sessions.data_dir, image_names)
+        if loaded:
+            images = list(loaded) + list(images or [])
+        images = images or None
     if attachment_ids:
         try:
             attachment_context = c.attachments.context_for(
@@ -354,7 +362,7 @@ async def chat_send(request: Request):
     row = c.db.query_one(
         "SELECT message_count, channel FROM sessions WHERE session_id=?", (sid,))
     is_first = row and row["message_count"] == 0
-    if is_first and row["channel"] != "aside":
+    if is_first and row["channel"] not in ("aside", "workshop"):
         from infrastructure.background_tasks import track_task
         track_task(c.chat_svc.generate_title(sid, message),
                    name=f"generate_title:{sid}")
@@ -481,21 +489,42 @@ async def version_siblings(version_group_id: int):
 @router.post("/chat/cancel")
 async def chat_cancel(body: ChatCancelRequest):
     """用户手动停止生成：取消后台生成任务（已产出部分由中断补救落库）。
-    除此接口外，任何连接层动作（刷新/断网/关页）都不中断生成。"""
+    除此接口外，任何连接层动作（刷新/断网/关页）都不中断生成。
+    取消会扇出到该会话全部远端媒体任务（对话/工坊共用 session 时一并停止）。
+    """
     async with _buffers_lock():
         buf = _BUFFERS.get(body.client_request_id or "")
         task = buf.get("task") if buf else None
         sid = buf.get("sid") if buf else None
+    cancelled_ports = {"media": False, "turn": False}
     if sid:
         try:
-            from infrastructure.image_gen import interrupt_session
-            await interrupt_session(sid)
+            from infrastructure.remote_jobs import cancel_session, get_store
+            result = await cancel_session(sid, store=get_store())
+            cancelled_ports["media"] = bool(
+                result.get("live") or result.get("interrupted") or result.get("db"))
         except Exception:  # noqa: BLE001
-            pass
+            try:
+                from infrastructure.image_gen import interrupt_session
+                cancelled_ports["media"] = bool(await interrupt_session(sid))
+            except Exception:  # noqa: BLE001
+                pass
+        # 通知 SSE 读者：任务已停止（所有端口可见）
+        if buf is not None:
+            try:
+                _buffer_event(buf, "media_cancelled", {
+                    "session_id": sid,
+                    "message": "已停止生成",
+                })
+            except Exception:  # noqa: BLE001
+                pass
     if task and not task.done():
         task.cancel()
-        return {"code": 200, "data": {"cancelled": True}}
-    return {"code": 200, "data": {"cancelled": False}}
+        cancelled_ports["turn"] = True
+        return {"code": 200, "data": {
+            "cancelled": True, "ports": cancelled_ports}}
+    return {"code": 200, "data": {
+        "cancelled": cancelled_ports["media"], "ports": cancelled_ports}}
 
 
 @router.get("/chat/session/{session_id}/active-request")

@@ -25,6 +25,10 @@ class VideoGenRequest:
     style_hint: str = ""
     model_id: str = ""
     seed: int | None = None
+    # 云端可灵等：720p / 480p；本地适配器可忽略
+    resolution: str = "720p"
+    # 图生视频：本地 chat_images 文件名；适配器负责读盘编码
+    image_filename: str | None = None
 
     @property
     def num_frames(self) -> int:

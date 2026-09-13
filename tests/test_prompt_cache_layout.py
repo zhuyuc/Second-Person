@@ -38,6 +38,8 @@ def test_model_messages_projects_volatile_context_tail(tmp_path: Path):
         ("context.project", "[项目] demo"),
         ("context.project_instructions", "[项目说明书] baseline"),
         ("context.project_instructions_changes", "[项目说明书变更] delta"),
+        ("context.working_set", "[文件工作集]\n- read `/a.py` (v=1)"),
+        ("context.file_cards", "[文件工作痕迹]\n- edit `/a.py` (v=2)"),
     ):
         store.append(turn_id, event_type, actor="host", model_visible=True,
                      payload={"content": text})
@@ -51,6 +53,8 @@ def test_model_messages_projects_volatile_context_tail(tmp_path: Path):
     assert "[项目] demo" in contents
     assert "[项目说明书] baseline" in contents
     assert "[项目说明书变更] delta" in contents
+    assert any("[文件工作集]" in c for c in contents)
+    assert any("[文件工作痕迹]" in c for c in contents)
 
 
 def test_system_prompt_keeps_mood_rules_only(tmp_path: Path):
@@ -61,7 +65,7 @@ def test_system_prompt_keeps_mood_rules_only(tmp_path: Path):
         def build_rules(self):
             return "【情绪表达规则】稳定规则正文"
 
-        def build_state_context(self):
+        def build_state_context(self, user_message=None):
             return "[当前情绪状态] 本轮可变状态"
 
     class _Soul:

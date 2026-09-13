@@ -88,13 +88,36 @@ def test_chat_request_edit_attachment_override_fields():
         parse_chat_send({"message": "测试", "attachments_overridden": "yes"})
 
 
+def test_chat_request_image_names_field():
+    """已落盘图片：image_names 仅接受 basename，最多 6 个。"""
+    assert parse_chat_send({"message": "测试"}).image_names is None
+    req = parse_chat_send({
+        "message": "测试",
+        "image_names": ["wsref_abc.png", "img_xyz.jpg"],
+    })
+    assert req.image_names == ["wsref_abc.png", "img_xyz.jpg"]
+    # 路径穿越被丢弃
+    cleaned = parse_chat_send({
+        "message": "测试",
+        "image_names": ["../etc/passwd", "ok.png", "a/b.png"],
+    })
+    assert cleaned.image_names == ["ok.png"]
+    with pytest.raises(ContractValidationError, match="image_names"):
+        parse_chat_send({"message": "测试", "image_names": [1]})
+    with pytest.raises(ContractValidationError, match="image_names"):
+        parse_chat_send({
+            "message": "测试",
+            "image_names": [f"a{i}.png" for i in range(7)],
+        })
+
+
 def test_chat_sse_events_are_registered_and_have_terminal_semantics():
     expected = {
         "queued", "error", "reasoning_delta", "decision_notice", "tool_executing",
         "tool_visual", "content_delta", "content_reset", "citations",
         "handoff_ready", "mood_updated", "turn_completed",
         "turn_started", "step_started", "step_progress",
-        "tool_result", "step_metrics", "memory_progress",
+        "tool_result", "step_metrics", "memory_progress", "context_compacted",
     }
     assert expected == set(SSE_EVENT_SPECS)
     assert SSE_TERMINAL_EVENTS == {"turn_completed", "error"}
@@ -121,11 +144,14 @@ def test_agent_event_literals_do_not_bypass_sse_registry():
     patterns = [
         ROOT / "agent/core.py",
         ROOT / "agent/tool_executor.py",
+        ROOT / "agent/turn_runtime.py",
+        ROOT / "agent/turn_runtime_tools.py",
     ]
     literals: set[str] = set()
     for path in patterns:
         source = path.read_text(encoding="utf-8")
-        literals.update(re.findall(r'(?:emit|yield)\(\s*["\']([a-z_]+)["\']', source))
+        literals.update(re.findall(
+            r'(?:emit|yield|runtime_emit)\(\s*["\']([a-z_]+)["\']', source))
     assert literals <= set(SSE_EVENT_SPECS), sorted(literals - set(SSE_EVENT_SPECS))
 
 

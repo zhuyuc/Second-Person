@@ -114,3 +114,27 @@ def test_price_change_does_not_rewrite_history(db: Database):
     row = db.query_one(
         "SELECT cost FROM token_usage WHERE model_name='model-a'")
     assert row["cost"] == pytest.approx(2.0)
+
+
+def test_recorder_image_and_second_usage(db: Database):
+    recorder = TokenRecorder(db)
+    recorder.record("kling-v3-turbo", "video_gen", 0, 0, "sess_1",
+                    output_price=0.4, usage_kind="second", quantity=5)
+    recorder.record("dall-e-3", "image_gen", 0, 0, "sess_1",
+                    output_price=0.2, usage_kind="image", quantity=1)
+    db.execute("UPDATE token_usage SET trace_id=trace_id WHERE 0")
+
+    video = db.query_one(
+        "SELECT cost, usage_kind, quantity, input_tokens FROM token_usage "
+        "WHERE source='video_gen'")
+    assert video["usage_kind"] == "second"
+    assert video["quantity"] == 5
+    assert video["cost"] == pytest.approx(2.0)
+    assert video["input_tokens"] == 0
+
+    image = db.query_one(
+        "SELECT cost, usage_kind, quantity FROM token_usage "
+        "WHERE source='image_gen'")
+    assert image["usage_kind"] == "image"
+    assert image["quantity"] == 1
+    assert image["cost"] == pytest.approx(0.2)

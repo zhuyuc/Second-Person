@@ -21,6 +21,7 @@ import logging
 from dataclasses import dataclass
 
 from .llm_provider import ProviderSnapshot
+from .provider_modality import infer_modality, normalize_modality, slot_modality, validate_combo
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.provider_registry")
@@ -90,17 +91,15 @@ TASK_SLOTS: dict[str, TaskSlot] = {
     ),
     "image_gen": TaskSlot(
         key="image_gen",
-        label="文生图模型（本地 ComfyUI）",
-        desc="对话中本地生图。须配置类型 ComfyUI 的 Provider："
-             "base_url 如 http://127.0.0.1:8188，model_id 为 SDXL checkpoint 文件名。"
+        label="文生图模型",
+        desc="对话中出图。可绑云端图片模型（OpenAI 兼容）或本地 ComfyUI。"
              "无对话模型回退，避免误用识图/对话槽。",
     ),
     "video_gen": TaskSlot(
         key="video_gen",
-        label="文生视频模型（本地 ComfyUI）",
-        desc="对话中本地生视频。须配置类型 ComfyUI 的 Provider："
-             "base_url 如 http://127.0.0.1:8188，model_id 为 Wan 2.1 T2V 权重文件名。"
-             "无对话模型回退；可与文生图共用同一 ComfyUI 地址。",
+        label="文生视频模型",
+        desc="对话中出视频。可绑云端视频模型（如 kling-3.0-turbo）"
+             "或本地 ComfyUI + Wan。无对话模型回退。",
     ),
 
 }
@@ -133,15 +132,18 @@ class ProviderRegistry:
     def add_provider(self, pid: str, display_name: str, provider_type: str,
                      base_url: str, model_id: str, api_key: str,
                      input_price: float | None, output_price: float | None,
-                     context_window: int) -> str:
+                     context_window: int, modality: str | None = None) -> str:
+        modality = normalize_modality(
+            modality or infer_modality(provider_type, model_id))
+        validate_combo(modality, provider_type)
         cred_id = self.creds.store(f"provider:{pid}", "connector", api_key)
         self.db.execute(
             "INSERT INTO providers(id,display_name,provider_type,base_url,model_id,"
-            "credential_id,input_price,output_price,context_window,status,created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,'healthy',?)",
+            "credential_id,input_price,output_price,context_window,status,created_at,"
+            "modality) VALUES(?,?,?,?,?,?,?,?,?,'healthy',?,?)",
             (pid, display_name, provider_type, base_url, model_id, cred_id,
              input_price, output_price, context_window,
-             now_cst().isoformat(timespec="seconds")))
+             now_cst().isoformat(timespec="seconds"), modality))
         return pid
 
     def update_provider(self, pid: str, fields: dict, api_key: str | None = None) -> None:
@@ -152,8 +154,18 @@ class ProviderRegistry:
         if api_key:
             self.creds.update(row["credential_id"], api_key)
         allowed = {"display_name", "provider_type", "base_url", "model_id",
-                   "input_price", "output_price", "context_window", "status"}
+                   "input_price", "output_price", "context_window", "status",
+                   "modality"}
         sets = {k: v for k, v in fields.items() if k in allowed}
+        if "modality" in sets:
+            sets["modality"] = normalize_modality(sets["modality"])
+        if "provider_type" in sets or "modality" in sets:
+            cur = self.db.query_one(
+                "SELECT provider_type, modality FROM providers WHERE id=?", (pid,))
+            ptype = sets.get("provider_type") or (cur["provider_type"] if cur else "")
+            modality = sets.get("modality") or (
+                cur["modality"] if cur else infer_modality(ptype, ""))
+            validate_combo(modality, ptype)
         if sets:
             clause = ", ".join(f"{k}=?" for k in sets)
             self.db.execute(f"UPDATE providers SET {clause} WHERE id=?",
@@ -186,6 +198,9 @@ class ProviderRegistry:
             input_price=row["input_price"],   # 未配置保留 None，费用不计入
             output_price=row["output_price"],
             context_window=row["context_window"] or 128000,
+            modality=normalize_modality(
+                row["modality"] if "modality" in row.keys() else None,
+                infer_modality(row["provider_type"], row["model_id"])),
             **facts)
 
     def capability_snapshot(self, task_type: str = "chat") -> dict:
@@ -210,6 +225,15 @@ class ProviderRegistry:
         return row["provider_id"] if row else None
 
     def set_assignment(self, task_type: str, provider_id: str) -> None:
+        snap = self.snapshot(provider_id)
+        if snap is None:
+            raise KeyError(provider_id)
+        expected = slot_modality(task_type)
+        actual = normalize_modality(snap.modality, infer_modality(
+            snap.provider_type, snap.model_id))
+        if actual != expected:
+            raise ValueError(
+                f"槽位 {task_type} 需要 {expected} 模态，当前模型是 {actual}")
         self.db.execute(
             "INSERT INTO model_assignment(task_type,provider_id,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(task_type) DO UPDATE SET provider_id=excluded.provider_id, "
@@ -333,6 +357,7 @@ def ensure_video_gen_assignment(registry: ProviderRegistry) -> list[str]:
             input_price=None,
             output_price=None,
             context_window=0,
+            modality="video",
         )
         registry.set_assignment("video_gen", pid)
         logger.warning(

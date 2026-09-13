@@ -99,9 +99,10 @@ class SessionStore:
         """
         where = []
         params: list = []
-        # 侧边会话（channel='aside'）永不进列表：内容隔离于主对话，用完即走。
-        # IM 渠道（feishu/telegram 等）仍需出现，故只排除 aside 一种。
-        where.append("(channel IS NULL OR channel != 'aside')")
+        # 侧边会话 / 工坊代写会话永不进列表：内容隔离于主对话。
+        # IM 渠道（feishu/telegram 等）仍需出现。
+        where.append(
+            "(channel IS NULL OR channel NOT IN ('aside', 'workshop'))")
         if not include_archived:
             where.append("archived=0")
         if project_id is None:
@@ -524,7 +525,9 @@ class SessionStore:
 
     def latest_active_session(self) -> str | None:
         row = self.db.query_one(
-            "SELECT session_id FROM sessions ORDER BY last_active DESC LIMIT 1")
+            "SELECT session_id FROM sessions "
+            "WHERE channel IS NULL OR channel NOT IN ('aside', 'workshop') "
+            "ORDER BY last_active DESC LIMIT 1")
         return row["session_id"] if row else None
 
     # ---- 提议—确认闭环：pending 提议读回/消费 -------------------------
@@ -878,7 +881,7 @@ class SessionStore:
             for r in self.db.query_all(
                 "SELECT session_id, title FROM sessions "
                 "WHERE title LIKE ? ESCAPE '\\' "
-                "AND (channel IS NULL OR channel != 'aside') "
+                "AND (channel IS NULL OR channel NOT IN ('aside', 'workshop')) "
                 "ORDER BY pinned DESC, last_active DESC LIMIT ?",
                 (like_pat, limit)):
                 title_hits[r["session_id"]] = _highlight_plain(r["title"], q)
@@ -907,7 +910,7 @@ class SessionStore:
                     JOIN sessions s ON s.session_id = c.session_id
                     WHERE conversations_fts MATCH ?
                       AND c.message_type = 'normal'
-                      AND (s.channel IS NULL OR s.channel != 'aside'){role_sql}
+                      AND (s.channel IS NULL OR s.channel NOT IN ('aside', 'workshop')){role_sql}
                     ORDER BY score
                     LIMIT ?
                     """,

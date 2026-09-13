@@ -27,10 +27,16 @@ trace: agent.turn
 │  ├─ span: memory.graph             （图扩展）
 │  └─ span: memory.refine            （精筛；内嵌 generation: llm.*）
 ├─ span: context.compact             （step≥2 时检查/执行压缩；可含 LLM）
-├─ span: agent.step                  （模型步骤，可多轮）
-│  └─ generation: llm.*              （本步模型调用）
-└─ span: tool_execute                （工具执行，按需；挂在当前活跃 observation 下）
+├─ span: agent.step                  （模型步骤，可多轮；覆盖本步 LLM + 本步工具）
+│  ├─ generation: llm.agent_step     （本步对话模型调用）
+│  └─ span: tool_execute             （本步工具；可含 llm.video_gen / llm.image_gen）
+└─ span: mood.judge                  （最终回复后异步续写；同 trace，排序在末尾是预期）
+   └─ generation: llm.mood_judge
 ```
+
+> 时间线说明：`mood.judge` 故意挂在最终 `agent.step` 之后（`phase=after_turn`），
+> 不是乱序。工具必须是对应 `agent.step` 的子节点；若看到 `tool_execute` 与 step 平级，属回归缺陷。
+
 
 `context.assemble` 的 `output.retrieval`（有记忆检索时）大致包含：
 
@@ -41,20 +47,23 @@ trace: agent.turn
 
 前端记忆检索进度与上述 `memory.*` span 阶段对齐，便于对照 UI 与 Langfuse。
 
-### 2. 回合旁路 / 后台（独立 trace）
+### 2. 同轮续写 vs 独立操作
 
-这些任务不在 `agent.turn` 内（或 turn 已结束），各自 `trace_start`，其内 LLM 才能挂上 generation：
+**同一轮用户消息（一次 `agent.turn`）只对应一条 Langfuse 记录。**  
+回合结束后的情绪判定等后台续写，通过 `attach_trace(langfuse_trace_id)` 挂到该 turn，只增加节点（如 `mood.judge`），**禁止**再开 `mood.after_turn` 之类的第二条 trace。
+
+下列属于**另一类操作**（不是同一次用户回合的处理树），各自独立 trace，并用 `sessionId` 归到同一会话下对照：
 
 | Trace 名 | 触发时机 | 说明 |
 |---|---|---|
-| `title_generation` | 首条消息后异步 | span `title_generation` + `llm.title_gen` |
-| `mood.after_turn` | 回合结束后异步 | span `mood.judge` + 情绪判定 LLM |
-| `handoff.summary` | 跨会话交接 | span `handoff.summary_generation` 等 |
-| `scheduler.{task_id}` | 定时/手动跑任务 | 回顾/Lint/画像/备份等整任务包一层 |
-| `ingest.file` | 文档/图片导入 | Distiller 提炼挂在此 trace 下 |
+| `title_generation` | 会话首条消息后异步 | 标题生成，与当轮 agent 树并列但不同操作 |
+| `handoff.summary` | 跨会话交接 | 摘要生成 |
+| `scheduler.{task_id}` | 定时/手动跑任务 | 回顾/Lint/画像/备份等 |
+| `ingest.file` | 文档/图片导入 | Distiller 提炼 |
 | `user_feedback` / `attachment_upload` | 反馈、附件 | 路由侧轻量 trace |
+| `workshop.render` | 视频工坊点「生成视频」 | 与聊天出片共用执行体；独立于对话 turn |
 
-> 机制提醒：`generation_start` / `span_start` 在没有活跃 `_active_trace` 时是 noop。后台 LLM 必须先 `trace_start`，否则会「调了模型但 Langfuse 空白」。
+> 机制提醒：`generation_start` / `span_start` 在没有活跃 `_active_trace` 时是 noop。同轮后台必须 `attach_trace`；其它后台操作才 `trace_start`，否则会「调了模型但 Langfuse 空白」。
 
 ## 启用方式
 

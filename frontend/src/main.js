@@ -11,6 +11,7 @@ const router = createRouter({
   routes: [
     { path: '/', redirect: '/chat' },
     { path: '/chat', component: () => import('./views/ChatView.vue') },
+    { path: '/workshop/:id?', name: 'workshop', component: () => import('./views/VideoWorkshopView.vue') },
     { path: '/memory', component: () => import('./views/MemoryView.vue') },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
   ],
@@ -34,11 +35,18 @@ function toast() {
 }
 
 function friendlyMessage(err) {
-  if (!err) return '未知错误'
+  if (!err) return '页面出现异常，请刷新后重试'
   const msg = err.message || String(err)
   // chunk 加载失败最常见：网络中断 / 部署更新导致老 hash 404
   if (/Loading chunk|Failed to fetch dynamically imported module|dynamically imported module/i.test(msg)) {
-    return '模块加载失败，请刷新页面'
+    return '页面资源加载失败，请刷新页面后再试'
+  }
+  if (/ResizeObserver|Script error\.?/i.test(msg)) {
+    return ''
+  }
+  // 避免把堆栈、英文异常原样丢给用户
+  if (/traceback|exception|typeerror|referenceerror|syntaxerror/i.test(msg) || msg.length > 80) {
+    return '页面出现异常，请刷新后重试'
   }
   return msg
 }
@@ -47,7 +55,9 @@ function notifyGlobalError(err, source) {
   const t = toast()
   if (!t) return
   try {
-    t.push('error', `[${source}] ${friendlyMessage(err)}`)
+    console.error(`[${source}]`, err)
+    const msg = friendlyMessage(err)
+    if (msg) t.push('error', msg)
   } catch {
     /* 忽略二次错误 */
   }
@@ -55,6 +65,7 @@ function notifyGlobalError(err, source) {
 
 // 全局错误邻界：所有未捕获错误统一入口，避免白屏 / 静默失败
 app.config.errorHandler = (err, _vm, info) => {
+  if (err && err.alreadyToasted) return
   console.error('[Vue Error]', err, info)
   notifyGlobalError(err, `Vue:${info}`)
 }
@@ -62,6 +73,10 @@ app.config.errorHandler = (err, _vm, info) => {
 // 浏览器级 Promise 拒绝 & 同步错误兜底
 // 覆盖场景：SSE 断线后未捕获的 fetch reject、动态 import chunk 加载失败等
 window.addEventListener('unhandledrejection', (event) => {
+  if (event.reason && event.reason.alreadyToasted) {
+    event.preventDefault()
+    return
+  }
   console.error('[Unhandled Rejection]', event.reason)
   notifyGlobalError(event.reason, 'Unhandled')
 })

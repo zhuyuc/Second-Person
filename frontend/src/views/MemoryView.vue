@@ -357,7 +357,7 @@ async function runLint() {
 }
 async function buildOutputStyle() {
   await soulApi.buildOutputStyle()
-  toast.push('success', '已触发提炼')
+  toast.push('success', '已开始提炼输出风格，稍后刷新查看结果')
   await loadProfile()
 }
 
@@ -384,9 +384,9 @@ async function saveOutputStyle() {
 async function buildProfile() {
   const r = await soulApi.buildProfile()
   if (r && r.ok) {
-    toast.push('success', '已触发提炼，稍后刷新查看')
+    toast.push('success', '已开始提炼用户画像，稍后刷新查看')
   } else {
-    toast.push('info', '暂无足够记忆可提炼，继续积累中')
+    toast.push('info', '暂无足够记忆可提炼画像，继续积累后再试')
   }
   await loadProfile()
 }
@@ -547,7 +547,7 @@ async function uploadDocs(fileList) {
             result = data
           } else if (event === 'error') {
             errored = true
-            toast.push('error', friendlyError(data.message, '导入失败'))
+            toast.push('error', friendlyError(data.message, '文档导入失败，请检查文件后重试'))
           }
         })
       } catch {

@@ -180,6 +180,7 @@ class ProviderSnapshot:
     input_price: float | None = None   # None = 未配置单价（费用不计入）
     output_price: float | None = None
     context_window: int = 128000
+    modality: str = "text"
     # Provider-neutral capability facts. Empty reasoning_efforts means the
     # adapter has no reliable catalog entry and preserves legacy pass-through.
     capabilities: frozenset[str] = frozenset({"chat", "stream"})
@@ -196,11 +197,21 @@ class TokenRecorder:
                input_price: float | None = None,
                output_price: float | None = None,
                cache_read_tokens: int = 0,
-               cache_write_tokens: int = 0) -> None:
+               cache_write_tokens: int = 0,
+               usage_kind: str = "token",
+               quantity: float | None = None) -> None:
         # 单价快照随用量落库：费用按用量发生时的单价冻结，后续调价不追溯；
         # 未配单价（双 None）时快照与金额留空，费用查询按当时单价兜底
+        kind = (usage_kind or "token").strip().lower() or "token"
         cost = None
-        if input_price is not None or output_price is not None:
+        if kind in ("image", "second"):
+            qty = float(quantity or 0)
+            unit = output_price if output_price is not None else input_price
+            if unit is not None:
+                cost = qty * float(unit or 0)
+            input_tokens = 0
+            output_tokens = 0
+        elif input_price is not None or output_price is not None:
             cost = input_tokens / 1_000_000 * (input_price or 0) + \
                 output_tokens / 1_000_000 * (output_price or 0)
         try:
@@ -209,11 +220,12 @@ class TokenRecorder:
             self.db.execute_nowait(
                 "INSERT INTO token_usage(model_name,source,session_id,input_tokens,"
                 "output_tokens,cache_read_tokens,cache_write_tokens,trace_id,create_time,"
-                "input_price,output_price,cost) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "input_price,output_price,cost,usage_kind,quantity) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (model_name, source, session_id, input_tokens, output_tokens,
                  cache_read_tokens, cache_write_tokens, get_trace_id(),
                  now_cst().isoformat(timespec="seconds"),
-                 input_price, output_price, cost))
+                 input_price, output_price, cost, kind, quantity))
         except Exception:  # noqa: BLE001
             logger.exception("token_usage 记录失败")
 

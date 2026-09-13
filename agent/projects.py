@@ -395,10 +395,14 @@ class ProjectStore:
                 deleted_msgs = cur.rowcount
                 for tbl in ("citation_events", "review_candidates",
                             "token_usage", "session_policy_events",
-                            "fs_observations", "platform_sessions"):
-                    conn.execute(
-                        f"DELETE FROM {tbl} WHERE session_id IN ({ph})",
-                        session_ids)
+                            "fs_observations", "session_file_cards",
+                            "session_working_set_state", "platform_sessions"):
+                    try:
+                        conn.execute(
+                            f"DELETE FROM {tbl} WHERE session_id IN ({ph})",
+                            session_ids)
+                    except Exception:  # noqa: BLE001
+                        pass
                 # memory_write_candidates 部分历史行 status 已 done → 保留（不阻塞删除）
                 conn.execute(
                     f"DELETE FROM memory_write_candidates WHERE session_id IN ({ph})",

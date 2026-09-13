@@ -31,7 +31,7 @@ def _dump(fake):
 
 def test_trace_input_is_redacted():
     tr, fake = _tracer()
-    trace = tr.trace_start("chat.turn", session_id="s1",
+    trace = tr.trace_start("agent.turn", session_id="s1",
                            input={"message": "帮我记 api_key: sk-abcd1234abcd1234"})
     trace.end(output="收到")
     dumped = _dump(fake)
@@ -41,9 +41,10 @@ def test_trace_input_is_redacted():
 
 def test_span_output_is_redacted():
     tr, fake = _tracer()
-    tr.trace_start("t", input="hello")
+    trace = tr.trace_start("t", input="hello")
     sp = tr.span_start("assemble", input={"user_content": "打给 13812345678"})
     sp.end(output={"answer": "已收到你的手机 13812345678"})
+    trace.end()
     dumped = _dump(fake)
     assert "13812345678" not in dumped
     assert "[REDACTED:cn_mobile]" in dumped
@@ -51,11 +52,12 @@ def test_span_output_is_redacted():
 
 def test_generation_output_is_redacted():
     tr, fake = _tracer()
-    tr.trace_start("t")
+    trace = tr.trace_start("t")
     gen = tr.generation_start("llm.foo", model="m",
                               input=[{"role": "user",
                                       "content": "邮箱 alice@example.com"}])
     gen.end(output="收到 alice@example.com")
+    trace.end()
     dumped = _dump(fake)
     assert "alice@example.com" not in dumped
     assert "[REDACTED:email]" in dumped
@@ -63,7 +65,8 @@ def test_generation_output_is_redacted():
 
 def test_plain_text_untouched():
     tr, fake = _tracer()
-    tr.trace_start("t", input="用户偏好直接沟通")
+    trace = tr.trace_start("t", input="用户偏好直接沟通")
+    trace.end()
     dumped = _dump(fake)
     assert "用户偏好直接沟通" in dumped
     assert "[REDACTED" not in dumped

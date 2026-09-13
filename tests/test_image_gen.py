@@ -10,6 +10,8 @@ from infrastructure.db import Database
 from infrastructure.image_gen import ComfyUIAdapter, ImageGenRequest, probe_comfyui
 from tools.base import ToolRegistry, ToolSpec
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 _GEN_RESULT = {
@@ -91,7 +93,8 @@ class _ImageLLM:
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    # 勿用 new_event_loop().run_until_complete：在 TestClient/anyio 之后会挂死
+    return asyncio.run(coro)
 
 
 def _build_runtime(db):
@@ -154,7 +157,7 @@ def test_comfyui_adapter_persist_with_mock_http(tmp_path: Path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     adapter = ComfyUIAdapter(
-        base_url="http://127.0.0.1:8188",
+        base_url="http://127.0.0.1:9",
         workflow_path=wf,
         data_dir=data_dir,
         timeout_sec=5,
@@ -300,3 +303,187 @@ def test_turn_blocks_second_generate_image(tmp_path: Path):
 def test_allowed_sizes():
     from infrastructure.image_gen import ALLOWED_SIZES
     assert ALLOWED_SIZES == ("1024x1024",)
+
+
+def test_image_factory_picks_cloud_adapter(tmp_path: Path):
+    from infrastructure.image_gen import OpenAIImageAdapter, get_image_adapter
+
+    class _Snap:
+        base_url = "https://api.openai.example"
+        api_key = "sk-test"
+        model_id = "dall-e-3"
+
+        def __init__(self, provider_type):
+            self.provider_type = provider_type
+
+    for ptype in ("openai_compatible", "anthropic", "custom"):
+        adapter = get_image_adapter(_Snap(ptype), _Config(), tmp_path)
+        assert isinstance(adapter, OpenAIImageAdapter)
+
+
+def test_openai_image_adapter_download(tmp_path: Path, monkeypatch):
+    import infrastructure.image_gen.cloud_adapter as mod
+    from infrastructure.image_gen import OpenAIImageAdapter, ImageGenRequest
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    adapter = OpenAIImageAdapter(
+        base_url="https://api.openai.example",
+        api_key="sk-test",
+        data_dir=data_dir,
+        model_id="dall-e-3",
+    )
+
+    class _Resp:
+        def __init__(self, status_code=200, payload=None, content=b""):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = content
+            self.text = json.dumps(payload or {})
+            self.headers = {"content-length": str(len(content or b""))}
+
+        def json(self):
+            return self._payload
+
+        async def aiter_bytes(self, chunk_size=65536):
+            data = self.content or b""
+            for i in range(0, len(data), chunk_size):
+                yield data[i:i + chunk_size]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            assert url.endswith("/images/generations")
+            assert json["n"] == 1
+            return _Resp(200, {"data": [{"url": "https://cdn.example/cat.png"}]})
+
+        async def get(self, url, headers=None, timeout=None, params=None):
+            assert "cdn.example" in url
+            return _Resp(200, content=b"\x89PNG\r\n\x1a\nfake")
+
+        def stream(self, method, url, timeout=None):
+            assert method == "GET"
+            assert "cdn.example" in url
+            return _Resp(200, content=b"\x89PNG\r\n\x1a\nfake")
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    result = _run(adapter.generate(
+        ImageGenRequest(prompt="an orange cat"),
+        provider_id="p-img",
+        model_id="dall-e-3",
+    ))
+    path = data_dir / "chat_images" / result.filenames[0]
+    assert path.exists()
+    assert result.backend == "cloud"
+    assert result.n == 1
+
+
+def test_generate_image_skips_empty_retry():
+    """图/视频禁止空结果二次调用，避免云端双倍扣费。"""
+    from agent.tool_executor import ToolExecutor
+
+    calls = {"n": 0}
+
+    async def empty_fn(**_kw):
+        calls["n"] += 1
+        return {}
+
+    registry = ToolRegistry()
+    registry.register_function(ToolSpec(
+        "generate_image", "g",
+        {"type": "object", "properties": {"prompt": {"type": "string"}},
+         "required": ["prompt"]}, parallel_safe=False), empty_fn)
+
+    class _Cfg:
+        def get(self, k, default=None):
+            return default
+
+    out = _run(ToolExecutor(registry, _Cfg()).execute_tool(
+        "generate_image", {"prompt": "a"}))
+    assert calls["n"] == 1
+    assert out["ok"] is True
+
+
+def test_mcp_tool_skips_empty_retry_and_timeout_hints():
+    """MCP 副作用：空结果不重试；超时文案禁止自动重试。"""
+    from agent.tool_executor import ToolExecutor
+
+    calls = {"n": 0}
+
+    async def empty_fn(**_kw):
+        calls["n"] += 1
+        return {}
+
+    registry = ToolRegistry()
+    registry.register_function(ToolSpec(
+        "conn_x__do", "mcp tool",
+        {"type": "object", "properties": {}},
+        source="mcp", connector_id="conn_x", parallel_safe=False), empty_fn)
+
+    class _Cfg:
+        def get(self, k, default=None):
+            if k == "tool_timeout_seconds":
+                return 1
+            return default
+
+    out = _run(ToolExecutor(registry, _Cfg()).execute_tool("conn_x__do", {}))
+    assert calls["n"] == 1
+    assert out["ok"] is True
+
+    async def hang(**_kw):
+        import asyncio
+        await asyncio.sleep(5)
+
+    registry.register_function(ToolSpec(
+        "conn_x__hang", "mcp hang",
+        {"type": "object", "properties": {}},
+        source="mcp", connector_id="conn_x", parallel_safe=False), hang)
+    out2 = _run(ToolExecutor(registry, _Cfg()).execute_tool("conn_x__hang", {}))
+    assert out2["ok"] is False
+    assert "请勿自动重试" in (out2.get("error") or "")
+
+
+def test_openai_image_post_timeout_forbids_blind_retry(tmp_path: Path, monkeypatch):
+    import infrastructure.image_gen.cloud_adapter as mod
+    from infrastructure.image_gen import OpenAIImageAdapter, ImageGenRequest
+    import httpx
+
+    adapter = OpenAIImageAdapter(
+        base_url="https://api.openai.example",
+        api_key="sk-test",
+        data_dir=tmp_path,
+        model_id="dall-e-3",
+        timeout_sec=1,
+    )
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    with pytest.raises(RuntimeError) as ei:
+        _run(adapter.generate(ImageGenRequest(prompt="cat")))
+    assert "请勿立即" in str(ei.value) or "重复扣费" in str(ei.value)

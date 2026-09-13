@@ -146,18 +146,18 @@ def maybe_spill_result(
         tool_name: str = "",
         call_id: str = "",
         max_inline_bytes: int | None = None,
-        max_file_bytes: int | None = None) -> Any:
-    """超大纯文本结果落盘，返回预览+路径；失败则保留原文（尽力而为）。"""
+        max_file_bytes: int | None = None) -> tuple[Any, str | None]:
+    """超大纯文本结果落盘，返回 (预览或原文, spill_path|None)；失败则保留原文。"""
     if not isinstance(result, str) or not data_dir:
-        return result
+        return result, None
     if tool_name in _SPILL_SKIP_TOOLS:
-        return result
+        return result, None
     if max_inline_bytes is None or max_inline_bytes <= 0:
-        return result
+        return result, None
 
     raw = result.encode("utf-8")
     if len(raw) <= max_inline_bytes:
-        return result
+        return result, None
 
     from memory import _constants as _mem_const
     file_cap = max_file_bytes or int(_mem_const.TOOL_SPILL_MAX_FILE_BYTES)
@@ -167,17 +167,18 @@ def maybe_spill_result(
             tool_name=tool_name, call_id=call_id, max_file_bytes=file_cap)
     except OSError as exc:
         logger.warning("工具结果 spill 失败，保留内联：%s (%s)", tool_name, exc)
-        return result
+        return result, None
 
     omitted = max(0, len(raw) - max_inline_bytes)
+    spill_str = str(spill_path)
     notice = (
-        f"\n\n（已省略约 {omitted} 字节。完整结果：{spill_path}\n"
+        f"\n\n（已省略约 {omitted} 字节。完整结果：{spill_str}\n"
         f"请使用 fs_read 分页读取，或 fs_grep 检索该路径。）"
     )
     preview = _head_tail_preview(raw, max_inline_bytes, notice)
     if preview is None:
-        return result
-    return preview
+        return result, None
+    return preview, spill_str
 
 
 def _write_spill_file(

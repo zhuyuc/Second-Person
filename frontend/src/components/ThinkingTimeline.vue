@@ -1,6 +1,6 @@
 <script setup>
 // 思考时间线：对齐参考图布局（左侧状态图标 + 行内摘要/药丸/命令，仅「已思考」展开灰框）
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { fmtDuration } from '@/utils/format'
 import { formatMemoryStageBadge } from '@/utils/timelineSummary'
 import { confidenceLabel } from '@/utils/enumLabel'
@@ -69,6 +69,17 @@ function isExpandable(item) {
       item.elapsed_ms !== null ||
       (Array.isArray(item.hits) && item.hits.length)
     )
+  }
+  if (item.kind === 'tool_call') {
+    const name = (item.name || '').toLowerCase()
+    if (name === 'generate_video' || name === 'generate_image') {
+      return !!(
+        (Array.isArray(item.progress_log) && item.progress_log.length) ||
+        item.progress ||
+        item.result_preview ||
+        item.arguments
+      )
+    }
   }
   return false
 }
@@ -162,6 +173,19 @@ function truncate(s, n = 88) {
   return t.slice(0, n) + '…'
 }
 
+function progressStageLabel(stage) {
+  const map = {
+    prepare: '准备',
+    refining: '润色',
+    refined: '润色完成',
+    queued: '排队',
+    sampling: '采样',
+    saving: '保存',
+    done: '完成',
+  }
+  return map[stage] || stage || '进度'
+}
+
 function parseArgs(raw) {
   if (!raw) return null
   try {
@@ -228,20 +252,30 @@ function toolRow(item) {
   }
   if (name === 'generate_image') {
     return {
-      label: running ? '本地生成图片（可能需要十几秒）' : '生成图片',
-      preview: truncate(args.prompt, 72),
+      label: running
+        ? item.progress || '正在生成图片…'
+        : '生成图片',
+      preview: running && item.progress
+        ? truncate(args.prompt, 48)
+        : truncate(args.prompt, 72),
       running,
       ok,
       fail: item.status === 'fail',
+      progressLog: Array.isArray(item.progress_log) ? item.progress_log : [],
     }
   }
   if (name === 'generate_video') {
     return {
-      label: running ? '本地生成短视频（可能需要几分钟）' : '生成视频',
-      preview: truncate(args.prompt, 72),
+      label: running
+        ? item.progress || '正在生成视频…'
+        : '生成视频',
+      preview: running && item.progress
+        ? truncate(args.prompt, 48)
+        : truncate(args.prompt, 72),
       running,
       ok,
       fail: item.status === 'fail',
+      progressLog: Array.isArray(item.progress_log) ? item.progress_log : [],
     }
   }
 
@@ -263,6 +297,34 @@ function memoryBadge(item, idx) {
 function onRowClick(key, item) {
   if (isExpandable(item)) toggle(key)
 }
+
+/** 生图/生视频进行中自动展开，便于直接看到阶段过程 */
+watch(
+  () =>
+    rendered.value.map((it, idx) => ({
+      key: itemKey(it, idx),
+      kind: it.kind,
+      name: it.name,
+      status: it.status,
+      n: Array.isArray(it.progress_log) ? it.progress_log.length : 0,
+      progress: it.progress || '',
+    })),
+  (rows) => {
+    if (!props.live) return
+    const next = new Set(expanded.value)
+    let changed = false
+    for (const row of rows) {
+      if (row.kind !== 'tool_call' || row.status !== 'running') continue
+      const name = (row.name || '').toLowerCase()
+      if (name !== 'generate_video' && name !== 'generate_image') continue
+      if (!(row.n > 0 || row.progress) || next.has(row.key)) continue
+      next.add(row.key)
+      changed = true
+    }
+    if (changed) expanded.value = next
+  },
+  { deep: true },
+)
 
 /** 联网搜索 / 抓取网页的引用链接（历史消息可从 result_preview 回退解析） */
 function toolCitations(item) {
@@ -431,8 +493,14 @@ function toolCitations(item) {
       >
         <div
           class="tl-entry-row"
-          :class="{ 'is-toggle': getToolCites(item, idx).length }"
-          @click="getToolCites(item, idx).length && toggle(itemKey(item, idx))"
+          :class="{
+            'is-toggle':
+              getToolCites(item, idx).length || isExpandable(item),
+          }"
+          @click="
+            (getToolCites(item, idx).length || isExpandable(item)) &&
+              toggle(itemKey(item, idx))
+          "
         >
           <span
             class="tl-status"
@@ -476,13 +544,45 @@ function toolCitations(item) {
             >{{ truncate(item.result_preview, 64) }}</span
           >
           <span v-if="item.error" class="tl-inline-error">{{ truncate(item.error, 80) }}</span>
-          <span v-if="getToolCites(item, idx).length" class="tl-cites-toggle">
-            <span class="tl-cites-count">{{ getToolCites(item, idx).length }} 个来源</span>
+          <span
+            v-if="getToolCites(item, idx).length || isExpandable(item)"
+            class="tl-cites-toggle"
+          >
+            <span v-if="getToolCites(item, idx).length" class="tl-cites-count"
+              >{{ getToolCites(item, idx).length }} 个来源</span
+            >
             <i
               class="ti tl-cites-chevron"
               :class="isExpanded(itemKey(item, idx)) ? 'ti-chevron-down' : 'ti-chevron-right'"
             ></i>
           </span>
+        </div>
+        <div
+          v-if="isExpandable(item)"
+          v-show="isExpanded(itemKey(item, idx))"
+          class="tl-detail-sub"
+        >
+          <div v-if="parseArgs(item.arguments)?.prompt" class="tl-detail-text">
+            {{
+              (item.name || '').toLowerCase() === 'generate_video'
+                ? '镜头'
+                : '提示词'
+            }}：{{ parseArgs(item.arguments).prompt }}
+          </div>
+          <ul
+            v-if="getToolRow(item, idx).progressLog?.length"
+            class="tl-progress-log"
+          >
+            <li
+              v-for="(p, pi) in getToolRow(item, idx).progressLog"
+              :key="`${p.stage}-${pi}`"
+            >
+              <span class="tl-progress-stage">{{ progressStageLabel(p.stage) }}</span>
+              <span class="tl-progress-label">{{ p.label }}</span>
+            </li>
+          </ul>
+          <div v-else-if="item.progress" class="tl-detail-text">{{ item.progress }}</div>
+          <div v-if="item.result_preview" class="tl-detail-text">{{ item.result_preview }}</div>
         </div>
         <div
           v-if="getToolCites(item, idx).length"
@@ -658,6 +758,36 @@ function toolCitations(item) {
   line-height: 1.55;
   color: var(--muted);
   white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tl-progress-log {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tl-progress-log li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.tl-progress-stage {
+  flex: 0 0 auto;
+  min-width: 3.5em;
+  color: var(--sec, var(--fg));
+  font-weight: 500;
+}
+
+.tl-progress-label {
+  min-width: 0;
   word-break: break-word;
 }
 

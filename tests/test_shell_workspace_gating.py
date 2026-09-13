@@ -125,3 +125,21 @@ def test_shell_exec_denied_message_carries_mode(tmp_path: Path):
         ctx = _ws_ctx(shell_enabled=False, shell_cwd=None, mode=mode)
         result = asyncio.run(tool.run(cmd="echo x", _ws_ctx=ctx))
         assert mode in result["stderr"]
+
+
+def test_shell_exec_timeout_kills_and_forbids_blind_retry(tmp_path: Path):
+    """超时杀进程，并明确禁止盲目重试。"""
+    import sys
+    ws = tmp_path / "ws"
+    tool = _shell_tool(ws)
+    ctx = _ws_ctx(shell_enabled=True, shell_cwd=ws, mode="danger-full-access")
+    if sys.platform == "win32":
+        cmd = "python -c \"import time; time.sleep(30)\""
+    else:
+        cmd = "sleep 30"
+    result = asyncio.run(tool.run(cmd=cmd, timeout=1, _ws_ctx=ctx))
+    assert result["returncode"] == -1
+    assert result.get("aborted") is True
+    assert result.get("no_auto_retry") is True
+    assert "已终止进程" in result["stderr"]
+    assert "请勿盲目重试" in result["stderr"]

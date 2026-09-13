@@ -35,15 +35,18 @@ async def add_provider(request: Request):
     body = c.settings_svc.clean_provider_fields(await read_json_object(request))
     try:
         c.settings_svc.validate_provider_required(body)
+        return {"code": 200, "data": c.settings_svc.add_or_update_provider(body)}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"code": 200, "data": c.settings_svc.add_or_update_provider(body)}
 
 
 @router.put("/settings/providers/{pid}")
 async def edit_provider(pid: str, request: Request):
     body = _c().settings_svc.clean_provider_fields(await read_json_object(request))
-    _c().providers.update_provider(pid, body, body.get("api_key"))
+    try:
+        _c().providers.update_provider(pid, body, body.get("api_key"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"code": 200, "data": {}}
 
 
@@ -159,10 +162,13 @@ async def set_assignment(request: Request):
     from infrastructure.provider_registry import TASK_SLOTS
     body = await read_json_object(request)
     c = _c()
-    for slot in TASK_SLOTS.values():
-        key = f"{slot.key}_model"
-        if body.get(key):
-            c.providers.set_assignment(slot.key, body[key])
+    try:
+        for slot in TASK_SLOTS.values():
+            key = f"{slot.key}_model"
+            if body.get(key):
+                c.providers.set_assignment(slot.key, body[key])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"code": 200, "data": {}}
 
 
@@ -412,8 +418,10 @@ async def usage_month_cost():
     rows = c.db.query_all(
         "SELECT model_name, "
         "SUM(CASE WHEN cost IS NOT NULL THEN cost ELSE 0 END) frozen, "
-        "SUM(CASE WHEN cost IS NULL THEN input_tokens ELSE 0 END) i, "
-        "SUM(CASE WHEN cost IS NULL THEN output_tokens ELSE 0 END) o "
+        "SUM(CASE WHEN cost IS NULL AND COALESCE(usage_kind,'token')='token' "
+        "THEN input_tokens ELSE 0 END) i, "
+        "SUM(CASE WHEN cost IS NULL AND COALESCE(usage_kind,'token')='token' "
+        "THEN output_tokens ELSE 0 END) o "
         "FROM token_usage WHERE create_time >= ? GROUP BY model_name",
         (f"{since}",))
     prices = {p["model_id"]: p for p in c.providers.list_providers()}

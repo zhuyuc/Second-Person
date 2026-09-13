@@ -220,7 +220,20 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             proc.kill()
-            return {"returncode": -1, "stdout": "", "stderr": "命令超时"}
+            try:
+                await proc.wait()
+            except Exception:  # noqa: BLE001
+                pass
+            return {
+                "returncode": -1,
+                "stdout": "",
+                "stderr": (
+                    f"命令超时（>{timeout}s），已终止进程。"
+                    "请勿盲目重试同一命令"
+                ),
+                "aborted": True,
+                "no_auto_retry": True,
+            }
         return {"returncode": proc.returncode,
                 "stdout": out.decode("utf-8", errors="ignore"),
                 "stderr": err.decode("utf-8", errors="ignore")}
@@ -558,7 +571,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             "type": {"type": "string", "const": "flowchart"}},
          "required": ["nodes", "edges"]}), render_flowchart)
 
-    # ---- generate_image（本地 ComfyUI + SDXL；一次一张） ----
+    # ---- generate_image（ComfyUI / 云端；一次一张） ----
     async def generate_image(
         prompt: str,
         negative_prompt: str = "",
@@ -568,8 +581,9 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         **kwargs,
     ) -> dict:
         from infrastructure.image_gen import (
-            ALLOWED_SIZES, ComfyUIAdapter, ImageGenRequest)
+            ALLOWED_SIZES, ImageGenRequest, get_image_adapter)
         from infrastructure.json_repair import repair_json
+        from infrastructure.provider_modality import is_local_gpu
         from langfuse.integration import get_tracer, mark_preview
 
         prompt = (prompt or "").strip()
@@ -588,69 +602,23 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             clamped = True
 
         size_raw = (size or "1024x1024").lower().replace("*", "x")
-        if size_raw not in ALLOWED_SIZES:
-            size_raw = "1024x1024"
-
+        cloud_sizes = ALLOWED_SIZES + ("1024x1792", "1792x1024")
         if providers is None:
             raise RuntimeError("未配置文生图模型：ProviderRegistry 不可用")
         snap = providers.snapshot_for("image_gen")
         if snap is None:
             raise RuntimeError(
-                "未配置文生图模型：请在设置页为「文生图模型（本地 ComfyUI）」"
-                "指定 Provider（base_url 如 http://127.0.0.1:8188，"
-                "model_id 为 SDXL checkpoint 文件名）")
-        if (getattr(snap, "provider_type", "") or "").strip().lower() != "comfyui":
-            raise RuntimeError(
-                "文生图槽位须配置类型为 ComfyUI 的 Provider（V1 仅支持本地 ComfyUI）")
+                "未配置文生图模型：请在设置页为「文生图模型」绑定图片模态的 Provider")
+        local_gpu = is_local_gpu(snap)
+        if local_gpu:
+            if size_raw not in ALLOWED_SIZES:
+                size_raw = "1024x1024"
+        elif size_raw not in cloud_sizes:
+            size_raw = "1024x1024"
 
         # P0.5：中文/短句润色（失败则回退原 prompt）
         refined_neg = (negative_prompt or "").strip()
         final_prompt = prompt
-        refine_on = bool(config.get("image_gen_refine_enabled", True))
-        if refine_on and llm is not None:
-            refine_snap = providers.snapshot_for("retriever_refine") \
-                or providers.snapshot_for("agent") or snap
-            try:
-                sys_p = PROMPTS.load_raw("agent/prompts/image_prompt_refine")
-                user_p = prompt if not refined_neg else (
-                    f"描述：{prompt}\n负面词：{refined_neg}")
-                resp = await llm.chat(
-                    refine_snap,
-                    [{"role": "system", "content": sys_p},
-                     {"role": "user", "content": user_p}],
-                    source="image_prompt_refine")
-                data = repair_json(resp.get("content") or "")
-                if (data.get("prompt") or "").strip():
-                    final_prompt = data["prompt"].strip()
-                if (data.get("negative_prompt") or "").strip():
-                    refined_neg = data["negative_prompt"].strip()
-            except Exception:  # noqa: BLE001
-                logger.debug("image_prompt_refine 失败，回退原 prompt", exc_info=True)
-
-        wf = Path(config.get_raw(
-            "image_gen_comfyui_workflow",
-            "./workflows/sdxl_txt2img.json") or "./workflows/sdxl_txt2img.json")
-        if not wf.is_absolute():
-            wf = (data_dir.parent / wf).resolve()
-        adapter = ComfyUIAdapter(
-            base_url=(snap.base_url or "http://127.0.0.1:8188").rstrip("/"),
-            workflow_path=wf,
-            data_dir=data_dir,
-            timeout_sec=float(config.get("image_gen_timeout_sec", 180) or 180),
-            default_steps=int(config.get("image_gen_steps", 24) or 24),
-            default_size="1024x1024",
-            prompt_max_chars=int(
-                config.get("image_gen_prompt_max_chars", 1500) or 1500),
-        )
-        req = ImageGenRequest(
-            prompt=final_prompt,
-            negative_prompt=refined_neg,
-            size=size_raw,
-            steps=int(config.get("image_gen_steps", 24) or 24),
-            n=1,
-            style_hint=(style_hint or "").strip(),
-            model_id=snap.model_id or "",
-        )
 
         async def on_progress(stage: str, label: str):
             if emit is None:
@@ -665,14 +633,51 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             except Exception:  # noqa: BLE001
                 pass
 
+        await on_progress("prepare", "准备生图…" if not local_gpu else "准备本地生图…")
+        refine_on = bool(config.get("image_gen_refine_enabled", True)) and local_gpu
+        if refine_on and llm is not None:
+            refine_snap = providers.snapshot_for("retriever_refine") \
+                or providers.snapshot_for("agent") or snap
+            try:
+                await on_progress("refining", "正在润色提示词…")
+                sys_p = PROMPTS.load_raw("agent/prompts/image_prompt_refine")
+                user_p = prompt if not refined_neg else (
+                    f"描述：{prompt}\n负面词：{refined_neg}")
+                resp = await llm.chat(
+                    refine_snap,
+                    [{"role": "system", "content": sys_p},
+                     {"role": "user", "content": user_p}],
+                    source="image_prompt_refine")
+                data = repair_json(resp.get("content") or "")
+                if (data.get("prompt") or "").strip():
+                    final_prompt = data["prompt"].strip()
+                if (data.get("negative_prompt") or "").strip():
+                    refined_neg = data["negative_prompt"].strip()
+                await on_progress("refined", "提示词已就绪，准备提交本地引擎…")
+            except Exception:  # noqa: BLE001
+                logger.debug("image_prompt_refine 失败，回退原 prompt", exc_info=True)
+                await on_progress("refined", "润色跳过，使用原始提示词…")
+
+        adapter = get_image_adapter(snap, config, data_dir)
+        req = ImageGenRequest(
+            prompt=final_prompt,
+            negative_prompt=refined_neg,
+            size=size_raw,
+            steps=int(config.get("image_gen_steps", 24) or 24),
+            n=1,
+            style_hint=(style_hint or "").strip(),
+            model_id=snap.model_id or "",
+        )
+
         tracer = get_tracer()
         gen = tracer.generation_start(
             "llm.image_gen",
             model=snap.model_id or "sdxl-local",
-            input={"prompt": final_prompt[:500], "n": 1, "size": "1024x1024",
-                   "backend": "comfyui",
+            input={"prompt": final_prompt[:500], "n": 1, "size": size_raw,
+                   "backend": "comfyui" if local_gpu else "cloud",
                    "steps": int(config.get("image_gen_steps", 24) or 24)},
-            metadata={"source": "image_gen", "provider_id": snap.provider_id},
+            metadata={"source": "image_gen", "provider_id": snap.provider_id,
+                      "provider_type": getattr(snap, "provider_type", "")},
         )
         try:
             result = await adapter.generate(
@@ -681,13 +686,19 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             payload = result.to_dict()
             notes = []
             if clamped:
-                notes.append("当前本地模式一次只生成 1 张")
+                notes.append("当前一次只生成 1 张")
             if final_prompt != prompt:
                 notes.append("已自动润色英文 prompt")
             if notes:
                 payload["summary"] = (
                     (payload.get("summary") or "") + "（" + "；".join(notes) + "）"
                 ).strip()
+            rec = getattr(llm, "recorder", None) if llm is not None else None
+            if rec is not None and (snap.output_price is not None or snap.input_price is not None):
+                rec.record(
+                    snap.model_id or "", "image_gen", 0, 0, session_id or None,
+                    input_price=snap.input_price, output_price=snap.output_price,
+                    usage_kind="image", quantity=1)
             if gen is not None:
                 gen.end(output={
                     "n": payload.get("n"),
@@ -706,10 +717,12 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             msg = str(exc)
             low = msg.lower()
             if "未启动" in msg or "ConnectError" in type(exc).__name__ or "连接" in msg:
-                raise RuntimeError(
-                    "本地生图服务未启动：请先运行 image_gen/comfyui 下的 "
-                    "run_nvidia_gpu.bat，并确认 http://127.0.0.1:8188 可访问"
-                ) from exc
+                if local_gpu:
+                    raise RuntimeError(
+                        "本地生图服务未启动：请先运行 image_gen/comfyui 下的 "
+                        "run_nvidia_gpu.bat，并确认 http://127.0.0.1:8188 可访问"
+                    ) from exc
+                raise RuntimeError("云端生图服务连接失败，请检查地址与 API Key") from exc
             if "out of memory" in low or ("cuda" in low and "memory" in low) \
                     or "oom" in low:
                 raise RuntimeError(
@@ -719,8 +732,8 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
 
     registry.register_function(ToolSpec(
         "generate_image",
-        "用本地 ComfyUI + SDXL 生成一张图片。用户明确要求画/生成/绘/出图时调用。"
-        "一次只生成 1 张；同轮不要重复调用。prompt 可用中文（系统会润色成英文）。"
+        "按当前文生图模型生成一张图片。用户明确要求画/生成/绘/出图时调用。"
+        "一次只生成 1 张；同轮不要重复调用。prompt 可用中文。"
         "成功后气泡会展示图片，回复只需简短中文说明；不要伪造外链或输出 base64。"
         "用户若还要另一张，说明「当前一次一张，需要的话我可以再画一张」。",
         {"type": "object", "properties": {
@@ -729,7 +742,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             "negative_prompt": {"type": "string",
                                 "description": "负面提示词（可选）"},
             "size": {"type": "string",
-                     "description": "尺寸；V1 仅 1024x1024，其他值会映射回默认"},
+                     "description": "尺寸；本地默认 1024x1024，云端还可 1024x1792 / 1792x1024"},
             "n": {"type": "integer",
                   "description": "张数；强制为 1"},
             "style_hint": {"type": "string",
@@ -738,7 +751,7 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
          "required": ["prompt"]},
         parallel_safe=False), generate_image)
 
-    # ---- generate_video（本地 ComfyUI + Wan；一次一条短视频） ----
+    # ---- generate_video（ComfyUI / 云端；一次一条短视频） ----
     async def generate_video(
         prompt: str,
         negative_prompt: str = "",
@@ -747,107 +760,18 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
         n: int = 1,
         motion_hint: str = "",
         style_hint: str = "",
+        image_name: str = "",
         **kwargs,
     ) -> dict:
-        from infrastructure.video_gen import (
-            ALLOWED_SIZES, ComfyUIVideoAdapter, VideoGenRequest,
-            clamp_duration_sec, normalize_size)
-        from infrastructure.json_repair import repair_json
-        from langfuse.integration import get_tracer, mark_preview
-
-        prompt = (prompt or "").strip()
-        if not prompt:
-            raise ValueError("generate_video 需要非空 prompt")
+        from infrastructure.video_gen.execute import execute_video_gen
 
         emit = kwargs.get("_emit")
         session_id = kwargs.get("_session_id") or ""
-
-        clamped_notes: list[str] = []
-        try:
-            n_req = int(n or 1)
-        except (TypeError, ValueError):
-            n_req = 1
-        if n_req != 1:
-            clamped_notes.append("当前本地模式一次只生成 1 条")
-
-        size_raw = normalize_size(size, "480x832")
-        if (size or "").lower().replace("*", "x") not in ALLOWED_SIZES:
-            clamped_notes.append("尺寸已映射为 480p 档")
-
-        default_dur = int(config.get("video_gen_default_duration_sec", 3) or 3)
-        duration_i, dur_clamped = clamp_duration_sec(duration_sec, default_dur)
-        max_dur = int(config.get("video_gen_max_duration_sec", 4) or 4)
-        if duration_i > max_dur:
-            duration_i = max_dur
-            dur_clamped = True
-        if dur_clamped:
-            clamped_notes.append(f"时长已夹紧为 {duration_i} 秒")
-
-        if providers is None:
-            raise RuntimeError("未配置文生视频模型：ProviderRegistry 不可用")
-        snap = providers.snapshot_for("video_gen")
-        if snap is None:
-            raise RuntimeError(
-                "未配置文生视频模型：请在设置页为「文生视频模型（本地 ComfyUI）」"
-                "指定 Provider（base_url 如 http://127.0.0.1:8188，"
-                "model_id 为 Wan 2.1 T2V 权重文件名）")
-        if (getattr(snap, "provider_type", "") or "").strip().lower() != "comfyui":
-            raise RuntimeError(
-                "文生视频槽位须配置类型为 ComfyUI 的 Provider（V1 仅支持本地 ComfyUI）")
-
-        refined_neg = (negative_prompt or "").strip()
-        final_prompt = prompt
-        refine_on = bool(config.get("video_gen_refine_enabled", True))
-        if refine_on and llm is not None:
-            refine_snap = providers.snapshot_for("retriever_refine") \
-                or providers.snapshot_for("agent") or snap
-            try:
-                sys_p = PROMPTS.load_raw("agent/prompts/video_prompt_refine")
-                user_p = prompt if not refined_neg else (
-                    f"描述：{prompt}\n负面词：{refined_neg}")
-                resp = await llm.chat(
-                    refine_snap,
-                    [{"role": "system", "content": sys_p},
-                     {"role": "user", "content": user_p}],
-                    source="video_prompt_refine")
-                data = repair_json(resp.get("content") or "")
-                if (data.get("prompt") or "").strip():
-                    final_prompt = data["prompt"].strip()
-                if (data.get("negative_prompt") or "").strip():
-                    refined_neg = data["negative_prompt"].strip()
-            except Exception:  # noqa: BLE001
-                logger.debug("video_prompt_refine 失败，回退原 prompt", exc_info=True)
-
-        wf = Path(config.get_raw(
-            "video_gen_comfyui_workflow",
-            "./workflows/wan21_t2v_1_3b.json") or "./workflows/wan21_t2v_1_3b.json")
-        if not wf.is_absolute():
-            wf = (data_dir.parent / wf).resolve()
-        fps = int(config.get("video_gen_fps", 16) or 16)
-        adapter = ComfyUIVideoAdapter(
-            base_url=(snap.base_url or "http://127.0.0.1:8188").rstrip("/"),
-            workflow_path=wf,
-            data_dir=data_dir,
-            timeout_sec=float(config.get("video_gen_timeout_sec", 600) or 600),
-            default_steps=int(config.get("video_gen_steps", 20) or 20),
-            default_size="480x832",
-            default_duration_sec=default_dur,
-            fps=fps,
-            prompt_max_chars=int(
-                config.get("video_gen_prompt_max_chars", 1500) or 1500),
-        )
-        req = VideoGenRequest(
-            prompt=final_prompt,
-            negative_prompt=refined_neg,
-            size=size_raw,
-            duration_sec=duration_i,
-            fps=fps,
-            steps=int(config.get("video_gen_steps", 20) or 20),
-            n=1,
-            motion_hint=(motion_hint or "").strip(),
-            style_hint=(style_hint or "").strip(),
-            model_id=snap.model_id or "",
-        )
+        # 本轮用户上传图：工具未显式传 image_name 时自动取首张做图生视频
+        turn_images = kwargs.get("_turn_image_names") or []
+        img = (image_name or "").strip()
+        if not img and turn_images:
+            img = str(turn_images[0] or "").strip()
 
         async def on_progress(stage: str, label: str):
             if emit is None:
@@ -862,80 +786,51 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             except Exception:  # noqa: BLE001
                 pass
 
-        tracer = get_tracer()
-        gen = tracer.generation_start(
-            "llm.video_gen",
-            model=snap.model_id or "wan21-t2v-1.3b",
-            input={"prompt": final_prompt[:500], "n": 1, "size": size_raw,
-                   "duration_sec": duration_i, "fps": fps, "backend": "comfyui",
-                   "steps": int(config.get("video_gen_steps", 20) or 20)},
-            metadata={"source": "video_gen", "provider_id": snap.provider_id},
+        return await execute_video_gen(
+            prompt=prompt,
+            providers=providers,
+            config=config,
+            data_dir=data_dir,
+            llm=llm,
+            negative_prompt=negative_prompt,
+            size=size,
+            duration_sec=duration_sec,
+            n=n,
+            motion_hint=motion_hint,
+            style_hint=style_hint,
+            session_id=session_id,
+            on_progress=on_progress,
+            langfuse_source="video_gen",
+            image_name=img or None,
         )
-        try:
-            result = await adapter.generate(
-                req, provider_id=snap.provider_id, model_id=snap.model_id or "",
-                session_id=session_id, on_progress=on_progress)
-            payload = result.to_dict()
-            if final_prompt != prompt:
-                clamped_notes.append("已自动润色英文 prompt")
-            if clamped_notes:
-                payload["summary"] = (
-                    (payload.get("summary") or "") + "（" + "；".join(clamped_notes) + "）"
-                ).strip()
-            if gen is not None:
-                gen.end(output={
-                    "n": payload.get("n"),
-                    "filenames": payload.get("filenames"),
-                    "latency_ms": payload.get("latency_ms"),
-                    "duration_sec": payload.get("duration_sec"),
-                    "preview": mark_preview(
-                        payload.get("summary") or "", content_type="tool_result"),
-                })
-            return payload
-        except Exception as exc:  # noqa: BLE001
-            if gen is not None:
-                try:
-                    gen.end(level="ERROR", status_message=str(exc)[:300])
-                except Exception:  # noqa: BLE001
-                    pass
-            msg = str(exc)
-            low = msg.lower()
-            if "未启动" in msg or "ConnectError" in type(exc).__name__ or "连接" in msg:
-                raise RuntimeError(
-                    "本地生视频服务未启动：请先运行 image_gen/comfyui 下的 "
-                    "run_nvidia_gpu.bat，并确认 http://127.0.0.1:8188 可访问"
-                ) from exc
-            if "out of memory" in low or ("cuda" in low and "memory" in low) \
-                    or "oom" in low:
-                raise RuntimeError(
-                    "显存不足：请关闭向日葵/ToDesk 等远控及其他占显存程序后重试；"
-                    "也可将时长改为更短（2–3 秒）"
-                ) from exc
-            raise
 
     registry.register_function(ToolSpec(
         "generate_video",
-        "用本地 ComfyUI + Wan 2.1 生成一条短视频。用户明确要求生成视频/短片/动画时调用。"
-        "一次只生成 1 条，默认约 3 秒、480p；同轮不要重复调用，也不要与 generate_image 同轮混用。"
-        "prompt 可用中文（系统会润色成英文镜头描述）。成功后气泡会播放视频，回复只需简短中文说明；"
-        "不要伪造外链或输出 base64。本地生成可能需要几分钟。",
+        "按当前文生视频模型生成一条短视频。用户明确要求生成视频/短片/动画时调用。"
+        "一次只生成 1 条；同轮不要重复调用。prompt 可用中文。"
+        "若本轮用户附带了图片，系统会自动用作参考图做图生视频（云端可灵）；"
+        "也可显式传 image_name（chat_images 文件名，如 img_xxx.png / gen_xxx.png）。"
+        "本地 Wan 暂不支持图生视频。时长与画幅以当前模型能力为准。"
+        "成功后气泡会播放视频，回复只需简短中文说明；不要伪造外链或输出 base64。",
         {"type": "object", "properties": {
             "prompt": {"type": "string",
                        "description": "镜头描述（中英文均可；含主体/动作/场景/运镜/风格）"},
             "negative_prompt": {"type": "string",
                                 "description": "负面提示词（可选）"},
             "size": {"type": "string",
-                     "description": "尺寸；V1 仅 480x832 或 832x480"},
+                     "description": "尺寸或画幅；本地 480x832/832x480，云端还可 9:16、16:9、1:1"},
             "duration_sec": {"type": "number",
-                             "description": "时长秒数；V1 允许 2–4，默认 3"},
+                             "description": "时长秒数；本地 2–4，云端 3–15，默认随当前模型"},
             "n": {"type": "integer",
                   "description": "条数；强制为 1"},
             "motion_hint": {"type": "string",
                             "enum": ["slow", "medium", "dynamic"],
                             "description": "可选运动强度，并入 prompt 前缀"},
             "style_hint": {"type": "string",
-                           "enum": ["cinematic", "anime", "realistic"],
-                           "description": "可选风格标签，并入 prompt 前缀"}},
+                           "description": "可选风格提示，并入 prompt"},
+            "image_name": {"type": "string",
+                           "description": "可选参考图文件名（chat_images 下）；"
+                                          "有图时走图生视频（仅云端）"}},
          "required": ["prompt"]},
         parallel_safe=False), generate_video)
 

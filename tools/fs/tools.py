@@ -94,7 +94,17 @@ def _resolve_input_path(raw_path: str, ctx: WorkspaceContext) -> Path:
 # 工具实现
 # ============================================================================
 
-def _make_fs_read(observations: FsObservationStore, config):
+def _note_fs_op(observations: FsObservationStore, file_cards, session_id: str,
+                path: str, version: str, op: str) -> None:
+    observations.record(session_id, path, version, last_op=op)
+    if file_cards is not None:
+        try:
+            file_cards.append(session_id, path, op, version=version)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _make_fs_read(observations: FsObservationStore, config, file_cards=None):
     async def fs_read(path: str, offset: int = 1, limit: int | None = None,
                       **kwargs) -> dict:
         ctx = _pop_ctx(kwargs)
@@ -106,8 +116,9 @@ def _make_fs_read(observations: FsObservationStore, config):
             max_line_chars=cfg["max_line"], max_bytes=cfg["max_bytes"],
             read_limit_lines=cfg["read_limit_lines"],
             stream_min=cfg["stream_min"], absolute_max=cfg["absolute_max"])
-        # 记录观察 供后续 fs_write/edit 版本乐观锁
-        observations.record(ctx.session_id, str(resolved), result["version"])
+        # 记录观察 供后续 fs_write/edit 版本乐观锁 + 跨轮工作集
+        _note_fs_op(observations, file_cards, ctx.session_id,
+                    str(resolved), result["version"], "read")
         return result
     return fs_read
 
@@ -304,7 +315,7 @@ def _make_fs_grep():
     return fs_grep
 
 
-def _make_fs_write(observations: FsObservationStore):
+def _make_fs_write(observations: FsObservationStore, file_cards=None):
     async def fs_write(path: str, content: str,
                         expected_version: str | None = None,
                         **kwargs) -> dict:
@@ -328,7 +339,8 @@ def _make_fs_write(observations: FsObservationStore):
                               "文件已被外部修改", path=path)
         atomic_write(target, content)
         new_version = make_version(target)
-        observations.record(ctx.session_id, str(target), new_version)
+        _note_fs_op(observations, file_cards, ctx.session_id,
+                    str(target), new_version, "write")
         diff = unified_diff(before, content, path=target.name)
         stats = summary_stats(before, content)
         return {
@@ -342,7 +354,7 @@ def _make_fs_write(observations: FsObservationStore):
     return fs_write
 
 
-def _make_fs_edit(observations: FsObservationStore):
+def _make_fs_edit(observations: FsObservationStore, file_cards=None):
     async def fs_edit(path: str, old_string: str, new_string: str,
                        replace_all: bool = False,
                        expected_version: str | None = None,
@@ -370,7 +382,8 @@ def _make_fs_edit(observations: FsObservationStore):
             target, old_string, new_string, replace_all=replace_all)
         atomic_write(target, after)
         new_version = make_version(target)
-        observations.record(ctx.session_id, str(target), new_version)
+        _note_fs_op(observations, file_cards, ctx.session_id,
+                    str(target), new_version, "edit")
         return {
             "path": str(target), "action": "edited",
             "replacements": replacements,
@@ -431,15 +444,16 @@ def _make_ignore(ctx: WorkspaceContext) -> IgnoreMatcher:
 # 注册
 # ============================================================================
 
-def register_fs_tools(registry: ToolRegistry, *, observation_store, config) -> None:
+def register_fs_tools(registry: ToolRegistry, *, observation_store, config,
+                      file_cards=None) -> None:
     """向 ToolRegistry 注册全部 7 个 fs 工具。tool.spec.needs_workspace=True。"""
-    fs_read = _make_fs_read(observation_store, config)
+    fs_read = _make_fs_read(observation_store, config, file_cards=file_cards)
     fs_read_image = _make_fs_read_image()
     fs_list = _make_fs_list()
     fs_glob = _make_fs_glob()
     fs_grep = _make_fs_grep()
-    fs_write = _make_fs_write(observation_store)
-    fs_edit = _make_fs_edit(observation_store)
+    fs_write = _make_fs_write(observation_store, file_cards=file_cards)
+    fs_edit = _make_fs_edit(observation_store, file_cards=file_cards)
 
     def _spec(name, description, params, needs_ws=True):
         s = ToolSpec(name, description, params)

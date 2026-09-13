@@ -25,8 +25,9 @@ from __future__ import annotations
 import contextvars
 import logging
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 from .client import IngestionClient
@@ -107,6 +108,8 @@ class _NoopGen:
 
 
 class _NoopTrace:
+    id = None
+
     def update(self, *a, **k): ...
     def end(self, *a, **k): ...
 
@@ -314,6 +317,43 @@ class PipelineTracer:
         tok_t = _active_trace.set(tid)
         tok_o = _active_obs.set(None)
         return _Trace(self, tid, tok_t, tok_o)
+
+    @contextmanager
+    def attach_trace(self, trace_id: str | None) -> Iterator[bool]:
+        """把当前 Task 挂到已有 trace（用于同轮后台续写，禁止再开第二条记录）。
+
+        返回是否成功挂上：False 表示禁用/无 id，此时 span/generation 仍为 noop。
+        不调用 trace.end()——父 turn 负责生命周期；此处只管理 contextvars。
+        """
+        tid = (trace_id or "").strip()
+        if not self.enabled or not tid:
+            tok_t = _active_trace.set(None)
+            tok_o = _active_obs.set(None)
+            try:
+                yield False
+            finally:
+                try:
+                    _active_obs.reset(tok_o)
+                except (ValueError, LookupError) as e:
+                    logger.warning("attach_trace 清理 obs contextvar 失败：%s", e)
+                try:
+                    _active_trace.reset(tok_t)
+                except (ValueError, LookupError) as e:
+                    logger.warning("attach_trace 清理 trace contextvar 失败：%s", e)
+            return
+        tok_t = _active_trace.set(tid)
+        tok_o = _active_obs.set(None)
+        try:
+            yield True
+        finally:
+            try:
+                _active_obs.reset(tok_o)
+            except (ValueError, LookupError) as e:
+                logger.warning("attach_trace 清理 obs contextvar 失败：%s", e)
+            try:
+                _active_trace.reset(tok_t)
+            except (ValueError, LookupError) as e:
+                logger.warning("attach_trace 清理 trace contextvar 失败：%s", e)
 
     # ---- span（步骤，进入时设为当前活跃 observation，其内的调用挂在它下面） ----
     def span_start(self, name: str, *, input: Any = None,

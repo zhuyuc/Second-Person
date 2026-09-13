@@ -92,11 +92,16 @@ class BasePlatformAdapter:
             self._update_mapping(platform_user_id, sid)
             await self.send_message(chat_id, "已开启新会话")
             return
-        # 调用调度引擎交付回复（接入组：单消息处理超时 300 秒）
+        # 调用调度引擎交付回复。媒体长任务跟到终态，不再用 300s 墙钟砍死。
         try:
-            import asyncio
-            await asyncio.wait_for(
-                self._deliver(chat_id, sid, text, images=images), timeout=300)
+            from infrastructure.remote_jobs import JobCancelled
+            await self._deliver(chat_id, sid, text, images=images)
+            self._reset_circuit()
+        except JobCancelled:
+            try:
+                await self.send_message(chat_id, "已停止生成")
+            except Exception:  # noqa: BLE001
+                pass
             self._reset_circuit()
         except Exception as e:  # noqa: BLE001
             logger.exception("IM 消息处理失败")

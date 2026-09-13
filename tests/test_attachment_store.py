@@ -52,6 +52,27 @@ def test_upload_rejects_bytes_over_the_configured_limit(tmp_path, monkeypatch):
     assert not list(store.objects.rglob("meta.json"))
 
 
+def test_failed_parse_cache_is_retried_on_reupload(tmp_path, monkeypatch):
+    """Empty first-pass cache must not permanently poison later uploads."""
+    store = AttachmentStore(tmp_path)
+    content = b"hello from pdf-like bytes"
+
+    def _empty(_path):
+        return ""
+
+    monkeypatch.setattr("scheduler.ingest.extract_text", _empty)
+    first = asyncio.run(store.upload_and_parse(_upload("doc.pdf", content)))
+    assert first["parsed"] is False
+    assert first["chars"] == 0
+
+    monkeypatch.setattr(
+        "scheduler.ingest.extract_text", lambda _path: "recovered text")
+    second = asyncio.run(store.upload_and_parse(_upload("doc.pdf", content)))
+    assert second["attachment_id"] == first["attachment_id"]
+    assert second["parsed"] is True
+    assert second["text"] == "recovered text"
+
+
 def test_attachment_context_rejects_invalid_or_expired_reference(tmp_path):
     store = AttachmentStore(tmp_path)
 

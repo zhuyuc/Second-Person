@@ -282,7 +282,12 @@ function handleThreshold(threshold) {
   }
 }
 
-const scrollBridge = { maybe: () => {}, think: () => {}, code: () => {} }
+const scrollBridge = {
+  maybe: () => {},
+  think: () => {},
+  code: () => {},
+  resetThinkStick: () => {},
+}
 
 const {
   generating,
@@ -355,8 +360,8 @@ async function startHandoff() {
     handoffStatus.value = 'generating'
     handoffData.value = null
     thresholdBreached.value = null
-  } catch {
-    toast.push('error', '创建新会话失败')
+  } catch (e) {
+    toast.push('error', friendlyError(e?.message, '无法开启新会话交接，请稍后重试'))
   }
 }
 
@@ -544,7 +549,7 @@ async function openSession(sid, opts = {}) {
       resetToHome()
       return
     }
-    toast.push('error', friendlyError(e?.message, '加载会话失败'))
+    toast.push('error', friendlyError(e?.message, '加载会话失败，请刷新页面后重试'))
   }
 }
 
@@ -574,6 +579,7 @@ async function tryReattach(sid) {
     const crid = d?.client_request_id
     if (!crid || currentSid.value !== sid) return
     beginStream(sid)
+    scrollBridge.resetThinkStick()
     streamCrid.value = crid
     // 重挂后删掉尾部尚未完成的那轮用户消息渲染冗余风险低：回放事件仅重建流式区
     await sse.send({
@@ -583,7 +589,7 @@ async function tryReattach(sid) {
       trackActive: !props.asideMode,
       onEvent: (ev, data) => handleEvent(ev, data),
       onError: (e) => {
-        toast.push('error', friendlyError(e?.message))
+        toast.push('error', friendlyError(e?.message, '恢复对话失败，请刷新页面后重试'))
         finishStream()
       },
     })
@@ -668,7 +674,12 @@ async function uploadFiles(fileList) {
         file: f,
         origin,
       }
-      if (!d.parsed) toast.push('warning', `「${d.filename}」未能解析出文本内容`)
+      if (!d.parsed) {
+        toast.push(
+          'warning',
+          `「${d.filename}」未能提取出文字（可能是扫描件、加密 PDF 或空文档）。对话仍可发送，但模型读不到正文`,
+        )
+      }
     } catch {
       attachments.value[idx] = { name: f.name, uploading: false, error: true, isImage: false, origin }
     }
@@ -1280,15 +1291,24 @@ async function ingestToKb(file) {
   try {
     const fd = new FormData()
     fd.append('file', file)
-    const r = await chatApi.importDocument(fd)
+    const r = await chatApi.importDocument(fd, {
+      timeoutMessage:
+        `「${file.name}」写入知识库较慢，当前对话不受影响；可稍后到「记忆」页查看导入结果`,
+    })
     if (r.duplicate) {
-      // 文档已在知识库中：跳过重复导入，不影响当前对话的文档解析
-      toast.push('info', `「${file.name}」已在知识库中，跳过重复导入（已有 ${r.extracted} 条记忆）`)
+      toast.push(
+        'info',
+        `「${file.name}」已在知识库中，已跳过重复导入（已有 ${r.extracted} 条记忆）`,
+      )
     } else {
-      toast.push('success', `「${file.name}」已存入知识库，提炼 ${r.extracted} 条记忆`)
+      toast.push('success', `「${file.name}」已存入知识库，提炼出 ${r.extracted} 条记忆`)
     }
-  } catch {
-    /* api 层已提示错误 */
+  } catch (e) {
+    if (e?.alreadyToasted) return
+    toast.push(
+      'warning',
+      `「${file.name}」未能写入知识库：${friendlyError(e?.message, '请稍后在记忆页重试导入')}`,
+    )
   }
 }
 // 超长文本粘贴自动收纳为附件的阈值（低于阈值维持直接进输入框）
@@ -1455,6 +1475,7 @@ async function send() {
   kbFiles.forEach((f) => ingestToKb(f))
   nextTick(autoGrow)
   beginStream(currentSid.value)
+  scrollBridge.resetThinkStick()
   scrollBottom()
 
   streamCrid.value = genCrid()
@@ -1472,7 +1493,7 @@ async function send() {
     trackActive: !props.asideMode,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => {
-      toast.push('error', friendlyError(e?.message))
+      toast.push('error', friendlyError(e?.message, '对话中断，请检查网络后重试'))
       finishStream()
     },
   })
@@ -1728,6 +1749,7 @@ async function submitEdit() {
   newKbFiles.forEach((f) => ingestToKb(f))
 
   beginStream(currentSid.value)
+  scrollBridge.resetThinkStick()
   maybeScroll()
   streamPushSuppressed.value = true
   streamCrid.value = genCrid()
@@ -1746,7 +1768,7 @@ async function submitEdit() {
       trackActive: !props.asideMode,
       onEvent: (ev, data) => handleEvent(ev, data),
       onError: (e) => {
-        toast.push('error', friendlyError(e?.message))
+        toast.push('error', friendlyError(e?.message, '编辑发送失败，请稍后重试'))
         finishStream()
       },
     })
@@ -1816,6 +1838,7 @@ async function regenerate(msg) {
     return
   }
   beginStream(currentSid.value)
+  scrollBridge.resetThinkStick()
   maybeScroll()
   streamCrid.value = genCrid()
   await sse.send({
@@ -1828,7 +1851,7 @@ async function regenerate(msg) {
     trackActive: !props.asideMode,
     onEvent: (ev, data) => handleEvent(ev, data),
     onError: (e) => {
-      toast.push('error', friendlyError(e?.message))
+      toast.push('error', friendlyError(e?.message, '重新生成失败，请稍后重试'))
       finishStream()
     },
   })
@@ -2057,17 +2080,20 @@ function scrollBottom() {
     }
   })
 }
-// 智能跟随：仅当用户已在底部附近时自动吸底；上翻后不强制拉回
+// 智能跟随：仅当用户贴在底部时自动吸底；上翻后保持脱离，直到再次回到底部附近
 const atBottom = ref(true)
 let lastScrollTop = 0
 function onScroll() {
   const el = scroller.value
   if (!el) return
-  // 流式输出期间用户向上滚动 → 禁止自动吸底，让用户自由浏览
-  if (generating.value && el.scrollTop < lastScrollTop - 5) {
+  const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (dist < 80) {
+    atBottom.value = true
+  } else if (el.scrollTop < lastScrollTop - 2) {
+    // 主动上翻（含流式期间）→ 脱离贴底，后续增量不再强拉
     atBottom.value = false
-  } else {
-    atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  } else if (!generating.value) {
+    atBottom.value = dist < 80
   }
   lastScrollTop = el.scrollTop
 }
@@ -2084,20 +2110,42 @@ function scrollStreamCode() {
     })
   })
 }
-// 流式处理进度（think-body 限高 260px 内部滚动）同样吸底跟随最新内容。
-// 插值渲染 DOM 不重建，scrollTop 会停在原地；仅当用户未主动上翻（距底部很近）
-// 时吸底，上翻阅读时不强行拉回（与外层消息区的智能跟随同一交互语义）
+// 思考面板贴底状态：用显式标记，避免「距底 <140px 就吸底」在高频 token 下把刚上滑的用户拽回去
 const liveThink = ref(null)
+let thinkStickBottom = true
+function onLiveThinkScroll() {
+  const el = liveThink.value
+  if (!el) return
+  const dist = el.scrollHeight - el.scrollTop - el.clientHeight
+  if (dist < 24) {
+    thinkStickBottom = true
+  } else if (el.dataset._lastTop != null && el.scrollTop < Number(el.dataset._lastTop) - 2) {
+    thinkStickBottom = false
+    // 用户在思考区上翻时，同时脱离外层贴底，避免外层 maybeScroll 抢滚动
+    atBottom.value = false
+  }
+  el.dataset._lastTop = String(el.scrollTop)
+}
+function onLiveThinkWheel(e) {
+  if (e.deltaY < 0) {
+    thinkStickBottom = false
+    atBottom.value = false
+  }
+}
 function scrollThink() {
   nextTick(() => {
     const el = liveThink.value
     if (!el || el.scrollHeight <= el.clientHeight) return
-    if (el.scrollHeight - el.scrollTop - el.clientHeight < 140) el.scrollTop = el.scrollHeight
+    if (thinkStickBottom) el.scrollTop = el.scrollHeight
   })
+}
+function resetThinkStick() {
+  thinkStickBottom = true
 }
 scrollBridge.maybe = maybeScroll
 scrollBridge.think = scrollThink
 scrollBridge.code = scrollStreamCode
+scrollBridge.resetThinkStick = resetThinkStick
 
 const scrollerClass = computed(() =>
   !messages.value.length && !streamText.value ? 'scroller-shrink' : 'scroller-grow'
@@ -2239,7 +2287,7 @@ function handleMermaidActions(e) {
 async function copyMermaidAsImage(wrap) {
   const svg = wrap.querySelector('svg')
   if (!svg) {
-    toast.push('error', '图表未渲染')
+    toast.push('error', '图表还没渲染好，请稍候再试')
     return
   }
   try {
@@ -2643,7 +2691,13 @@ onUnmounted(() => {
                     ></span>
                   </span>
                 </div>
-                <div v-show="thinkOpen" ref="liveThink" class="think-body think-body-timeline">
+                <div
+                  v-show="thinkOpen"
+                  ref="liveThink"
+                  class="think-body think-body-timeline"
+                  @scroll.passive="onLiveThinkScroll"
+                  @wheel.passive="onLiveThinkWheel"
+                >
                   <ThinkingTimeline
                     v-if="timeline.length"
                     :items="timeline"

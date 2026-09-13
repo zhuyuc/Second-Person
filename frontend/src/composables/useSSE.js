@@ -12,6 +12,7 @@ export function useSSE() {
     projectId,
     message,
     images,
+    imageNames,
     attachmentIds,
     clientRequestId,
     regenerateMessageId,
@@ -48,6 +49,7 @@ export function useSSE() {
             project_id: projectId || undefined,
             message,
             images,
+            image_names: imageNames?.length ? imageNames : undefined,
             attachment_ids: attachmentIds || undefined,
             client_request_id: crid,
             last_event_id: lastEventId,
@@ -66,7 +68,25 @@ export function useSSE() {
         let buffer = ''
         while (true) {
           const { done: rdone, value } = await reader.read()
-          if (rdone) break
+          if (rdone) {
+            buffer += decoder.decode()
+            if (buffer.trim()) {
+              const evt = parseSSE(buffer)
+              if (evt) {
+                gotFirst = true
+                clearTimeout(timeout)
+                const eventId = Number(evt.id)
+                if (!(Number.isSafeInteger(eventId) && eventId <= lastEventId)) {
+                  if (Number.isSafeInteger(eventId) && eventId > lastEventId) {
+                    lastEventId = eventId
+                  }
+                  onEvent && onEvent(evt.event, evt.data)
+                  if (evt.event === 'turn_completed' || evt.event === 'error') done = true
+                }
+              }
+            }
+            break
+          }
           buffer += decoder.decode(value, { stream: true })
           const parts = buffer.split(/\r?\n\r?\n/)
           buffer = parts.pop()

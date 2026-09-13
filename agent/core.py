@@ -39,7 +39,8 @@ class AgentCore:
                  mood_manager=None, mood_trigger=None,
                  mood_action_dispatcher=None, memory_gate=None,
                  projects=None, workspace_resolver=None,
-                 token_meter=None, compaction_engine=None):
+                 token_meter=None, compaction_engine=None,
+                 fs_observations=None, file_cards=None):
         self.db = db
         self.config = config
         self.sessions = session_store
@@ -67,6 +68,8 @@ class AgentCore:
         # v7：token 度量 + 自动压缩（可 None，turn_runtime 缺失时降级）
         self.token_meter = token_meter
         self.compaction_engine = compaction_engine
+        self.fs_observations = fs_observations
+        self.file_cards = file_cards
         self.image_kb_fn = None
         self._pending_low_confirm: dict | None = None
         # Δ9：同一会话内至多问一次低置信记忆确认，避免多轮打扰
@@ -176,7 +179,11 @@ class AgentCore:
 
     async def _apply_mood_after_turn(self, session_id: str, user_message: str,
                                      outcome: dict) -> None:
-        """Turn 结束后异步判定双源情绪并 apply_v2 落库。"""
+        """Turn 结束后异步判定双源情绪并 apply_v2 落库。
+
+        Langfuse：挂到本轮 agent.turn（outcome.langfuse_trace_id），
+        只加 mood.judge 节点，绝不新开 mood.after_turn 第二条。
+        """
         if not self.mood or not self.config.get("mood_enabled", True):
             return
         if float(self.config.get("mood_influence_strength", 0.5)) <= 0:
@@ -184,42 +191,47 @@ class AgentCore:
         from langfuse.integration import get_tracer
         tracer = get_tracer()
         msg_id = outcome.get("message_id")
-        trace = tracer.trace_start(
-            "mood.after_turn", session_id=session_id,
-            input={"message_id": msg_id},
-            tags=["mood"])
-        span = tracer.span_start("mood.judge", input={"message_id": msg_id})
-        try:
-            trigger_summary = ""
-            if self.mood_trigger and msg_id:
-                trigger_summary = self.mood_trigger.summarize_for_turn(
-                    session_id, int(msg_id))
-            from soul.mood_judge import judge_turn_moods
-            user_res, ai_res = await judge_turn_moods(
-                self.llm, self.providers,
-                user_message=user_message,
-                assistant_content=outcome.get("content") or "",
-                trigger_summary=trigger_summary,
-                session_id=session_id)
-            result = self.mood.apply_v2(user_res=user_res, ai_res=ai_res)
-            out = {
-                "ai_mood": result.get("ai_mood", "neutral"),
-                "user_mood": result.get("user_mood", "neutral"),
-                "user_changed": bool(result.get("user_changed")),
-                "ai_changed": bool(result.get("ai_changed")),
-            }
-            span.end(output=out)
-            trace.end(output=out)
-            if (result.get("user_changed") or result.get("ai_changed")) and self.bus:
-                from infrastructure.event_bus import EVT_MOOD_UPDATED
-                self.bus.publish_nowait(EVT_MOOD_UPDATED, {
+        parent_trace_id = outcome.get("langfuse_trace_id")
+        with tracer.attach_trace(parent_trace_id):
+            span = tracer.span_start(
+                "mood.judge",
+                input={"message_id": msg_id},
+                metadata={
+                    "phase": "after_turn",
+                    "session_id": session_id,
+                    # 明确告知观测侧：本节点在最终回复之后异步续写，排序在末尾是预期。
+                    "timeline_position": "after_final_answer",
+                },
+            )
+            try:
+                trigger_summary = ""
+                if self.mood_trigger and msg_id:
+                    trigger_summary = self.mood_trigger.summarize_for_turn(
+                        session_id, int(msg_id))
+                from soul.mood_judge import judge_turn_moods
+                user_res, ai_res = await judge_turn_moods(
+                    self.llm, self.providers,
+                    user_message=user_message,
+                    assistant_content=outcome.get("content") or "",
+                    trigger_summary=trigger_summary,
+                    session_id=session_id)
+                result = self.mood.apply_v2(user_res=user_res, ai_res=ai_res)
+                out = {
                     "ai_mood": result.get("ai_mood", "neutral"),
                     "user_mood": result.get("user_mood", "neutral"),
-                })
-        except Exception as e:  # noqa: BLE001
-            span.end(level="ERROR", status_message=str(e)[:240])
-            trace.end(level="ERROR", status_message=str(e)[:240])
-            logger.warning("turn 后情绪更新失败", exc_info=True)
+                    "user_changed": bool(result.get("user_changed")),
+                    "ai_changed": bool(result.get("ai_changed")),
+                }
+                span.end(output=out)
+                if (result.get("user_changed") or result.get("ai_changed")) and self.bus:
+                    from infrastructure.event_bus import EVT_MOOD_UPDATED
+                    self.bus.publish_nowait(EVT_MOOD_UPDATED, {
+                        "ai_mood": result.get("ai_mood", "neutral"),
+                        "user_mood": result.get("user_mood", "neutral"),
+                    })
+            except Exception as e:  # noqa: BLE001
+                span.end(level="ERROR", status_message=str(e)[:240])
+                logger.warning("turn 后情绪更新失败", exc_info=True)
 
     async def _runtime_context(self, *, session_id: str, turn_id: str,
                                message: str, onboarding: bool,
@@ -303,10 +315,39 @@ class AgentCore:
                 "project_instructions_changes": project_instructions_changes,
             }
 
-        retrieval, handoff_context, project_bundle = await asyncio.gather(
-            self.retriever.retrieve(
+        from agent.working_set import build_working_set_turn, recall_context_for_compact
+        ws_turn = await asyncio.to_thread(
+            build_working_set_turn,
+            observations=self.fs_observations,
+            cards=self.file_cards,
+            session_id=session_id,
+            user_message=message,
+        )
+
+        async def _retrieve_memories():
+            if ws_turn.demote_memory:
+                from memory.retriever import RetrievalResult
+                from memory.retriever_progress import (
+                    build_progress_payload, skip_summary,
+                )
+                result = RetrievalResult()
+                result.diagnostics = {
+                    "gate": "working_set_demotion",
+                    "query": (message or "")[:80],
+                }
+                await on_memory_progress(build_progress_payload(
+                    stage="skipped", status="skipped",
+                    summary=skip_summary("working_set_demotion", message),
+                    gate="working_set_demotion", hit_count=0, candidates=0,
+                    elapsed_ms=0,
+                ))
+                return result
+            return await self.retriever.retrieve(
                 message, session_id=session_id, context_text=context_text,
-                project_id=session_project_id, on_progress=on_memory_progress),
+                project_id=session_project_id, on_progress=on_memory_progress)
+
+        retrieval, handoff_context, project_bundle = await asyncio.gather(
+            _retrieve_memories(),
             _load_handoff_ctx(),
             _load_project_ctx(),
         )
@@ -328,6 +369,9 @@ class AgentCore:
                 "project_instructions": project_bundle["project_instructions"],
                 "project_instructions_changes": project_bundle[
                     "project_instructions_changes"],
+                "working_set_context": ws_turn.working_set_emit,
+                "file_cards_context": ws_turn.file_cards_emit,
+                "working_set_recall": recall_context_for_compact(ws_turn),
                 "mood_context": tail["mood_context"],
                 "location_context": tail["location_context"],
                 "constraints_context": tail["constraints_context"],
@@ -607,11 +651,21 @@ class AgentCore:
                 logger.debug("读取技能草稿失败", exc_info=True)
             if self.mood and self.config.get("mood_enabled", True):
                 try:
-                    mood_hint = self.mood.build_state_context()
+                    from soul.mood_turn_policy import (
+                        GREETING_EXPRESSION_CONSTRAINT,
+                        is_brief_social_turn,
+                    )
+                    brief_social = is_brief_social_turn(user_message)
+                    mood_hint = self.mood.build_state_context(
+                        user_message=user_message)
                     if mood_hint:
                         mood_context = mood_hint
-                    if self.mood_action_dispatcher:
-                        row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
+                    if brief_social:
+                        constraints_parts.append(GREETING_EXPRESSION_CONSTRAINT)
+                    elif self.mood_action_dispatcher:
+                        # 寒暄轮不注入主动行为（comfort_first / 承认错误等），避免废话开场
+                        row = self.db.query_one(
+                            "SELECT * FROM mood_state WHERE id=1")
                         if row:
                             state = {
                                 "user_mood": row["user_mood"],
@@ -623,8 +677,9 @@ class AgentCore:
                                     row["ai_intensity"], row["ai_updated_at"]),
                                 "ai_attribution": row["ai_attribution"] or "",
                             }
-                            action_key, action_prompt = self.mood_action_dispatcher.evaluate(
-                                state, self._build_action_ctx(sid))
+                            action_key, action_prompt = (
+                                self.mood_action_dispatcher.evaluate(
+                                    state, self._build_action_ctx(sid)))
                             if action_prompt:
                                 constraints_parts.append(action_prompt)
                                 self.db.execute(
@@ -632,6 +687,25 @@ class AgentCore:
                                     (action_key,))
                 except Exception:  # noqa: BLE001
                     logger.warning("情绪尾部注入失败（静默跳过）", exc_info=True)
+
+        try:
+            providers = getattr(self, "providers", None)
+            if providers is not None:
+                from infrastructure.image_gen import image_capability_hint
+                from infrastructure.video_gen import capability_hint, video_profile_for
+                media_hints: list[str] = []
+                img_snap = providers.snapshot_for("image_gen")
+                if img_snap is not None:
+                    media_hints.append(image_capability_hint(img_snap))
+                vid_snap = providers.snapshot_for("video_gen")
+                if vid_snap is not None:
+                    media_hints.append(
+                        capability_hint(video_profile_for(vid_snap, self.config)))
+                if media_hints:
+                    constraints_parts.append(
+                        "[当前生成能力]\n" + "\n".join(media_hints))
+        except Exception:  # noqa: BLE001
+            logger.debug("注入图/视频能力摘要失败", exc_info=True)
 
         constraints_context = None
         if constraints_parts:

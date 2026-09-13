@@ -70,7 +70,16 @@ class TurnRuntime:
         # hashes only and naturally resets after a process restart.
         self._prompt_cache_state: dict[tuple[str, str, str], Any] = {}
         self._tool_runner = TurnToolRunner(
-            registry=registry, executor=executor, events=self.events)
+            registry=registry, executor=executor, events=self.events,
+            gpu_mutex_enabled=self._media_gpu_mutex)
+
+    def _media_gpu_mutex(self) -> bool:
+        if not self.config.get("video_gen_mutex_with_image_gen", True):
+            return False
+        if self.providers is None:
+            return True
+        from infrastructure.provider_modality import is_local_gpu
+        return is_local_gpu(self.providers.snapshot_for("video_gen"))
 
     async def run(self, *, session_id: str, message: str, reasoning_effort: str,
                   emit: Callable[[str, dict], Awaitable[None]],
@@ -86,16 +95,21 @@ class TurnRuntime:
         max_steps = int(self.config.get(
             "agent_max_steps", _mem_const.AGENT_MAX_STEPS))
         tracer = get_tracer()
-        # 侧边会话（channel='aside'）在 Langfuse 打 tag，便于按会话类型独立分析。
+        # 侧边 / 工坊会话在 Langfuse 打 tag，便于按会话类型独立分析。
         _ch_row = self.db.query_one(
             "SELECT channel FROM sessions WHERE session_id=?", (session_id,))
-        _is_aside = bool(_ch_row and _ch_row["channel"] == "aside")
+        _channel = (_ch_row["channel"] if _ch_row else None) or None
+        _tags = []
+        if _channel == "aside":
+            _tags.append("aside")
+        elif _channel == "workshop":
+            _tags.append("workshop")
         trace = tracer.trace_start(
             "agent.turn", session_id=session_id,
             input={"message_chars": len(message), "images": len(images or [])},
             metadata={"request_id": client_request_id, "reasoning_effort": reasoning_effort,
-                      "contract_version": "v2", "channel": (_ch_row["channel"] if _ch_row else None)},
-            tags=(["aside"] if _is_aside else None))
+                      "contract_version": "v2", "channel": _channel},
+            tags=(_tags or None))
         turn = self.events.start_turn(session_id, reasoning_effort=reasoning_effort,
                                       max_steps=max_steps, request_id=client_request_id,
                                       langfuse_trace_id=getattr(trace, "id", None))
@@ -236,6 +250,8 @@ class TurnRuntime:
             persisted_images = None
             if persist_user and images and self.persist_images:
                 persisted_images = await asyncio.to_thread(self.persist_images, images)
+            if persisted_images:
+                self._tool_runner.set_turn_images(turn_id, list(persisted_images))
             user_message_id = (self.sessions.append_message(
                 session_id, "user", message, images=persisted_images,
                 parent_id=user_parent_id, version_group_id=user_version_group_id)
@@ -339,6 +355,8 @@ class TurnRuntime:
                         ("context.mood", "mood_context"),
                         ("context.location", "location_context"),
                         ("context.constraints", "constraints_context"),
+                        ("context.working_set", "working_set_context"),
+                        ("context.file_cards", "file_cards_context"),
                     ):
                         content = turn_context.get(key)
                         if content:
@@ -389,7 +407,8 @@ class TurnRuntime:
                             messages=context["history"],
                             system=system_content, tools=tools,
                             message_ids=context.get("history_ids") or [],
-                            protected_indices=context.get("history_protected") or set())
+                            protected_indices=context.get("history_protected") or set(),
+                            recall_context=context.get("working_set_recall"))
                     except Exception as compact_exc:  # noqa: BLE001
                         logger.warning("压缩检查异常，跳过本轮", exc_info=True)
                         compact_span.end(
@@ -477,6 +496,9 @@ class TurnRuntime:
                     "agent.step", input={"turn_id": turn_id, "step": step},
                     metadata={"reasoning_effort": reasoning_effort,
                               "prompt_cache": prompt_cache_trace})
+                # step 须覆盖「本步 LLM + 本步工具」：过早 end 会让 tool_execute
+                # 掉到 trace 根上，Langfuse 时间线看起来像乱序。
+                step_span_closed = False
                 content_parts: list[str] = []
                 tool_calls: list[dict] = []
                 # 本步 reasoning 增量：对齐 deepseek-harness 的 CoT 回传，
@@ -506,198 +528,237 @@ class TurnRuntime:
                     pass
                 await _progress("llm", "调用模型推理", llm_detail)
                 try:
-                    # 流式：内容增量边收边发 content_delta，首字延迟由整段生成
-                    # 时间降到首 chunk 到达时间；tool_calls 在流内累积，末尾 done
-                    # 事件同时返回内容与工具调用，与非流式契约等价。
-                    # 注意：工具步里模型可能"边说边调工具"（旁白也会走 content
-                    # 增量），这些旁白先实时进正文、在本步确认带 tool_calls 后
-                    # 由 content_reset 事件撤回，保证正文最终只留末步答案。
-                    async for kind, data in self.llm.stream_chat(
-                            snap, prompt, source="agent_step",
-                            session_id=session_id, tools=tools,
-                            images=images if step == 1 else None,
-                            extra_body={"reasoning_effort": effective_effort},
-                            trace_metadata={"prompt_cache": prompt_cache_trace}):
-                        # 对齐 deepseek-harness/isTokenDelta：首 token 打点覆盖
-                        # 所有 meaningful 流式 chunk（含 reasoning）。这样 ttft_ms
-                        # 反映"用户看到第一个字符"的真实时刻；decode_ms 覆盖 reasoning
-                        # + content 全段，与 provider usage.output_tokens 分母对齐，
-                        # 避免"分子含 reasoning、分母只算 content"造成的 tok/s 虚高。
-                        if kind in ("content", "reasoning") and data \
-                                and first_token_at is None:
-                            first_token_at = time.perf_counter()
-                        if kind == "content":
-                            content_parts.append(data)
-                            if not narration_reset_done:
-                                turn_body += data
-                            await emit("content_delta", {"text": data})
-                        elif kind == "reasoning":
-                            reasoning_source = "provider"
-                            reasoning_parts.append(data)
-                            step_reasoning_parts.append(data)
-                            _tl_append_reasoning(data)
-                            await emit("reasoning_delta", {"text": data, "source": "provider"})
-                        elif kind == "tool_start":
-                            # 首个 tool_call 增量到达即可确认本步是工具步：若已有旁白
-                            # （之前收到的 content 增量），立刻撤回并转入面板，把定性
-                            # 时机从"整步结束"提前到"旁白刚结束"，避免正文长时间滞留。
-                            if content_parts and not narration_reset_done:
-                                await emit("content_reset", {"turn_id": turn_id, "step": step})
-                                _tl_append_narration("".join(content_parts))
-                                narration_reset_done = True
-                                turn_body = ""
-                        elif kind == "done":
-                            tool_calls = data.get("tool_calls") or []
-                            step_usage = data.get("usage") or {}
-                            break
-                    calls += 1
-                except Exception as exc:
-                    # Provider may reject a prompt despite the pre-step estimate.
-                    # Retry once only before any model-visible output, after a forced
-                    # compaction; otherwise preserve the original failure semantics.
-                    if (not overflow_recovered and first_token_at is None
-                            and not content_parts and self.compaction_engine is not None
-                            and _is_context_overflow(exc)):
-                        await _progress("compact_recovery", "上下文超限，压缩后重试")
-                        recovered = await self.compaction_engine.compact_now(
-                            session_id=session_id, snap=snap,
-                            messages=context["history"], system=system_content,
-                            tools=tools, message_ids=context.get("history_ids") or [],
-                            protected_indices=context.get("history_protected") or set())
-                        if recovered is not None:
-                            overflow_recovered = True
-                            self.events.append(
-                                turn_id, "context.compacted", actor="host",
-                                model_visible=False,
-                                payload={"trigger": "overflow",
-                                         "shadowed_count": recovered.shadowed_count,
-                                         "released_tokens_est": recovered.released_tokens_est,
-                                         "total_before": recovered.total_before,
-                                         "total_after_est": recovered.total_after_est})
-                            await runtime_emit("context_compacted", {
-                                "turn_id": turn_id, "step": step, "trigger": "overflow",
-                                "shadowed_count": recovered.shadowed_count,
-                                "released_tokens_est": recovered.released_tokens_est})
-                            turn_context = await self.context_loader(
-                                session_id=session_id, turn_id=turn_id, message=message,
-                                onboarding=onboarding, step=step, handoff_path=handoff_path,
-                                location=location, emit=emit)
-                            cached_system_content = None
-                            prompt_fingerprint = None
-                            continue
-                    raise
-                finally:
-                    step_span.end()
-                step_completed_at = time.perf_counter()
-                llm_ms = max(0, round((step_completed_at - step_started_at) * 1000))
-                ttft_ms = (max(0, round((first_token_at - step_started_at) * 1000))
-                           if first_token_at is not None else None)
-                decode_ms = (max(0, round((step_completed_at - first_token_at) * 1000))
-                             if first_token_at is not None else None)
-                record_step(
-                    self.db, turn_id=turn_id, step=step, llm_ms=llm_ms,
-                    ttft_ms=ttft_ms, decode_ms=decode_ms,
-                    input_tokens=step_usage.get("input_tokens", 0),
-                    output_tokens=step_usage.get("output_tokens", 0),
-                    cache_read_tokens=step_usage.get("cache_read_tokens", 0),
-                    cache_write_tokens=step_usage.get("cache_write_tokens", 0),
-                    context_ms=context_ms,
-                    system_prompt_hash=prompt_fingerprint.system_prompt_hash,
-                    tool_schema_hash=prompt_fingerprint.tool_schema_hash,
-                    session_context_hash=prompt_fingerprint.session_context_hash,
-                    prefix_hash=prompt_fingerprint.prefix_hash,
-                    cache_change_reason=prompt_cache_reason,
-                    prefix_reused=prompt_prefix_reused,
-                )
-                # v7：把 provider 精确 usage 折进 TokenMeter 的 session anchor —
-                # 下一 step 的压力判断就用这个 anchor + tiktoken delta 而不是全估算
-                if self.token_meter is not None and step_usage:
                     try:
-                        # prompt[0] 是 system；后续都算 messages
-                        self.token_meter.commit_anchor(
-                            session_id, prompt[1:], step_usage,
-                            system=prompt[0].get("content", ""))
-                    except Exception:  # noqa: BLE001
-                        logger.debug("commit_anchor 失败，忽略", exc_info=True)
-                if not tool_calls:
-                    content = "".join(content_parts)
-                    analysis_metadata = self._analysis_metadata(
-                        turn_id=turn_id, reasoning_effort=reasoning_effort,
-                        reasoning_parts=reasoning_parts, system_parts=system_parts,
-                        tool_events=tool_events, decision_notices=decision_notices,
-                        reasoning_source=reasoning_source, end_reason="final_answer",
-                        timeline=timeline)
-                    msg_id = self.sessions.append_message(
-                        session_id, "assistant", content,
-                        thinking="".join(thinking_parts) or None,
-                        analysis_metadata=analysis_metadata,
-                        visuals=turn_visuals or None,
-                        parent_id=assistant_parent_id,
-                        version_group_id=assistant_version_group_id)
-                    self.events.append(turn_id, "assistant.message", actor="model", step=step,
-                                       model_visible=True, payload={"content": content,
-                                                                    "message_id": msg_id,
-                                                                    "reasoning_content": "".join(step_reasoning_parts)[:12000]})
+                        # 流式：内容增量边收边发 content_delta，首字延迟由整段生成
+                        # 时间降到首 chunk 到达时间；tool_calls 在流内累积，末尾 done
+                        # 事件同时返回内容与工具调用，与非流式契约等价。
+                        # 注意：工具步里模型可能"边说边调工具"（旁白也会走 content
+                        # 增量），这些旁白先实时进正文、在本步确认带 tool_calls 后
+                        # 由 content_reset 事件撤回，保证正文最终只留末步答案。
+                        async for kind, data in self.llm.stream_chat(
+                                snap, prompt, source="agent_step",
+                                session_id=session_id, tools=tools,
+                                images=images if step == 1 else None,
+                                extra_body={"reasoning_effort": effective_effort},
+                                trace_metadata={"prompt_cache": prompt_cache_trace}):
+                            # 对齐 deepseek-harness/isTokenDelta：首 token 打点覆盖
+                            # 所有 meaningful 流式 chunk（含 reasoning）。这样 ttft_ms
+                            # 反映"用户看到第一个字符"的真实时刻；decode_ms 覆盖 reasoning
+                            # + content 全段，与 provider usage.output_tokens 分母对齐，
+                            # 避免"分子含 reasoning、分母只算 content"造成的 tok/s 虚高。
+                            if kind in ("content", "reasoning") and data \
+                                    and first_token_at is None:
+                                first_token_at = time.perf_counter()
+                            if kind == "content":
+                                content_parts.append(data)
+                                if not narration_reset_done:
+                                    turn_body += data
+                                await emit("content_delta", {"text": data})
+                            elif kind == "reasoning":
+                                reasoning_source = "provider"
+                                reasoning_parts.append(data)
+                                step_reasoning_parts.append(data)
+                                _tl_append_reasoning(data)
+                                await emit("reasoning_delta", {
+                                    "text": data, "source": "provider"})
+                            elif kind == "tool_start":
+                                # 首个 tool_call 增量到达即可确认本步是工具步：若已有旁白
+                                # （之前收到的 content 增量），立刻撤回并转入面板，把定性
+                                # 时机从"整步结束"提前到"旁白刚结束"，避免正文长时间滞留。
+                                if content_parts and not narration_reset_done:
+                                    await emit("content_reset", {
+                                        "turn_id": turn_id, "step": step})
+                                    _tl_append_narration("".join(content_parts))
+                                    narration_reset_done = True
+                                    turn_body = ""
+                            elif kind == "done":
+                                tool_calls = data.get("tool_calls") or []
+                                step_usage = data.get("usage") or {}
+                                break
+                        calls += 1
+                    except Exception as exc:
+                        # Provider may reject a prompt despite the pre-step estimate.
+                        # Retry once only before any model-visible output, after a forced
+                        # compaction; otherwise preserve the original failure semantics.
+                        if (not overflow_recovered and first_token_at is None
+                                and not content_parts
+                                and self.compaction_engine is not None
+                                and _is_context_overflow(exc)):
+                            await _progress("compact_recovery", "上下文超限，压缩后重试")
+                            recovered = await self.compaction_engine.compact_now(
+                                session_id=session_id, snap=snap,
+                                messages=context["history"], system=system_content,
+                                tools=tools,
+                                message_ids=context.get("history_ids") or [],
+                                protected_indices=context.get("history_protected") or set(),
+                                recall_context=context.get("working_set_recall"))
+                            if recovered is not None:
+                                overflow_recovered = True
+                                self.events.append(
+                                    turn_id, "context.compacted", actor="host",
+                                    model_visible=False,
+                                    payload={"trigger": "overflow",
+                                             "shadowed_count": recovered.shadowed_count,
+                                             "released_tokens_est": recovered.released_tokens_est,
+                                             "total_before": recovered.total_before,
+                                             "total_after_est": recovered.total_after_est})
+                                await runtime_emit("context_compacted", {
+                                    "turn_id": turn_id, "step": step,
+                                    "trigger": "overflow",
+                                    "shadowed_count": recovered.shadowed_count,
+                                    "released_tokens_est": recovered.released_tokens_est})
+                                turn_context = await self.context_loader(
+                                    session_id=session_id, turn_id=turn_id,
+                                    message=message, onboarding=onboarding,
+                                    step=step, handoff_path=handoff_path,
+                                    location=location, emit=emit)
+                                cached_system_content = None
+                                prompt_fingerprint = None
+                                step_span.end(output={"outcome": "overflow_retry"})
+                                step_span_closed = True
+                                continue
+                        raise
+                    # LLM 指标在流式结束后立刻记账；step span 仍保持打开直到工具结束。
+                    step_completed_at = time.perf_counter()
+                    llm_ms = max(0, round((step_completed_at - step_started_at) * 1000))
+                    ttft_ms = (max(0, round((first_token_at - step_started_at) * 1000))
+                               if first_token_at is not None else None)
+                    decode_ms = (max(0, round((step_completed_at - first_token_at) * 1000))
+                                 if first_token_at is not None else None)
+                    record_step(
+                        self.db, turn_id=turn_id, step=step, llm_ms=llm_ms,
+                        ttft_ms=ttft_ms, decode_ms=decode_ms,
+                        input_tokens=step_usage.get("input_tokens", 0),
+                        output_tokens=step_usage.get("output_tokens", 0),
+                        cache_read_tokens=step_usage.get("cache_read_tokens", 0),
+                        cache_write_tokens=step_usage.get("cache_write_tokens", 0),
+                        context_ms=context_ms,
+                        system_prompt_hash=prompt_fingerprint.system_prompt_hash,
+                        tool_schema_hash=prompt_fingerprint.tool_schema_hash,
+                        session_context_hash=prompt_fingerprint.session_context_hash,
+                        prefix_hash=prompt_fingerprint.prefix_hash,
+                        cache_change_reason=prompt_cache_reason,
+                        prefix_reused=prompt_prefix_reused,
+                    )
+                    # v7：把 provider 精确 usage 折进 TokenMeter 的 session anchor —
+                    # 下一 step 的压力判断就用这个 anchor + tiktoken delta 而不是全估算
+                    if self.token_meter is not None and step_usage:
+                        try:
+                            # prompt[0] 是 system；后续都算 messages
+                            self.token_meter.commit_anchor(
+                                session_id, prompt[1:], step_usage,
+                                system=prompt[0].get("content", ""))
+                        except Exception:  # noqa: BLE001
+                            logger.debug("commit_anchor 失败，忽略", exc_info=True)
+                    if not tool_calls:
+                        content = "".join(content_parts)
+                        analysis_metadata = self._analysis_metadata(
+                            turn_id=turn_id, reasoning_effort=reasoning_effort,
+                            reasoning_parts=reasoning_parts, system_parts=system_parts,
+                            tool_events=tool_events, decision_notices=decision_notices,
+                            reasoning_source=reasoning_source, end_reason="final_answer",
+                            timeline=timeline)
+                        msg_id = self.sessions.append_message(
+                            session_id, "assistant", content,
+                            thinking="".join(thinking_parts) or None,
+                            analysis_metadata=analysis_metadata,
+                            visuals=turn_visuals or None,
+                            parent_id=assistant_parent_id,
+                            version_group_id=assistant_version_group_id)
+                        self.events.append(
+                            turn_id, "assistant.message", actor="model", step=step,
+                            model_visible=True,
+                            payload={"content": content, "message_id": msg_id,
+                                     "reasoning_content": "".join(step_reasoning_parts)[:12000]})
+                        self.events.append(turn_id, "step.finished", actor="host", step=step,
+                                           payload={"outcome": "final"})
+                        self.events.finish(turn_id, status="completed",
+                                           end_reason="final_answer", step=step)
+                        step_span.end(output={
+                            "outcome": "final",
+                            "content_chars": len(content),
+                            "message_id": msg_id,
+                            "tool_calls": 0,
+                        })
+                        step_span_closed = True
+                        trace.update(output={"message_id": msg_id}, metadata={
+                            "provider_capabilities": {
+                                "model_id": snap.model_id,
+                                "reasoning_efforts": list(
+                                    getattr(snap, "reasoning_efforts", ()) or ()),
+                                "native_reasoning": bool(
+                                    getattr(snap, "native_reasoning", False)),
+                                "reasoning_received": bool(reasoning_parts),
+                            }, "developer_trace": build_agent_trace(
+                            turn_id=turn_id, reasoning_effort=reasoning_effort, steps=step,
+                            llm_call_count=calls,
+                            latency_ms=int((time.monotonic() - started) * 1000),
+                            end_reason="final_answer")})
+                        await runtime_emit("turn_completed", {
+                            "message_id": msg_id, "turn_id": turn_id,
+                            "reasoning_effort": reasoning_effort,
+                            "analysis_metadata": analysis_metadata,
+                            "metrics": turn_metrics(self.db, turn_id),
+                            "session_metrics": session_metrics(
+                                self.db, session_id, current_turn_id=turn_id),
+                        })
+                        return {
+                            "turn_id": turn_id,
+                            "message_id": msg_id,
+                            "content": content,
+                            "langfuse_trace_id": getattr(trace, "id", None),
+                        }
+                    # 本步是工具步：模型边说边调工具，旁白会实时内联进正文。
+                    # content_reset 是给其它消费端（IM 网关）的信号——把这段工具步旁白
+                    # 从最终回复里剔除；web 端正文内联、turn 结束由 reload 折叠进面板。
+                    # 旁白本身记入 timeline 留存（处理进度面板可见、随消息持久化）。
+                    if content_parts and not narration_reset_done:
+                        narration = "".join(content_parts)
+                        await emit("content_reset", {"turn_id": turn_id, "step": step})
+                        _tl_append_narration(narration)
+                        turn_body = ""
+                    self.events.append(
+                        turn_id, "assistant.tool_calls", actor="model", step=step,
+                        model_visible=True,
+                        payload={"content": "".join(content_parts),
+                                 "tool_calls": tool_calls,
+                                 "reasoning_content": "".join(step_reasoning_parts)[:12000]})
+                    results = await self._run_tool_calls(
+                        turn_id, step, tool_calls, runtime_emit, repeat_guard)
+                    # 收集图形工具产出，随最终消息持久化（刷新后可恢复渲染）
+                    for _tr in results:
+                        if _tr.get("ok") and _tr.get("tool") in (
+                                "render_flowchart", "render_mermaid",
+                                "generate_image", "generate_video"):
+                            _vd = _tr.get("result")
+                            if isinstance(_vd, dict) and _vd.get("type"):
+                                turn_visuals.append({"type": _vd["type"], "data": _vd})
+                    tool_ms = sum(int(result.get("_duration_ms", 0) or 0)
+                                  for result in results)
+                    if tool_ms:
+                        add_tool_time(self.db, turn_id=turn_id, step=step, tool_ms=tool_ms)
                     self.events.append(turn_id, "step.finished", actor="host", step=step,
-                                       payload={"outcome": "final"})
-                    self.events.finish(turn_id, status="completed", end_reason="final_answer", step=step)
-                    trace.update(output={"message_id": msg_id}, metadata={
-                        "provider_capabilities": {
-                            "model_id": snap.model_id,
-                            "reasoning_efforts": list(getattr(snap, "reasoning_efforts", ()) or ()),
-                            "native_reasoning": bool(getattr(snap, "native_reasoning", False)),
-                            "reasoning_received": bool(reasoning_parts),
-                        }, "developer_trace": build_agent_trace(
-                        turn_id=turn_id, reasoning_effort=reasoning_effort, steps=step,
-                        llm_call_count=calls, latency_ms=int((time.monotonic() - started) * 1000),
-                        end_reason="final_answer")})
-                    await runtime_emit("turn_completed", {
-                        "message_id": msg_id, "turn_id": turn_id,
-                        "reasoning_effort": reasoning_effort,
-                        "analysis_metadata": analysis_metadata,
-                        "metrics": turn_metrics(self.db, turn_id),
-                        "session_metrics": session_metrics(self.db, session_id,
-                                                           current_turn_id=turn_id),
+                                       payload={"outcome": "tool_calls",
+                                                "count": len(results)})
+                    step_span.end(output={
+                        "outcome": "tool_calls",
+                        "content_chars": len("".join(content_parts)),
+                        "tool_calls": len(results),
+                        "tool_names": [r.get("tool") for r in results if r.get("tool")],
                     })
-                    return {"turn_id": turn_id, "message_id": msg_id, "content": content}
-                # 本步是工具步：模型边说边调工具，旁白会实时内联进正文。
-                # content_reset 是给其它消费端（IM 网关）的信号——把这段工具步旁白
-                # 从最终回复里剔除；web 端正文内联、turn 结束由 reload 折叠进面板。
-                # 旁白本身记入 timeline 留存（处理进度面板可见、随消息持久化）。
-                if content_parts and not narration_reset_done:
-                    narration = "".join(content_parts)
-                    await emit("content_reset", {"turn_id": turn_id, "step": step})
-                    _tl_append_narration(narration)
-                    turn_body = ""
-                self.events.append(turn_id, "assistant.tool_calls", actor="model", step=step,
-                                   model_visible=True, payload={"content": "".join(content_parts),
-                                                                "tool_calls": tool_calls,
-                                                                "reasoning_content": "".join(step_reasoning_parts)[:12000]})
-                results = await self._run_tool_calls(turn_id, step, tool_calls, runtime_emit,
-                                                     repeat_guard)
-                # 收集图形工具产出，随最终消息持久化（刷新后可恢复渲染）
-                for _tr in results:
-                    if _tr.get("ok") and _tr.get("tool") in (
-                            "render_flowchart", "render_mermaid",
-                            "generate_image", "generate_video"):
-                        _vd = _tr.get("result")
-                        if isinstance(_vd, dict) and _vd.get("type"):
-                            turn_visuals.append({"type": _vd["type"], "data": _vd})
-                tool_ms = sum(int(result.get("_duration_ms", 0) or 0)
-                              for result in results)
-                if tool_ms:
-                    add_tool_time(self.db, turn_id=turn_id, step=step, tool_ms=tool_ms)
-                self.events.append(turn_id, "step.finished", actor="host", step=step,
-                                   payload={"outcome": "tool_calls", "count": len(results)})
-                # 步边界推送刷新后的会话/turn 指标——对齐 deepseek-harness 的
-                # sessionStats projection 在 assistant/message 时的更新时机，
-                # 让多步 turn 在中间也能刷新 tok/s / TTFT 平均值等聚合数字。
-                await emit("step_metrics", {
-                    "turn_id": turn_id, "step": step,
-                    "metrics": turn_metrics(self.db, turn_id),
-                    "session_metrics": session_metrics(self.db, session_id,
-                                                       current_turn_id=turn_id),
-                })
+                    step_span_closed = True
+                    # 步边界推送刷新后的会话/turn 指标——对齐 deepseek-harness 的
+                    # sessionStats projection 在 assistant/message 时的更新时机，
+                    # 让多步 turn 在中间也能刷新 tok/s / TTFT 平均值等聚合数字。
+                    await emit("step_metrics", {
+                        "turn_id": turn_id, "step": step,
+                        "metrics": turn_metrics(self.db, turn_id),
+                        "session_metrics": session_metrics(
+                            self.db, session_id, current_turn_id=turn_id),
+                    })
+                finally:
+                    if not step_span_closed:
+                        step_span.end(output={"outcome": "aborted"})
             # v7：自动压缩接管压力管控后，AGENT_MAX_STEPS 从"截断触发线"降为
             # "防死循环兜底"。如果模型已经产出内容就拼接，否则给拆分建议。
             content_so_far = "".join(content_parts).strip()
@@ -737,7 +798,12 @@ class TurnRuntime:
                 "session_metrics": session_metrics(self.db, session_id,
                                                    current_turn_id=turn_id),
             })
-            return {"turn_id": turn_id, "message_id": msg_id, "content": content}
+            return {
+                "turn_id": turn_id,
+                "message_id": msg_id,
+                "content": content,
+                "langfuse_trace_id": getattr(trace, "id", None),
+            }
         except asyncio.CancelledError:
             partial_body = turn_body.strip()
             has_progress = bool(

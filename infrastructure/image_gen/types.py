@@ -36,3 +36,12 @@ class ImageGenResult:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def image_capability_hint(snap) -> str:
+    ptype = (getattr(snap, "provider_type", "") or "").strip().lower()
+    if ptype == "comfyui":
+        return "当前文生图：本地 ComfyUI；默认 1024x1024；一次一张；可能需要十几秒。"
+    return (
+        "当前文生图：云端；一次一张；尺寸常见 1024x1024 / 1024x1792 / 1792x1024。"
+    )

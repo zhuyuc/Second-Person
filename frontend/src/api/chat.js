@@ -47,8 +47,9 @@ export const chatApi = {
   params: () => api.get('/settings/params'),
 
   // ---- 附件/导入 ----
+  // 知识库导入走 LLM 提炼，client 会按路径自动放宽超时并给出可读提示
   uploadAttachment: (form) => api.upload('/chat/attachment', form),
-  importDocument: (form) => api.upload('/import/document', form),
+  importDocument: (form, options) => api.upload('/import/document', form, options),
   messages: (sid, { before_id, limit } = {}) =>
     api.get(withQuery('/chat/messages', { session_id: sid, before_id, limit })),
   sessionMetrics: (sid) =>

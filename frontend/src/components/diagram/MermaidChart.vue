@@ -132,7 +132,7 @@ function copySrc() {
 async function copyImage() {
   const svg = container.value?.querySelector('svg')
   if (!svg) {
-    toast.push('error', '图表未渲染')
+    toast.push('error', '图表还没渲染好，请稍候再试')
     return
   }
   try {
@@ -140,14 +140,14 @@ async function copyImage() {
     await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
     toast.push('success', '图片已复制')
   } catch {
-    toast.push('error', '复制图片失败')
+    toast.push('error', '复制图片失败，请改为下载或右键保存')
   }
 }
 
 function downloadPng() {
   const svg = container.value?.querySelector('svg')
   if (!svg) {
-    toast.push('error', '图表未渲染')
+    toast.push('error', '图表还没渲染好，请稍候再试')
     return
   }
   svgToPngBlob(svg)
@@ -158,7 +158,7 @@ function downloadPng() {
       a.click()
       toast.push('success', 'PNG 已下载')
     })
-    .catch(() => toast.push('error', '导出图片失败'))
+    .catch(() => toast.push('error', '导出图片失败，请稍后重试'))
 }
 
 // 暗色模式切换监听

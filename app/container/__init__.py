@@ -44,6 +44,7 @@ from scheduler.ingest import IngestManager
 from scheduler.scheduler import TaskScheduler
 from agent.projects import ProjectStore
 from agent.session_context import SessionStore
+from agent.video_workshop import VideoWorkshopStore
 from agent.response_signals import SignalCollector
 from soul.skill_manager import SkillManager
 from soul.soul_manager import SoulManager
@@ -130,6 +131,19 @@ class AppContainer:
         self.ctx_entry = ContextEntryManager(d)
         self.sessions = SessionStore(self.db, d)
         self.projects = ProjectStore(self.db, d)
+        self.workshop = VideoWorkshopStore(self.db, d)
+        from infrastructure.remote_jobs import RemoteJobStore, set_store
+        self.remote_jobs = RemoteJobStore(self.db)
+        set_store(self.remote_jobs)
+        try:
+            self.workshop.reclaim_stale_doing()
+        except Exception:  # noqa: BLE001
+            logger.warning("workshop reclaim_stale_doing failed", exc_info=True)
+        try:
+            from infrastructure.remote_jobs.resume import schedule_resume_running_jobs
+            schedule_resume_running_jobs(self)
+        except Exception:  # noqa: BLE001
+            logger.warning("remote_jobs resume schedule failed", exc_info=True)
         from app.attachment_store import AttachmentStore
         self.attachments = AttachmentStore(d)
         self.notifications = NotificationManager(self.db, self.sessions)
@@ -198,7 +212,9 @@ class AppContainer:
                           config=self.config, llm=self.llm, providers=self.providers,
                           memory_gate=self.memory_gate)
         # ---- M3：fs 工具族 + 沙箱四档 -------------------------------------
+        from agent.working_set import FileCardStore
         self.fs_observations = FsObservationStore(self.db)
+        self.file_cards = FileCardStore(self.db)
         self.policy_store = PolicyStore(
             self.db, self.projects, self.config,
             legacy_workspace=self.sandbox.workspace,
@@ -207,7 +223,8 @@ class AppContainer:
         self.workspace_resolver = WorkspaceResolver(self.policy_store)
         register_fs_tools(self.registry,
                           observation_store=self.fs_observations,
-                          config=self.config)
+                          config=self.config,
+                          file_cards=self.file_cards)
         self.connectors = ConnectorManager(self.db, self.creds, self.registry)
 
         # ---- v7：token 度量 + 自动压缩 --------------------------------------
@@ -230,7 +247,8 @@ class AppContainer:
         self.tool_executor = ToolExecutor(
             self.registry, self.config, self.notifier,
             workspace_resolver=self.workspace_resolver,
-            data_dir=d)
+            data_dir=d,
+            file_cards=self.file_cards)
         self.signals = SignalCollector(self.db)
         self.core = AgentCore(
             db=self.db, config=self.config, session_store=self.sessions,
@@ -247,7 +265,9 @@ class AppContainer:
             projects=self.projects,
             workspace_resolver=self.workspace_resolver,
             token_meter=self.token_meter,
-            compaction_engine=self.compaction_engine)
+            compaction_engine=self.compaction_engine,
+            fs_observations=self.fs_observations,
+            file_cards=self.file_cards)
 
         # ---- 系统 Agent ----
         self.reviewer = ReviewAgent(self.db, self.distiller, self.config, d,
@@ -588,6 +608,8 @@ class AppContainer:
         await self.vector_compensator.stop()
         await self.fw.stop()
         await self.tracer.stop()
+        from infrastructure.remote_jobs import set_store
+        set_store(None)
         self.db.wal_checkpoint("TRUNCATE")
         # 排空写队列并停止单写线程（火忘式写入全部落盘后才退出）
         self.db.close()

@@ -397,7 +397,7 @@ function getSvgString() {
 function copySvg() {
   const s = getSvgString()
   if (!s) {
-    toast.push('error', 'SVG 不可用')
+    toast.push('error', '当前图表还不能导出，请等渲染完成后再试')
     return
   }
   navigator.clipboard.writeText(s)
@@ -420,7 +420,7 @@ function downloadSvg() {
 function downloadPng() {
   const svg = svgRef.value
   if (!svg) {
-    toast.push('error', 'SVG 不可用')
+    toast.push('error', '当前图表还不能导出，请等渲染完成后再试')
     return
   }
   try {
@@ -446,7 +446,7 @@ function downloadPng() {
     }
     img.src = url
   } catch {
-    toast.push('error', '导出 PNG 失败')
+    toast.push('error', '导出 PNG 失败，请稍后重试或改用复制 SVG')
   }
 }
 </script>

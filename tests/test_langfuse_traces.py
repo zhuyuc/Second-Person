@@ -81,6 +81,51 @@ def test_trace_span_generation_parent_chain_is_emitted():
     assert trace_update["output"] == {"title": "标题"}
 
 
+def test_attach_trace_reuses_parent_without_new_trace():
+    """同轮后台续写：attach 后 span/generation 挂原 trace，不再 trace-create。"""
+    tracer, fake = _tracer()
+
+    trace = tracer.trace_start("agent.turn", session_id="sid-mood")
+    parent_id = trace.id
+    span_main = tracer.span_start("agent.step")
+    span_main.end(output={"ok": True})
+    trace.end()
+
+    before = len(_events(fake, "trace-create"))
+    with tracer.attach_trace(parent_id) as attached:
+        assert attached is True
+        mood = tracer.span_start(
+            "mood.judge", input={"message_id": 1},
+            metadata={"phase": "after_turn",
+                      "timeline_position": "after_final_answer"})
+        gen = tracer.generation_start(
+            "llm.mood_judge", model="m",
+            metadata={"source": "mood_judge"})
+        gen.end(output={"ai_mood": "neutral"})
+        mood.end(output={"ai_mood": "neutral"})
+
+    assert len(_events(fake, "trace-create")) == before
+    mood_creates = [e["body"] for e in _events(fake, "span-create")
+                    if e["body"].get("name") == "mood.judge"]
+    assert len(mood_creates) == 1
+    assert mood_creates[0]["traceId"] == parent_id
+    assert mood_creates[0]["metadata"]["timeline_position"] == "after_final_answer"
+    gen_creates = [e["body"] for e in _events(fake, "generation-create")
+                   if e["body"].get("name") == "llm.mood_judge"]
+    assert len(gen_creates) == 1
+    assert gen_creates[0]["traceId"] == parent_id
+    assert gen_creates[0]["parentObservationId"] == mood_creates[0]["id"]
+
+
+def test_attach_trace_noop_without_id():
+    tracer, fake = _tracer()
+    with tracer.attach_trace(None) as attached:
+        assert attached is False
+        span = tracer.span_start("mood.judge")
+        span.end()
+    assert _events(fake, "span-create") == []
+
+
 def test_generation_metadata_keeps_prompt_cache_diagnostics():
     tracer, fake = _tracer()
     trace = tracer.trace_start("agent.turn", session_id="sid-cache")

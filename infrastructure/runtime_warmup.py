@@ -147,6 +147,12 @@ class RuntimeWarmer:
         snap = providers.snapshot_for("chat") or providers.snapshot_for("agent")
         if snap is None:
             return {"ok": False, "error": "chat_snap_missing"}
+        from infrastructure.provider_modality import infer_modality, normalize_modality
+        modality = normalize_modality(
+            getattr(snap, "modality", None),
+            infer_modality(getattr(snap, "provider_type", ""), getattr(snap, "model_id", "") or ""))
+        if modality != "text":
+            return {"ok": True, "skipped": "non_text", "modality": modality}
         try:
             # probe 走连通性探测路径，不计入正式熔断/用量统计口径
             result = await llm.probe(snap)
@@ -178,22 +184,27 @@ class RuntimeWarmer:
                 out[slot] = {"ok": False, "error": "unconfigured"}
                 continue
             ptype = (getattr(snap, "provider_type", "") or "").strip().lower()
-            if ptype != "comfyui":
-                out[slot] = {"ok": False, "error": f"unsupported_type:{ptype}"}
+            if ptype == "comfyui":
+                base = (getattr(snap, "base_url", "") or "").rstrip("/")
+                if not base:
+                    out[slot] = {"ok": False, "error": "empty_base_url"}
+                    continue
+                if base not in url_cache:
+                    try:
+                        url_cache[base] = await probe_comfyui(base)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("comfyui warmup failed slot=%s: %s",
+                                     slot, exc, exc_info=True)
+                        url_cache[base] = {"ok": False, "error": str(exc)[:200]}
+                probe = dict(url_cache[base])
+                probe["base_url"] = base
+                probe["model_id"] = getattr(snap, "model_id", "") or ""
+                out[slot] = probe
                 continue
-            base = (getattr(snap, "base_url", "") or "").rstrip("/")
-            if not base:
-                out[slot] = {"ok": False, "error": "empty_base_url"}
-                continue
-            if base not in url_cache:
-                try:
-                    url_cache[base] = await probe_comfyui(base)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("comfyui warmup failed slot=%s: %s",
-                                 slot, exc, exc_info=True)
-                    url_cache[base] = {"ok": False, "error": str(exc)[:200]}
-            probe = dict(url_cache[base])
-            probe["base_url"] = base
-            probe["model_id"] = getattr(snap, "model_id", "") or ""
-            out[slot] = probe
+            out[slot] = {
+                "ok": True,
+                "skipped": "cloud",
+                "provider_type": ptype,
+                "model_id": getattr(snap, "model_id", "") or "",
+            }
         return out

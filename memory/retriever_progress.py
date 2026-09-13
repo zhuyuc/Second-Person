@@ -10,6 +10,7 @@ GATE_LABELS: dict[str, str] = {
     "short_query_shortcircuit": "极短寒暄且携带会话上下文",
     "ack_shortcut": "确认/致谢类消息",
     "empty_query": "空消息",
+    "working_set_demotion": "编辑态工作集已就绪，跳过全量记忆检索",
     "presearch_empty": "预筛无候选",
     "refine_empty": "精筛后无相关记忆",
     "none": "正常检索",

@@ -518,11 +518,14 @@ class Retriever:
             hits=compact_candidates(candidates) or None,
         ))
 
+        # 预筛 0 候选：直接结束，不进图扩展 / LLM 精筛 / 详情加载。
+        # 有候选时才走下方「图扩展 → 精筛 → 注入」现有逻辑。
         if not candidates:
             result.diagnostics = self._empty_diagnostics(
                 query, pre, context_text, result.degraded, _start)
             await self._notify_progress(on_progress, build_progress_payload(
-                stage="done", status="ok", summary=done_summary(0),
+                stage="done", status="ok",
+                summary="预筛无候选，已跳过图扩展与精筛",
                 candidates=0, hit_count=0, gate="presearch_empty",
                 elapsed_ms=round((time.perf_counter() - _start) * 1000),
             ))

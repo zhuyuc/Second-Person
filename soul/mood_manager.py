@@ -97,13 +97,14 @@ class MoodManager:
             logger.debug("加载 mood_rules 失败", exc_info=True)
             return ""
 
-    def build_state_context(self) -> str:
+    def build_state_context(self, user_message: str | None = None) -> str:
         """本轮情绪状态（进 messages 尾部 context.mood，允许每轮变化）。
 
         - strength 调制：根据 mood_influence_strength 调整注入浓度
         - 强度用高/中/低档，避免两位小数与时间文案污染 system 前缀
         - baseline 风味：即使 neutral 也根据历史关系给出有温度的基线描述
         - attribution 提示：告知 AI 当前情绪来源（self/other/shared）
+        - 寒暄/无承接的自我歉意：仅弱化本轮展示文案，不改 DB 真值
         """
         if not self.config.get("mood_enabled", True):
             return ""
@@ -114,25 +115,50 @@ class MoodManager:
         if not row:
             return ""
 
-        kwargs: dict[str, object] = {
-            "strength_hint": self._strength_hint(strength)}
+        from soul.mood_turn_policy import (
+            is_brief_social_turn, should_soften_self_negative,
+        )
+        brief = is_brief_social_turn(user_message)
+        soften_self = should_soften_self_negative(
+            ai_mood=row["ai_mood"] or "",
+            ai_attribution=row["ai_attribution"] or "",
+            user_message=user_message,
+        )
+
+        # 寒暄轮：表达档位压到「轻微」；情绪标签仍可保留（再经 soften 处理）
+        if brief:
+            strength_hint = "情绪表达轻微暗示即可（本轮为极短寒暄）"
+        else:
+            strength_hint = self._strength_hint(strength)
+
+        kwargs: dict[str, object] = {"strength_hint": strength_hint}
         for scope in ("user", "ai"):
             mood = row[f"{scope}_mood"]
             raw_intensity = self._decay(
                 row[f"{scope}_intensity"], row[f"{scope}_updated_at"])
             adjusted = raw_intensity * strength
-            if mood != "neutral" and adjusted > DECAY_FLOOR:
+            use_baseline = False
+            if scope == "ai" and soften_self:
+                use_baseline = True
+            if mood != "neutral" and adjusted > DECAY_FLOOR and not use_baseline:
                 kwargs[f"{scope}_mood"] = _mood_cn(mood)
-                kwargs[f"{scope}_intensity_band"] = self._intensity_band(adjusted)
-                kwargs[f"{scope}_time_hint"] = self._time_hint(
-                    row[f"{scope}_updated_at"])
+                band = self._intensity_band(adjusted)
+                if brief:
+                    band = "低"
+                kwargs[f"{scope}_intensity_band"] = band
+                kwargs[f"{scope}_time_hint"] = (
+                    "" if brief else self._time_hint(row[f"{scope}_updated_at"]))
             else:
                 kwargs[f"{scope}_mood"] = self._baseline_flavor(scope)
                 kwargs[f"{scope}_intensity_band"] = "低"
                 kwargs[f"{scope}_time_hint"] = ""
 
-        kwargs["ai_attribution_hint"] = self._attribution_hint(
-            row["ai_attribution"] or "")
+        if soften_self or brief:
+            # 寒暄或弱化自我歉意时，不强调「来自对自己表现的评估」以免诱发道歉独白
+            kwargs["ai_attribution_hint"] = ""
+        else:
+            kwargs["ai_attribution_hint"] = self._attribution_hint(
+                row["ai_attribution"] or "")
         return PROMPTS.render("agent/prompts/mood_state", **kwargs)
 
     def build_hint(self) -> str:

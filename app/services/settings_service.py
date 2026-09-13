@@ -25,12 +25,15 @@ class SettingsService:
     def clean_provider_fields(body: dict) -> dict:
         """清洗 Provider 表单字段：去首尾空格/换行。"""
         out = dict(body)
-        for k in ("display_name", "provider_type", "base_url", "model_id", "api_key"):
+        for k in ("display_name", "provider_type", "base_url", "model_id", "api_key",
+                  "modality"):
             if isinstance(out.get(k), str):
                 out[k] = out[k].strip()
         return out
 
     def validate_provider_required(self, body: dict) -> None:
+        from infrastructure.provider_modality import (
+            infer_modality, normalize_modality, validate_combo)
         ptype = (body.get("provider_type") or "").strip()
         required = [("base_url", "Base URL"), ("model_id", "模型 ID")]
         if ptype != "comfyui":
@@ -40,19 +43,46 @@ class SettingsService:
                 raise ValueError(f"请先填写{label}")
         if ptype == "comfyui" and not (body.get("api_key") or "").strip():
             body["api_key"] = "local"
+        modality = normalize_modality(
+            body.get("modality") or infer_modality(ptype, body.get("model_id") or ""))
+        validate_combo(modality, ptype)
+        body["modality"] = modality
 
     async def probe_snapshot(self, snap) -> dict:
-        """一次性连通性探测，不污染正式调用的熔断与用量状态。"""
+        """一次性连通性探测，不污染正式调用的熔断与用量状态。
+
+        按模态分流：视频/图片绝不走 chat/embedding 探测。
+        """
         try:
-            if getattr(snap, "provider_type", "") == "comfyui":
+            from infrastructure.provider_modality import infer_modality, normalize_modality
+            ptype = (getattr(snap, "provider_type", "") or "").strip().lower()
+            modality = normalize_modality(
+                getattr(snap, "modality", None),
+                infer_modality(ptype, getattr(snap, "model_id", "") or ""))
+            if ptype == "comfyui":
                 from infrastructure.image_gen import probe_comfyui
                 return await probe_comfyui(snap.base_url)
+            if modality == "video":
+                from infrastructure.video_gen.cloud_adapter import KlingVideoAdapter
+                from infrastructure.video_gen.profiles import CLOUD_PROFILE
+                adapter = KlingVideoAdapter(
+                    base_url=snap.base_url, api_key=snap.api_key,
+                    data_dir=Path("."), profile=CLOUD_PROFILE,
+                    model_id=snap.model_id or "")
+                return await adapter.probe()
+            if modality == "image":
+                from infrastructure.image_gen.cloud_adapter import OpenAIImageAdapter
+                adapter = OpenAIImageAdapter(
+                    base_url=snap.base_url, api_key=snap.api_key,
+                    data_dir=Path("."), model_id=snap.model_id or "")
+                return await adapter.probe()
             return await self.c.llm.probe(snap)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
 
     async def test_provider(self, body: dict) -> dict:
         from infrastructure.llm_provider import ProviderSnapshot
+        from infrastructure.provider_modality import infer_modality, normalize_modality
         body = self.clean_provider_fields(body)
         # Provider 可以是本地模型服务（如 127.0.0.1），不能复用网页抓取的
         # SSRF 校验；真实 LLM 调用本身也直接使用用户配置的地址。
@@ -67,8 +97,11 @@ class SettingsService:
             body["api_key"] = "local"
         elif ptype != "comfyui" and not (body.get("api_key") or "").strip():
             return {"ok": False, "error": "请填写 API Key"}
+        modality = normalize_modality(
+            body.get("modality") or infer_modality(ptype, body.get("model_id") or ""))
         snap = ProviderSnapshot("test", ptype, body["base_url"],
-                                body.get("api_key") or "local", body["model_id"])
+                                body.get("api_key") or "local", body["model_id"],
+                                modality=modality)
         return await self.probe_snapshot(snap)
 
     def add_or_update_provider(self, body: dict) -> dict:
@@ -82,6 +115,7 @@ class SettingsService:
                     "input_price": body.get("input_price"),
                     "output_price": body.get("output_price"),
                     "context_window": body.get("context_window", 128000),
+                    "modality": body.get("modality"),
                 }, body.get("api_key"))
                 return {"id": ex["id"], "deduped": True}
         from memory.naming import provider_id as mk
@@ -90,7 +124,8 @@ class SettingsService:
             pid, body.get("display_name") or body["model_id"], body["provider_type"],
             body["base_url"], body["model_id"], body["api_key"],
             body.get("input_price"), body.get("output_price"),
-            body.get("context_window", 128000))
+            body.get("context_window", 128000),
+            modality=body.get("modality"))
         c.oplog.log("provider_add", pid)
         return {"id": pid}
 

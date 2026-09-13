@@ -170,8 +170,10 @@ class TurnEventStore:
                 "context.mood",
                 "context.location",
                 "context.constraints",
+                "context.working_set",
+                "context.file_cards",
             }:
-                # 项目/情绪/位置/本轮约束：一律 messages 尾部，不进 system 字符串。
+                # 项目/情绪/位置/本轮约束/工作集：一律 messages 尾部，不进 system。
                 messages.append({"role": "user", "content": payload.get("content", "")})
         return messages, last_seq
 

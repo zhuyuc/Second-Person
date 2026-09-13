@@ -143,10 +143,11 @@ async def test_web_fetch_html_denoise(monkeypatch):
 
 def test_maybe_spill_writes_preview_and_file(tmp_path: Path):
     big = "X" * 5000
-    out = hooks.maybe_spill_result(
+    out, spill = hooks.maybe_spill_result(
         big, data_dir=tmp_path, session_id="sess1", tool_name="web_fetch",
         call_id="c1", max_inline_bytes=800, max_file_bytes=100_000)
     assert out != big
+    assert spill is not None
     assert len(out.encode("utf-8")) <= 800
     assert "完整结果：" in out
     assert "fs_read" in out
@@ -157,19 +158,21 @@ def test_maybe_spill_writes_preview_and_file(tmp_path: Path):
 
 def test_maybe_spill_skips_fs_read(tmp_path: Path):
     big = "Y" * 5000
-    out = hooks.maybe_spill_result(
+    out, spill = hooks.maybe_spill_result(
         big, data_dir=tmp_path, session_id="s", tool_name="fs_read",
         call_id="c", max_inline_bytes=100)
     assert out == big
+    assert spill is None
     assert not (tmp_path / "temp" / "spills").exists()
 
 
 def test_maybe_spill_disabled(tmp_path: Path):
     big = "Z" * 5000
-    out = hooks.maybe_spill_result(
+    out, spill = hooks.maybe_spill_result(
         big, data_dir=tmp_path, session_id="s", tool_name="web_fetch",
         call_id="c", max_inline_bytes=None)
     assert out == big
+    assert spill is None
 
 
 def test_resolve_spill_inline_cap_defaults_and_disable():
@@ -222,6 +225,63 @@ def test_policy_includes_spill_read_root(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_web_fetch_retries_read_timeout(monkeypatch):
+    """单次读超时只重试，耗尽后才失败。"""
+    import httpx
+    from tools.web_fetch import FetchError, web_fetch_result
+
+    attempts = {"n": 0}
+
+    class _Stream:
+        def __init__(self, ok: bool):
+            self.ok = ok
+            self.url = "https://example.com/x"
+            self.status_code = 200
+            self.headers = {"content-type": "text/plain"}
+            self.charset_encoding = "utf-8"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def aclose(self):
+            return None
+
+        async def aiter_bytes(self, chunk_size=65536):
+            if not self.ok:
+                raise httpx.ReadTimeout("slow")
+            yield b"hello-world"
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url):
+            attempts["n"] += 1
+            return _Stream(ok=attempts["n"] >= 2)
+
+    monkeypatch.setattr("tools.web_fetch.httpx.AsyncClient", _Client)
+
+    async def _not_private(_h):
+        return False
+
+    monkeypatch.setattr(
+        "tools.web_fetch.is_private_host_async", _not_private)
+
+    result = await web_fetch_result("https://example.com/x", timeout=1)
+    assert "hello-world" in result.text
+    assert attempts["n"] >= 2
+
+
+@pytest.mark.asyncio
 async def test_tool_executor_spills_large_result(tmp_path: Path):
     from agent.tool_executor import ToolExecutor
     from tools.base import ToolRegistry, ToolSpec
@@ -240,13 +300,27 @@ async def test_tool_executor_spills_large_result(tmp_path: Path):
                 return {"max_inline_bytes": 600}
             return default
 
+    class FakeCards:
+        def __init__(self):
+            self.rows = []
+
+        def append(self, session_id, path, op, **kw):
+            self.rows.append({"session_id": session_id, "path": path,
+                              "op": op, **kw})
+
     reg = ToolRegistry()
     reg.register_function(ToolSpec("big_echo", "t", {"type": "object", "properties": {}}),
                           big_tool)
-    ex = ToolExecutor(reg, Cfg(), data_dir=tmp_path)
+    cards = FakeCards()
+    ex = ToolExecutor(reg, Cfg(), data_dir=tmp_path, file_cards=cards)
     out = await ex.execute_tool("big_echo", {}, session_id="sess-spill")
     assert out["ok"] is True
     text = out["result"]
     assert len(text.encode("utf-8")) <= 600
     assert "完整结果：" in text
-    assert list((tmp_path / "temp" / "spills" / "sess-spill").glob("big_echo_*.txt"))
+    spills = list((tmp_path / "temp" / "spills" / "sess-spill").glob("big_echo_*.txt"))
+    assert spills
+    assert len(cards.rows) == 1
+    assert cards.rows[0]["op"] == "spill"
+    assert cards.rows[0]["session_id"] == "sess-spill"
+    assert cards.rows[0]["spill_path"] == str(spills[0])

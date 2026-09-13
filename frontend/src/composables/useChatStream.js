@@ -239,7 +239,34 @@ export function useChatStream(deps) {
       onMaybeScroll?.()
       onScrollThink?.()
     } else if (ev === 'step_progress') {
-      upsertStepWait(data.step, data.label, data.detail)
+      // 文生图/视频进度挂到对应 running 工具行，作为过程明细；避免另起一条 step_wait 打断思考流
+      const phase = data.phase || ''
+      if (phase === 'video_gen' || phase === 'image_gen') {
+        const toolName = phase === 'video_gen' ? 'generate_video' : 'generate_image'
+        for (let i = timeline.value.length - 1; i >= 0; i--) {
+          const it = timeline.value[i]
+          if (it.kind === 'tool_call' && it.name === toolName && it.status === 'running') {
+            const label = data.label || ''
+            const stage = data.stage || ''
+            it.progress = label
+            it.progress_stage = stage
+            const log = Array.isArray(it.progress_log) ? it.progress_log.slice() : []
+            const last = log[log.length - 1]
+            if (!last || last.label !== label || last.stage !== stage) {
+              log.push({
+                stage,
+                label,
+                at: Date.now(),
+              })
+              // 保留最近若干阶段，避免长任务撑爆时间线
+              it.progress_log = log.slice(-12)
+            }
+            break
+          }
+        }
+      } else {
+        upsertStepWait(data.step, data.label, data.detail)
+      }
       onMaybeScroll?.()
       onScrollThink?.()
     } else if (ev === 'tool_executing') {
@@ -278,7 +305,7 @@ export function useChatStream(deps) {
       onMaybeScroll?.()
       onScrollThink?.()
     } else if (ev === 'citations') lastCitations = data.refs
-    else if (ev === 'queued') toast.push('info', '正在处理上一条消息')
+    else if (ev === 'queued') toast.push('info', '上一条消息还在处理中，请稍候')
     else if (ev === 'degrade') degraded.value = true
     else if (ev === 'tool_visual') {
       streamVisuals.value.push(data)
@@ -295,7 +322,7 @@ export function useChatStream(deps) {
       currentTurnMetrics.value =
         data.metrics || sessionMetrics.value?.current_turn || currentTurnMetrics.value
     } else if (ev === 'error') {
-      toast.push('error', friendlyError(data.message))
+      toast.push('error', friendlyError(data.message, '本轮对话出错，请稍后重试'))
       finishStream()
     } else if (ev === 'handoff_ready') {
       onHandoffReady?.(data)

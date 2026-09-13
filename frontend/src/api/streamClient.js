@@ -24,7 +24,9 @@ export async function postJsonStream(path, body, { signal } = {}) {
       signal,
     })
   } catch (e) {
-    if (e.name !== 'AbortError') useToast().push('error', '网络错误，请检查服务是否运行')
+    if (e.name !== 'AbortError') {
+      useToast().push('error', '对话连接中断，请确认本地服务正在运行后重试')
+    }
     throw e
   }
   if (!resp.ok) {
@@ -33,7 +35,7 @@ export async function postJsonStream(path, body, { signal } = {}) {
     throw new Error(msg)
   }
   if (!resp.body) {
-    const msg = '服务未返回可读取的流式响应'
+    const msg = '对话服务没有返回内容流，请刷新页面后重试'
     useToast().push('error', msg)
     throw new Error(msg)
   }
@@ -45,7 +47,9 @@ export async function postFormStream(path, form, { signal } = {}) {
   try {
     resp = await fetch(BASE + path, { method: 'POST', body: form, signal })
   } catch (e) {
-    if (e.name !== 'AbortError') useToast().push('error', '网络错误，请检查服务是否运行')
+    if (e.name !== 'AbortError') {
+      useToast().push('error', '上传连接中断，请确认本地服务正在运行后重试')
+    }
     throw e
   }
   if (!resp.ok) {
@@ -54,7 +58,7 @@ export async function postFormStream(path, form, { signal } = {}) {
     throw new Error(msg)
   }
   if (!resp.body) {
-    const msg = '服务未返回可读取的流式响应'
+    const msg = '服务没有返回进度信息，请刷新页面后重试'
     useToast().push('error', msg)
     throw new Error(msg)
   }

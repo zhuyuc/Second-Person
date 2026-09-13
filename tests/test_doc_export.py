@@ -27,6 +27,12 @@ def check(name: str, cond: bool, detail: str = "") -> None:
         FAIL.append(name)
 
 
+def _assert_ok() -> None:
+    failed = list(FAIL)
+    FAIL.clear()
+    assert not failed, "；".join(failed)
+
+
 FULL_MD = """# 季度报告
 
 ## 一、业绩概览
@@ -98,6 +104,7 @@ def test_converters() -> None:
                       f"A1={ws['A1'].value} C2={ws['C2'].value}")
         except Exception as e:  # noqa: BLE001
             check(f"{name} 可重新打开", False, str(e))
+    _assert_ok()
 
 
 def test_pptx_boundaries() -> None:
@@ -119,6 +126,7 @@ def test_pptx_boundaries() -> None:
     md4 = "# 主标题\n\n## 甲\n\n正文甲\n\n# 附录\n\n正文附录\n"
     prs5 = Presentation(io.BytesIO(md_to_pptx_bytes(md4)))
     check("pptx 多 h1 不丢内容", len(list(prs5.slides)) >= 3)
+    _assert_ok()
 
 
 def test_xlsx_boundaries() -> None:
@@ -145,6 +153,7 @@ def test_xlsx_boundaries() -> None:
     check("xlsx title 与 h1 不重复写",
           ws5["A1"].value == "周报" and ws5["A2"].value != "周报",
           f"A1={ws5['A1'].value} A2={ws5['A2'].value}")
+    _assert_ok()
 
 
 async def _tool_level(tmp: Path) -> None:
@@ -192,6 +201,7 @@ def test_tool_level(tmp_path) -> None:
     """pytest 入口：用内置 tmp_path fixture 包装，内部自管事件循环；
     脚本直跑模式由 main() 直接调 _tool_level。"""
     asyncio.run(_tool_level(tmp_path))
+    _assert_ok()
 
 
 def test_frontend_no_hardcode() -> None:
@@ -205,6 +215,7 @@ def test_frontend_no_hardcode() -> None:
                      text):
             hits.append(str(p))
     check("前端无 docx/md 格式硬编码", not hits, "; ".join(hits))
+    _assert_ok()
 
 
 def main() -> None:

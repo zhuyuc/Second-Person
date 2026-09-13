@@ -38,10 +38,12 @@ dist/
 # IDE 内部知识库
 .qoder/
 .claude/
+.cursor/
 
 # 运行产物
 *.pid
 *.log
+_ws_accept.db*
 
 # 本地隔离测试与运行数据
 /tests/_tmp_survivor/

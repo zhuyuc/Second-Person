@@ -92,8 +92,13 @@ class AttachmentStore:
             target = self.objects / key[:2] / key
             if target.exists():
                 existing = self._result_from_object(target, filename)
-                shutil.rmtree(work, ignore_errors=True)
-                return existing
+                # Hit only when a prior parse actually produced text. Empty /
+                # failed caches (e.g. missing pdfplumber at first upload) must
+                # be discarded so a later retry can re-extract.
+                if existing.get("parsed"):
+                    shutil.rmtree(work, ignore_errors=True)
+                    return existing
+                shutil.rmtree(target, ignore_errors=True)
 
             from scheduler.ingest import extract_text
             # PDF/DOCX extraction can be CPU- and memory-intensive. Keep a

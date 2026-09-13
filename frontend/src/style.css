@@ -521,6 +521,22 @@ a:hover {
   margin-right: auto;
 }
 
+.main:has(> .ws-shell) {
+  overflow: hidden;
+  padding: 0;
+}
+
+/* 视频工坊：撑满主区，内部自滚动，避免 sticky 顶栏压住列表 */
+.main > .ws-shell {
+  max-width: none;
+  width: 100%;
+  margin: 0;
+  height: 100vh;
+  min-height: 100vh;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
 h1 {
   font-size: var(--fs-2xl);
   font-weight: 700;
@@ -2015,7 +2031,8 @@ code {
   }
 }
 
-.composer textarea {
+/* 仅主对话输入区；勿用裸 .composer，以免误伤视频工坊 .card.composer */
+.composer-wrap .composer textarea {
   width: 100%;
   border: none;
   outline: none;
@@ -2029,7 +2046,7 @@ code {
   overflow-y: auto;
 }
 
-.composer textarea:focus {
+.composer-wrap .composer textarea:focus {
   box-shadow: none;
   background: transparent;
 }

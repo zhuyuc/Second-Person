@@ -5,6 +5,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from agent.turn_runtime import TurnRuntime
 from infrastructure.db import Database
 from infrastructure.video_gen import (
@@ -120,7 +122,8 @@ class _VideoLLM:
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    # 勿用 new_event_loop().run_until_complete：在 TestClient/anyio 之后会挂死
+    return asyncio.run(coro)
 
 
 def _build_runtime(db, executor=None, llm=None):
@@ -188,7 +191,7 @@ def test_comfyui_video_adapter_persist_with_mock_http(tmp_path: Path, monkeypatc
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     adapter = ComfyUIVideoAdapter(
-        base_url="http://127.0.0.1:8188",
+        base_url="http://127.0.0.1:9",
         workflow_path=wf,
         data_dir=data_dir,
         timeout_sec=5,
@@ -428,7 +431,7 @@ def test_auto_generate_video_file_via_adapter(tmp_path: Path, monkeypatch):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     adapter = ComfyUIVideoAdapter(
-        base_url="http://127.0.0.1:8188",
+        base_url="http://127.0.0.1:9",
         workflow_path=wf,
         data_dir=data_dir,
         timeout_sec=5,
@@ -491,3 +494,444 @@ def test_auto_generate_video_file_via_adapter(tmp_path: Path, monkeypatch):
     assert result.type == "generated_video"
     assert result.size == "832x480"
     assert result.duration_sec == 2
+
+
+def test_kling_jwt_auth_header():
+    from infrastructure.video_gen.kling_auth import kling_auth_header
+    jwt_h = kling_auth_header("ak_test:sk_secret")
+    assert jwt_h["Authorization"].startswith("Bearer eyJ")
+    bearer = kling_auth_header("sk-openai-key")
+    assert bearer["Authorization"] == "Bearer sk-openai-key"
+    new_h = kling_auth_header("ak_test:sk_secret", model_id="kling-3.0-turbo")
+    assert new_h["Authorization"] == "Bearer ak_test:sk_secret"
+    old_h = kling_auth_header("ak_test:sk_secret", model_id="kling-v2-6")
+    assert old_h["Authorization"].startswith("Bearer eyJ")
+    api_key = kling_auth_header("kling-console-key", model_id="kling-3.0-turbo")
+    assert api_key["Authorization"] == "Bearer kling-console-key"
+
+
+def test_video_factory_picks_cloud_adapter(tmp_path: Path):
+    from infrastructure.video_gen import KlingVideoAdapter, get_video_adapter
+
+    class _Snap:
+        base_url = "https://api.kling.example"
+        api_key = "ak:sk"
+        model_id = "kling-v3-turbo"
+
+        def __init__(self, provider_type):
+            self.provider_type = provider_type
+
+    for ptype in ("openai_compatible", "anthropic", "custom"):
+        adapter = get_video_adapter(_Snap(ptype), _Config(), tmp_path)
+        assert isinstance(adapter, KlingVideoAdapter)
+
+
+def test_kling_probe_explains_beijing_https_failure(tmp_path: Path, monkeypatch):
+    import httpx
+    import infrastructure.video_gen.cloud_adapter as mod
+    from infrastructure.video_gen import KlingVideoAdapter
+    from infrastructure.video_gen.profiles import CLOUD_PROFILE
+
+    adapter = KlingVideoAdapter(
+        base_url="https://api-beijing.klingai.com",
+        api_key="kling-console-key",
+        data_dir=tmp_path,
+        profile=CLOUD_PROFILE,
+        model_id="kling-3.0-turbo",
+    )
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None, params=None):
+            raise httpx.ConnectError("[SSL: WRONG_VERSION_NUMBER] wrong version number")
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    out = _run(adapter.probe())
+    assert out["ok"] is False
+    assert "无法连接云端视频服务" in out["error"]
+    assert "HTTPS" in out["error"]
+    assert "api-beijing.klingai.com" in out["error"]
+
+
+def test_kling_probe_rejects_ak_sk_on_new_api(tmp_path: Path):
+    from infrastructure.video_gen import KlingVideoAdapter
+    from infrastructure.video_gen.profiles import CLOUD_PROFILE
+
+    adapter = KlingVideoAdapter(
+        base_url="https://api-beijing.klingai.com",
+        api_key="ak:sk",
+        data_dir=tmp_path,
+        profile=CLOUD_PROFILE,
+        model_id="kling-3.0-turbo",
+    )
+    out = _run(adapter.probe())
+    assert out["ok"] is False
+    assert "API Key" in out["error"]
+
+
+def test_kling_adapter_create_poll_download(tmp_path: Path, monkeypatch):
+    import infrastructure.video_gen.cloud_adapter as mod
+    from infrastructure.video_gen import KlingVideoAdapter, VideoGenRequest
+    from infrastructure.video_gen.profiles import CLOUD_PROFILE
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    adapter = KlingVideoAdapter(
+        base_url="https://api.kling.example",
+        api_key="ak:sk",
+        data_dir=data_dir,
+        profile=CLOUD_PROFILE,
+        model_id="kling-v3-turbo",
+    )
+
+    class _Resp:
+        def __init__(self, status_code=200, payload=None, content=b""):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = content
+            self.text = json.dumps(payload or {})
+            self.headers = {"content-length": str(len(content or b""))}
+
+        def json(self):
+            return self._payload
+
+        async def aiter_bytes(self, chunk_size=65536):
+            data = self.content or b""
+            for i in range(0, len(data), chunk_size):
+                yield data[i:i + chunk_size]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.posts = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            self.posts.append((url, json, headers))
+            assert url.endswith("/v1/videos/text2video")
+            assert json["model_name"] == "kling-v3-turbo"
+            assert json["aspect_ratio"] == "9:16"
+            assert json["duration"] == "5"
+            assert headers["Authorization"].startswith("Bearer ")
+            return _Resp(200, {"code": 0, "data": {"task_id": "task-1"}})
+
+        async def get(self, url, headers=None, timeout=None, params=None):
+            if url.endswith("/v1/videos/text2video/task-1"):
+                return _Resp(200, {
+                    "data": {
+                        "task_status": "succeed",
+                        "task_result": {"videos": [{
+                            "url": "https://cdn.example/v.mp4",
+                            "duration": 5,
+                        }]},
+                    },
+                })
+            if "cdn.example" in url:
+                return _Resp(200, content=_MINI_MP4)
+            return _Resp(404)
+
+        def stream(self, method, url, timeout=None):
+            assert method == "GET"
+            if "cdn.example" in url:
+                return _Resp(200, content=_MINI_MP4)
+            return _Resp(404)
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    result = _run(adapter.generate(
+        VideoGenRequest(prompt="an orange cat", size="9:16", duration_sec=5),
+        provider_id="p-cloud",
+        model_id="kling-v3-turbo",
+        session_id="sess-k",
+    ))
+    path = data_dir / "chat_videos" / result.filenames[0]
+    assert path.exists()
+    assert path.read_bytes().startswith(b"\x00\x00\x00\x18ftyp")
+    assert result.backend == "cloud"
+    assert result.duration_sec == 5
+    assert result.public_urls[0].startswith("/chat-videos/")
+
+
+def test_kling_new_api_create_poll_download(tmp_path: Path, monkeypatch):
+    import infrastructure.video_gen.cloud_adapter as mod
+    from infrastructure.video_gen import KlingVideoAdapter, VideoGenRequest
+    from infrastructure.video_gen.profiles import CLOUD_PROFILE
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    adapter = KlingVideoAdapter(
+        base_url="https://api-beijing.klingai.com",
+        api_key="kling-console-key",
+        data_dir=data_dir,
+        profile=CLOUD_PROFILE,
+        model_id="kling-3.0-turbo",
+    )
+
+    class _Resp:
+        def __init__(self, status_code=200, payload=None, content=b""):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = content
+            self.text = json.dumps(payload or {})
+            self.headers = {"content-length": str(len(content or b""))}
+
+        def json(self):
+            return self._payload
+
+        async def aiter_bytes(self, chunk_size=65536):
+            data = self.content or b""
+            for i in range(0, len(data), chunk_size):
+                yield data[i:i + chunk_size]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            assert url.endswith("/text-to-video/kling-3.0-turbo")
+            assert "model_name" not in json
+            assert json["settings"]["duration"] == 5
+            assert json["settings"]["aspect_ratio"] == "9:16"
+            assert headers["Authorization"] == "Bearer kling-console-key"
+            return _Resp(200, {"code": 0, "data": {"id": "893605946402811985"}})
+
+        async def get(self, url, headers=None, timeout=None, params=None):
+            if url.endswith("/tasks") and (params or {}).get("task_ids") == "893605946402811985":
+                return _Resp(200, {
+                    "code": 0,
+                    "data": [{
+                        "id": "893605946402811985",
+                        "status": "succeeded",
+                        "outputs": [{
+                            "type": "video",
+                            "url": "https://cdn.example/v.mp4",
+                            "duration": "5",
+                        }],
+                    }],
+                })
+            if "cdn.example" in url:
+                return _Resp(200, content=_MINI_MP4)
+            return _Resp(404)
+
+        def stream(self, method, url, timeout=None):
+            assert method == "GET"
+            if "cdn.example" in url:
+                return _Resp(200, content=_MINI_MP4)
+            return _Resp(404)
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    result = _run(adapter.generate(
+        VideoGenRequest(prompt="an orange cat", size="9:16", duration_sec=5),
+        provider_id="p-cloud",
+        model_id="kling-3.0-turbo",
+        session_id="sess-new",
+    ))
+    path = data_dir / "chat_videos" / result.filenames[0]
+    assert path.exists()
+    assert result.model_id == "kling-3.0-turbo"
+    assert result.duration_sec == 5
+
+
+def test_resolve_chat_image_and_pick_first(tmp_path: Path):
+    from infrastructure.video_gen.images import (
+        pick_first_image_name, resolve_chat_image,
+    )
+
+    root = tmp_path / "chat_images"
+    root.mkdir()
+    f = root / "img_abc.png"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert resolve_chat_image(tmp_path, "img_abc.png") == f.resolve()
+    assert resolve_chat_image(tmp_path, "/chat-images/img_abc.png") == f.resolve()
+    assert resolve_chat_image(tmp_path, "../etc/passwd") is None
+    assert pick_first_image_name(["/chat-images/img_abc.png", "b.png"]) == "img_abc.png"
+
+
+def test_kling_legacy_i2v_create_poll(tmp_path: Path, monkeypatch):
+    import infrastructure.video_gen.cloud_adapter as mod
+    from infrastructure.video_gen import KlingVideoAdapter, VideoGenRequest
+    from infrastructure.video_gen.profiles import CLOUD_PROFILE
+
+    data_dir = tmp_path / "data"
+    (data_dir / "chat_images").mkdir(parents=True)
+    img = data_dir / "chat_images" / "ref.png"
+    img.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00"
+        b"\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    adapter = KlingVideoAdapter(
+        base_url="https://api.kling.example",
+        api_key="ak:sk",
+        data_dir=data_dir,
+        profile=CLOUD_PROFILE,
+        model_id="kling-v3-turbo",
+    )
+
+    class _Resp:
+        def __init__(self, status_code=200, payload=None, content=b""):
+            self.status_code = status_code
+            self._payload = payload
+            self.content = content
+            self.text = json.dumps(payload or {})
+            self.headers = {"content-length": str(len(content or b""))}
+
+        def json(self):
+            return self._payload
+
+        async def aiter_bytes(self, chunk_size=65536):
+            data = self.content or b""
+            for i in range(0, len(data), chunk_size):
+                yield data[i:i + chunk_size]
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.posts = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            self.posts.append((url, json))
+            assert url.endswith("/v1/videos/image2video")
+            assert json["image"].startswith("data:image/")
+            assert json["prompt"] == "cat waves"
+            return _Resp(200, {"code": 0, "data": {"task_id": "i2v-1"}})
+
+        async def get(self, url, headers=None, timeout=None, params=None):
+            if url.endswith("/v1/videos/image2video/i2v-1"):
+                return _Resp(200, {
+                    "data": {
+                        "task_status": "succeed",
+                        "task_result": {"videos": [{
+                            "url": "https://cdn.example/v.mp4",
+                            "duration": 5,
+                        }]},
+                    },
+                })
+            return _Resp(404)
+
+        def stream(self, method, url, timeout=None):
+            if "cdn.example" in url:
+                return _Resp(200, content=_MINI_MP4)
+            return _Resp(404)
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    result = _run(adapter.generate(
+        VideoGenRequest(
+            prompt="cat waves", size="9:16", duration_sec=5,
+            image_filename="ref.png"),
+        provider_id="p-cloud",
+        model_id="kling-v3-turbo",
+        session_id="sess-i2v",
+    ))
+    assert result.filenames
+    assert (data_dir / "chat_videos" / result.filenames[0]).exists()
+
+
+def test_comfy_rejects_i2v(tmp_path: Path):
+    from infrastructure.video_gen.comfyui_adapter import ComfyUIVideoAdapter
+    from infrastructure.video_gen.types import VideoGenRequest
+
+    adapter = ComfyUIVideoAdapter(
+        base_url="http://127.0.0.1:8188",
+        data_dir=tmp_path,
+        workflow_path=tmp_path / "missing.json",
+    )
+    with pytest.raises(RuntimeError, match="不支持图生视频"):
+        _run(adapter.generate(
+            VideoGenRequest(prompt="x", image_filename="a.png"),
+            session_id="s",
+        ))
+
+
+def test_cloud_mutex_allows_image_then_video(tmp_path: Path):
+    """云端不启用 GPU 互斥：同轮可先出图再出视频。"""
+    from agent.turn_runtime_tools import TurnToolRunner
+    from agent.turn_events import TurnEventStore
+    from agent.repeat_tool_guard import RepeatToolGuard
+
+    db = Database(tmp_path / "mutex-off.db")
+    db.run_migrations(ROOT / "migrations")
+    events_store = TurnEventStore(db)
+    turn = events_store.start_turn("s3", reasoning_effort="high", max_steps=3)
+    turn_id = turn["id"]
+    calls = {"n": 0}
+
+    class _Exec:
+        async def execute_tool(self, name, params, **kw):
+            calls["n"] += 1
+            if name == "generate_image":
+                return {"ok": True, "result": _IMG_RESULT}
+            return {"ok": True, "result": _GEN_RESULT}
+
+    registry = ToolRegistry()
+    for name in ("generate_image", "generate_video"):
+        registry.register_function(ToolSpec(
+            name, name,
+            {"type": "object", "properties": {"prompt": {"type": "string"}},
+             "required": ["prompt"]}, parallel_safe=False), lambda **_: None)
+    runner = TurnToolRunner(
+        registry=registry, executor=_Exec(), events=events_store,
+        gpu_mutex_enabled=lambda: False)
+
+    async def emit(_n, _d):
+        return None
+
+    guard = RepeatToolGuard()
+
+    async def scenario():
+        r1 = await runner.run_tool_calls(turn_id, 1, [{
+            "id": "c1", "type": "function",
+            "function": {"name": "generate_image",
+                         "arguments": '{"prompt":"a"}'},
+        }], emit, guard)
+        assert r1[0]["ok"] is True
+        r2 = await runner.run_tool_calls(turn_id, 2, [{
+            "id": "c2", "type": "function",
+            "function": {"name": "generate_video",
+                         "arguments": '{"prompt":"b"}'},
+        }], emit, guard)
+        assert r2[0]["ok"] is True
+        assert calls["n"] == 2
+
+    _run(scenario())
+    db.close()

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onActivated, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onActivated, onUnmounted, computed, unref, toRaw } from 'vue'
 import { settingsApi } from '@/api/settings'
 import { projectsApi } from '@/api/projects'
 import { useSettingsUsage } from '@/composables/useSettingsUsage'
@@ -188,6 +188,7 @@ const hoverTip = computed(() => {
 const status = ref(null)
 const showAddProvider = ref(false)
 const newProvider = ref({
+  modality: 'text',
   provider_type: 'openai_compatible',
   display_name: '',
   base_url: '',
@@ -197,6 +198,81 @@ const newProvider = ref({
   output_price: null,
   context_window: 128000,
 })
+
+const SLOT_MODALITY = {
+  chat: 'text',
+  agent: 'text',
+  embedding: 'text',
+  vision: 'text',
+  retriever_refine: 'text',
+  image_gen: 'image',
+  video_gen: 'video',
+}
+const MODALITY_OPTIONS = [
+  { value: 'text', label: '文本' },
+  { value: 'image', label: '图片' },
+  { value: 'video', label: '视频' },
+]
+const CLOUD_PROTOCOLS = [
+  { value: 'openai_compatible', label: 'OpenAI 兼容' },
+  { value: 'anthropic', label: 'Anthropic' },
+  { value: 'custom', label: '自定义' },
+]
+const PROTOCOLS_BY_MODALITY = {
+  text: [...CLOUD_PROTOCOLS, { value: 'google', label: 'Google' }],
+  image: [...CLOUD_PROTOCOLS, { value: 'comfyui', label: 'ComfyUI（本地）' }],
+  video: [...CLOUD_PROTOCOLS, { value: 'comfyui', label: 'ComfyUI（本地）' }],
+}
+function protocolsFor(modality) {
+  return PROTOCOLS_BY_MODALITY[modality] || PROTOCOLS_BY_MODALITY.text
+}
+function isComfyProtocol(ptype) {
+  return ptype === 'comfyui'
+}
+function isVideoCloud(data) {
+  return data.modality === 'video' && !isComfyProtocol(data.provider_type)
+}
+function providersForSlot(slotKey) {
+  const m = SLOT_MODALITY[slotKey] || 'text'
+  return providers.value.filter((p) => (p.modality || 'text') === m)
+}
+function modalityLabel(m) {
+  return { text: '文本', image: '图片', video: '视频' }[m] || m || '文本'
+}
+function providerPriceLabel(p) {
+  const m = p.modality || 'text'
+  if (m === 'image') {
+    return p.output_price != null && p.output_price !== '' ? `¥${p.output_price}/张` : '未标价'
+  }
+  if (m === 'video') {
+    return p.output_price != null && p.output_price !== '' ? `¥${p.output_price}/秒` : '未标价'
+  }
+  return `¥${p.input_price || 0}/M · ¥${p.output_price || 0}/M`
+}
+function applyModalityDefaults(data) {
+  const allowed = protocolsFor(data.modality).map((x) => x.value)
+  if (!allowed.includes(data.provider_type)) {
+    data.provider_type = allowed[0]
+  }
+    if (isVideoCloud(data) && !data.model_id) {
+    data.model_id = 'kling-3.0-turbo'
+  }
+}
+function openAddProvider() {
+  newProvider.value = {
+    modality: 'text',
+    provider_type: 'openai_compatible',
+    display_name: '',
+    base_url: '',
+    api_key: '',
+    model_id: '',
+    input_price: null,
+    output_price: null,
+    context_window: 128000,
+  }
+  showAddKey.value = false
+  showAddProvider.value = true
+}
 
 // 任务-模型分配：槽位清单由后端 /settings/task-slots 返回（单一事实来源），
 // 包含中文名、职责描述、回退链与轻量任务标记，前端不再硬编码
@@ -213,10 +289,11 @@ async function loadProviders() {
   slots.value = await settingsApi.taskSlots()
 }
 async function addProvider() {
-  await settingsApi.createProvider(newProvider.value)
+  const payload = { ...toRaw(unref(newProvider) || {}) }
+  await settingsApi.createProvider(payload)
   showAddProvider.value = false
   await loadProviders()
-  toast.push('success', '已添加')
+  toast.push('success', '模型已添加')
 }
 async function delProvider(id) {
   return run('delP' + id, async () => {
@@ -241,6 +318,7 @@ async function openEdit(p) {
   editData.value = {
     id: p.id,
     display_name: p.display_name,
+    modality: p.modality || 'text',
     provider_type: p.provider_type,
     base_url: p.base_url,
     model_id: p.model_id,
@@ -267,7 +345,8 @@ async function saveEdit() {
   toast.push('success', '已保存')
 }
 async function testConn(cfg) {
-  const r = await settingsApi.testConnection(cfg)
+  const payload = { ...toRaw(unref(cfg) || {}) }
+  const r = await settingsApi.testConnection(payload)
   toast.push(r.ok ? 'success' : 'error', r.ok ? '连接成功' : '连接失败：' + (r.error || '未知错误'))
 }
 
@@ -314,7 +393,7 @@ async function resumePlatform(id) {
   return run('resP' + id, async () => {
     await settingsApi.resumePlatform(id)
     await loadPlatforms()
-    toast.push('success', '已恢复')
+    toast.push('success', 'IM 渠道已恢复启用')
   })
 }
 
@@ -412,7 +491,7 @@ const taskLogs = ref(null)
 async function runTask(tid) {
   return run('task' + tid, async () => {
     await settingsApi.runTask(tid)
-    toast.push('success', '已执行')
+    toast.push('success', '定时任务已触发执行')
     await loadStatus()
   })
 }
@@ -455,7 +534,7 @@ async function addConnector() {
   })
   showAddConn.value = false
   await loadConnectors()
-  toast.push('success', '已添加')
+  toast.push('success', '连接器已添加')
 }
 function parseJson(s, def) {
   try {
@@ -818,7 +897,6 @@ function overallStyle(s) {
 
 function selectTab(i) {
   tab.value = i
-  if (i === 7) loadArchivedProjects()
   const loaders = [
     loadProviders,
     loadConnectors,
@@ -827,8 +905,9 @@ function selectTab(i) {
     loadUsage,
     loadBackups,
     loadStatus,
+    loadArchivedProjects,
   ]
-  loaders[i]()
+  loaders[i]?.()
 }
 onMounted(() => selectTab(0))
 onActivated(() => selectTab(tab.value))
@@ -863,7 +942,9 @@ onActivated(() => selectTab(tab.value))
           <option value="">
             {{ s.fallback && s.fallback.length ? '未配置（自动回退）' : '未配置' }}
           </option>
-          <option v-for="p in providers" :key="p.id" :value="p.id">{{ p.display_name }}</option>
+          <option v-for="p in providersForSlot(s.key)" :key="p.id" :value="p.id">
+            {{ p.display_name }}
+          </option>
         </select>
       </div>
     </div>
@@ -878,7 +959,7 @@ onActivated(() => selectTab(tab.value))
           </div>
         </div>
         <div class="fg fg-gap-12">
-          <span class="muted">¥{{ p.input_price || 0 }}/M · ¥{{ p.output_price || 0 }}/M</span>
+          <span class="muted">{{ modalityLabel(p.modality) }} · {{ providerPriceLabel(p) }}</span>
           <button
             class="btn-sm"
             :disabled="busy('editP' + p.id)"
@@ -890,8 +971,8 @@ onActivated(() => selectTab(tab.value))
         </div>
       </div>
     </div>
-    <div class="cw dashed-add" @click="showAddProvider = true">
-      <i class="ti ti-plus"></i> 添加新的 LLM Provider
+    <div class="cw dashed-add" @click="openAddProvider">
+      <i class="ti ti-plus"></i> 添加模型
     </div>
   </div>
 
@@ -1499,25 +1580,40 @@ onActivated(() => selectTab(tab.value))
   </BaseModal>
 
   <!-- 添加 Provider 弹窗 -->
-  <BaseModal v-if="showAddProvider" title="添加 LLM Provider" @close="showAddProvider = false">
+  <BaseModal v-if="showAddProvider" title="添加模型" @close="showAddProvider = false">
+    <div class="form-group">
+      <label class="label">模态</label>
+      <select v-model="newProvider.modality" @change="applyModalityDefaults(newProvider)">
+        <option v-for="m in MODALITY_OPTIONS" :key="m.value" :value="m.value">{{ m.label }}</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="label">API 兼容</label>
+      <select v-model="newProvider.provider_type" @change="applyModalityDefaults(newProvider)">
+        <option v-for="pt in protocolsFor(newProvider.modality)" :key="pt.value" :value="pt.value">
+          {{ pt.label }}
+        </option>
+      </select>
+    </div>
     <div class="form-group">
       <label class="label">显示名称</label><input v-model="newProvider.display_name" />
     </div>
     <div class="form-group">
-      <label class="label">类型</label>
-      <select v-model="newProvider.provider_type">
-        <option value="openai_compatible">OpenAI 兼容</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="google">Google</option>
-        <option value="comfyui">ComfyUI（本地文生图/视频）</option>
-        <option value="custom">自定义</option>
-      </select>
+      <label class="label">基础地址</label>
+      <input
+        v-model="newProvider.base_url"
+        :placeholder="isVideoCloud(newProvider) ? 'https://api-beijing.klingai.com' : ''"
+      />
+      <div v-if="isVideoCloud(newProvider)" class="muted">
+        国内官方域名 https://api-beijing.klingai.com；新版填控制台 API Key
+      </div>
     </div>
     <div class="form-group">
-      <label class="label">基础地址</label><input v-model="newProvider.base_url" />
-    </div>
-    <div class="form-group">
-      <label class="label">API Key</label>
+      <label class="label">{{
+        isVideoCloud(newProvider)
+          ? 'API Key（新版控制台密钥；旧版 kling-v* 可填 AccessKey:SecretKey）'
+          : 'API Key'
+      }}</label>
       <div class="input-affix">
         <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'" />
         <i
@@ -1527,15 +1623,29 @@ onActivated(() => selectTab(tab.value))
       </div>
     </div>
     <div class="form-group">
-      <label class="label">模型 ID</label><input v-model="newProvider.model_id" />
+      <label class="label">模型 ID</label>
+      <input
+        v-model="newProvider.model_id"
+        :placeholder="
+          isVideoCloud(newProvider)
+            ? 'kling-3.0-turbo'
+            : ''
+        "
+      />
     </div>
-    <div class="form-grid">
+    <div v-if="newProvider.modality === 'text'" class="form-grid">
       <div>
         <label class="label">输入单价 ¥/M</label><input v-model.number="newProvider.input_price" />
       </div>
       <div>
         <label class="label">输出单价 ¥/M</label><input v-model.number="newProvider.output_price" />
       </div>
+    </div>
+    <div v-else class="form-group">
+      <label class="label">{{
+        newProvider.modality === 'image' ? '单价 ¥/张' : '单价 ¥/秒'
+      }}</label>
+      <input v-model.number="newProvider.output_price" />
     </div>
     <div class="fg modal-actions">
       <button @click="showAddProvider = false">取消</button>
@@ -1857,25 +1967,40 @@ onActivated(() => selectTab(tab.value))
   </BaseModal>
 
   <!-- 编辑 Provider 弹窗 -->
-  <BaseModal v-if="showEdit" title="编辑 LLM Provider" @close="showEdit = false">
+  <BaseModal v-if="showEdit" title="编辑模型" @close="showEdit = false">
+    <div class="form-group">
+      <label class="label">模态</label>
+      <select v-model="editData.modality" @change="applyModalityDefaults(editData)">
+        <option v-for="m in MODALITY_OPTIONS" :key="m.value" :value="m.value">{{ m.label }}</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="label">API 兼容</label>
+      <select v-model="editData.provider_type" @change="applyModalityDefaults(editData)">
+        <option v-for="pt in protocolsFor(editData.modality)" :key="pt.value" :value="pt.value">
+          {{ pt.label }}
+        </option>
+      </select>
+    </div>
     <div class="form-group">
       <label class="label">显示名称</label><input v-model="editData.display_name" />
     </div>
     <div class="form-group">
-      <label class="label">类型</label>
-      <select v-model="editData.provider_type">
-        <option value="openai_compatible">OpenAI 兼容</option>
-        <option value="anthropic">Anthropic</option>
-        <option value="google">Google</option>
-        <option value="comfyui">ComfyUI（本地文生图/视频）</option>
-        <option value="custom">自定义</option>
-      </select>
+      <label class="label">基础地址</label>
+      <input
+        v-model="editData.base_url"
+        :placeholder="isVideoCloud(editData) ? 'https://api-beijing.klingai.com' : ''"
+      />
+      <div v-if="isVideoCloud(editData)" class="muted">
+        国内官方域名 https://api-beijing.klingai.com；新版填控制台 API Key
+      </div>
     </div>
     <div class="form-group">
-      <label class="label">基础地址</label><input v-model="editData.base_url" />
-    </div>
-    <div class="form-group">
-      <label class="label">API Key</label>
+      <label class="label">{{
+        isVideoCloud(editData)
+          ? 'API Key（新版控制台密钥；旧版 kling-v* 可填 AccessKey:SecretKey）'
+          : 'API Key'
+      }}</label>
       <div class="input-affix">
         <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'" />
         <i
@@ -1885,9 +2010,17 @@ onActivated(() => selectTab(tab.value))
       </div>
     </div>
     <div class="form-group">
-      <label class="label">模型 ID</label><input v-model="editData.model_id" />
+      <label class="label">模型 ID</label>
+      <input
+        v-model="editData.model_id"
+        :placeholder="
+          isVideoCloud(editData)
+            ? 'kling-3.0-turbo'
+            : ''
+        "
+      />
     </div>
-    <div class="form-grid">
+    <div v-if="editData.modality === 'text'" class="form-grid">
       <div>
         <label class="label">输入单价 ¥/M</label><input v-model.number="editData.input_price" />
       </div>
@@ -1895,7 +2028,11 @@ onActivated(() => selectTab(tab.value))
         <label class="label">输出单价 ¥/M</label><input v-model.number="editData.output_price" />
       </div>
     </div>
-    <div class="form-group settings-cw-mt">
+    <div v-else class="form-group">
+      <label class="label">{{ editData.modality === 'image' ? '单价 ¥/张' : '单价 ¥/秒' }}</label>
+      <input v-model.number="editData.output_price" />
+    </div>
+    <div v-if="editData.modality === 'text'" class="form-group settings-cw-mt">
       <label class="label">上下文窗口</label><input v-model.number="editData.context_window" />
     </div>
     <div class="fg modal-actions">

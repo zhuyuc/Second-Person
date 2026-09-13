@@ -16,19 +16,32 @@ class FsObservationStore:
     def __init__(self, db):
         self.db = db
 
-    def record(self, session_id: str, target_key: str, version: str) -> None:
+    def record(self, session_id: str, target_key: str, version: str,
+               *, last_op: str | None = None) -> None:
         now = now_cst().isoformat(timespec="seconds")
+        op = (last_op or "").strip() or None
         self.db.execute(
-            "INSERT INTO fs_observations(session_id, target_key, version, observed_at) "
-            "VALUES(?,?,?,?) ON CONFLICT(session_id, target_key) DO UPDATE SET "
-            "version=excluded.version, observed_at=excluded.observed_at",
-            (session_id, target_key, version, now))
+            "INSERT INTO fs_observations(session_id, target_key, version, "
+            "observed_at, last_op) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(session_id, target_key) DO UPDATE SET "
+            "version=excluded.version, observed_at=excluded.observed_at, "
+            "last_op=COALESCE(excluded.last_op, fs_observations.last_op)",
+            (session_id, target_key, version, now, op))
 
     def get(self, session_id: str, target_key: str) -> str | None:
         row = self.db.query_one(
             "SELECT version FROM fs_observations WHERE session_id=? AND target_key=?",
             (session_id, target_key))
         return row["version"] if row else None
+
+    def list_recent(self, session_id: str, limit: int = 8) -> list[dict]:
+        """按 observed_at 降序取本会话最近观察（工作集投影）。"""
+        rows = self.db.query_all(
+            "SELECT target_key, version, observed_at, last_op "
+            "FROM fs_observations WHERE session_id=? "
+            "ORDER BY observed_at DESC, rowid DESC LIMIT ?",
+            (session_id, max(1, int(limit))))
+        return [dict(r) for r in rows]
 
     def invalidate_target(self, target_key: str) -> int:
         """FileWatcher 侦测外部修改后，使所有会话对该 target 的 observation 失效。"""

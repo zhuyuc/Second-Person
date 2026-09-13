@@ -18,6 +18,7 @@ const confirmDialog = useConfirm()
 const toast = useToast()
 
 const navs = [
+  { path: '/workshop', icon: 'ti-photo', label: '视频工坊' },
   { path: '/memory', icon: 'ti-brain', label: '记忆' },
   { path: '/settings', icon: 'ti-settings', label: '设置' },
 ]
@@ -399,7 +400,7 @@ async function loadMoreSessions() {
   try {
     await sess.loadMore()
   } catch {
-    toast.push('error', '加载更多会话失败')
+    toast.push('error', '加载更多会话失败，请下拉重试或刷新页面')
   }
 }
 </script>

@@ -9,7 +9,7 @@ Langfuse 官方 Ingestion REST API（POST /api/public/ingestion，Basic Auth）�
 对外主要接口：
 - init_tracer(config)  在应用启动装配时初始化全局 tracer
 - get_tracer()         任意位置获取全局 tracer（未初始化则返回禁用态的空实现）
-- PipelineTracer       追踪器：trace_start / span_start / generation_start
+- PipelineTracer       追踪器：trace_start / attach_trace / span_start / generation_start
 - mark_preview(value, *, content_type, limit)
                        预览字段统一标记（content_type + 原始长度 + 截断标志）
 """

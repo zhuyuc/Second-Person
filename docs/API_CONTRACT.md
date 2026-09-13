@@ -95,6 +95,7 @@ data: <JSON object>
 | `mood_updated` | `ai_mood` | 人格情绪快照 |
 | `turn_completed` | `message_id` | 本轮持久化完成，附安全 `analysis_metadata` |
 | `step_metrics` | `turn_id`, `step` | 多步骤任务在步骤边界更新用量和会话指标 |
+| `context_compacted` | `turn_id`, `step`, `trigger`, `shadowed_count` | 会话历史压缩完成；可选 `released_tokens_est` |
 | `error` | `code`, `message` | 本轮异常或取消 |
 
 `turn_completed` 和 `error` 是生成终态。前端必须兼容未知的附加字段；后端新增事件时，先更新 `SSE_EVENT_SPECS`、本文件和前端处理逻辑。

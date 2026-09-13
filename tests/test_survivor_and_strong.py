@@ -34,19 +34,16 @@ def _mem(mid, confidence="medium", write_channel="system", important=False):
     }
 
 
-def test_survivor_prefers_explicit_over_early():
+def test_survivor_prefers_explicit_over_early(tmp_path: Path):
     async def scenario():
-        tmp = Path(__file__).parent / "_tmp_survivor"
-        tmp.mkdir(exist_ok=True)
-        (tmp / "memories").mkdir(exist_ok=True)
-        db = Database(tmp / "sp.db")
+        (tmp_path / "memories").mkdir(exist_ok=True)
+        db = Database(tmp_path / "sp.db")
         try:
             db.run_migrations(ROOT / "migrations")
             palace = Palace(db)
-            fw = FileWriter(db, palace, _FakeVS(), tmp)
+            fw = FileWriter(db, palace, _FakeVS(), tmp_path)
             await fw.start()
             try:
-                # a: 早，垃圾；b: 晚，explicit
                 for mid, ch in (("mem_000001", "system"),
                                 ("mem_000009", "explicit")):
                     await fw.submit("memory", {
@@ -55,13 +52,12 @@ def test_survivor_prefers_explicit_over_early():
                         "summary": "s", "detail": "d",
                         "reason": "t"}, wait=True)
 
-                # 直接调用 _pick_survivor
                 from memory.distiller import Distiller
 
                 class _Stub:
                     pass
                 stub = _Stub()
-                stub.palace = palace  # 避免类体作用域捕获问题
+                stub.palace = palace
                 survivor, dup = Distiller._pick_survivor(
                     stub, "mem_000001", "mem_000009")
                 assert survivor == "mem_000009"
@@ -70,8 +66,6 @@ def test_survivor_prefers_explicit_over_early():
                 await fw.stop(drain_timeout=5)
         finally:
             db.close()
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
     asyncio.run(scenario())
 
 

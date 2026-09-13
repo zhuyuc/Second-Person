@@ -19,6 +19,8 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app = create_app(tmp_path)
     with TestClient(app) as tc:
         yield tc
+    from infrastructure.remote_jobs import set_store
+    set_store(None)
     get_container().db.close()
 
 

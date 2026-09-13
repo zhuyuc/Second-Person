@@ -57,7 +57,9 @@ async def judge_turn_moods(llm, providers, *, user_message: str,
         {"role": "user", "content": "\n\n".join(parts)},
     ]
     try:
-        resp = await llm.chat(snap, prompt, source="system_agent",
+        # source=mood_judge → Langfuse generation 名为 llm.mood_judge，
+        # 与 llm.agent_step（对话回复）区分，避免末尾两个 generation 混淆。
+        resp = await llm.chat(snap, prompt, source="mood_judge",
                               session_id=session_id, json_mode=True)
         data = repair_json(resp.get("content") or "")
         user = _normalize_res(data.get("user") if isinstance(data, dict) else None)

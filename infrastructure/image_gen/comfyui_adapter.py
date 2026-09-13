@@ -13,6 +13,8 @@ from typing import Awaitable, Callable
 import httpx
 
 from . import active_jobs
+from infrastructure.remote_jobs import JobCancelled, get_store, runtime
+from infrastructure.remote_jobs.fetch import http_get_bytes_resilient, sleep_or_cancel
 from .types import ALLOWED_SIZES, ImageGenRequest, ImageGenResult
 
 logger = logging.getLogger("second_person.image_gen.comfyui")
@@ -124,7 +126,7 @@ class ComfyUIAdapter:
         template = self._load_workflow()
         workflow = self._apply_workflow(template, req, ckpt)
 
-        async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=15.0)) as client:
             if on_progress:
                 await on_progress("queued", "已提交本地生图队列…")
             submit = await client.post(
@@ -139,17 +141,44 @@ class ComfyUIAdapter:
             if not prompt_id:
                 raise RuntimeError(f"ComfyUI 未返回 prompt_id: {body}")
 
-            active_jobs.register_job(
+            job_id = active_jobs.register_job(
                 session_id, base_url=self.base_url, prompt_id=prompt_id,
-                client_id=client_id, backend="comfyui")
+                client_id=client_id, backend="comfyui", kind="comfy_image")
+            store = get_store()
+            if store is not None:
+                try:
+                    store.create(
+                        kind="comfy_image", backend="comfyui",
+                        remote_id=prompt_id, session_id=session_id,
+                        base_url=self.base_url, job_id=job_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug("remote_jobs create skip", exc_info=True)
+            settle_status = "failed"
+            settle_err: str | None = None
             try:
                 if on_progress:
                     await on_progress(
                         "sampling", "本地 SDXL 采样中，可能需要十几秒到几十秒…")
-                deadline = time.perf_counter() + self.timeout_sec
                 outputs = None
-                while time.perf_counter() < deadline:
-                    hist = await client.get(f"{self.base_url}/history/{prompt_id}")
+                last_progress_at = 0.0
+                deadline = t0 + max(5.0, float(self.timeout_sec or 180.0))
+                while True:
+                    if time.perf_counter() >= deadline:
+                        raise RuntimeError(
+                            f"ComfyUI 生图超时（>{int(self.timeout_sec)}s），"
+                            "请检查本地服务或工作流")
+                    runtime.raise_if_cancelled(
+                        job_id=job_id, session_id=session_id)
+                    try:
+                        hist = await client.get(
+                            f"{self.base_url}/history/{prompt_id}")
+                    except (httpx.TimeoutException, httpx.TransportError):
+                        if on_progress:
+                            await on_progress(
+                                "sampling", "查询本地队列较慢，继续等待…")
+                        await sleep_or_cancel(
+                            2.0, job_id=job_id, session_id=session_id)
+                        continue
                     if hist.status_code == 200:
                         data = hist.json() or {}
                         entry = data.get(prompt_id) or {}
@@ -160,10 +189,20 @@ class ComfyUIAdapter:
                         if entry.get("outputs"):
                             outputs = entry["outputs"]
                             break
-                    await asyncio.sleep(0.8)
-                else:
-                    raise TimeoutError(
-                        f"ComfyUI 生成超时（>{int(self.timeout_sec)}s），请检查服务与显存")
+                    now = time.perf_counter()
+                    if on_progress and now - last_progress_at >= 8.0:
+                        elapsed = int(now - t0)
+                        await on_progress(
+                            "sampling",
+                            f"本地生图进行中（已等待 {elapsed}s）…")
+                        last_progress_at = now
+                    if store is not None:
+                        try:
+                            store.touch(job_id)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    await sleep_or_cancel(
+                        0.8, job_id=job_id, session_id=session_id)
 
                 image_meta = None
                 for _nid, node_out in (outputs or {}).items():
@@ -177,24 +216,61 @@ class ComfyUIAdapter:
 
                 if on_progress:
                     await on_progress("saving", "正在保存生成图…")
-                view = await client.get(
+                if store is not None:
+                    try:
+                        store.merge_meta(job_id, {
+                            "phase": "download",
+                            "view": {
+                                "filename": image_meta.get("filename"),
+                                "subfolder": image_meta.get("subfolder") or "",
+                                "type": image_meta.get("type") or "output",
+                            },
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
+                img_bytes = await http_get_bytes_resilient(
+                    client,
                     f"{self.base_url}/view",
                     params={
                         "filename": image_meta["filename"],
                         "subfolder": image_meta.get("subfolder") or "",
                         "type": image_meta.get("type") or "output",
                     },
+                    job_id=job_id, session_id=session_id,
+                    on_progress=on_progress, stage="saving", label="图片",
                 )
-                if view.status_code >= 400:
-                    raise RuntimeError(f"下载生成图失败 HTTP {view.status_code}")
-                img_bytes = view.content
+                settle_status = "running"
+            except JobCancelled:
+                settle_status = "cancelled"
+                settle_err = "已停止生成"
+                raise
+            except asyncio.CancelledError:
+                settle_status = "cancelled"
+                settle_err = "已停止生成"
+                raise JobCancelled() from None
+            except Exception as exc:
+                settle_status = "failed"
+                settle_err = (str(exc) or type(exc).__name__)[:500]
+                raise
             finally:
-                active_jobs.clear_job(session_id)
+                active_jobs.clear_job(session_id, job_id=job_id)
+                if store is not None and settle_status in ("failed", "cancelled"):
+                    try:
+                        store.settle(
+                            job_id, status=settle_status,
+                            error_message=settle_err)
+                    except Exception:  # noqa: BLE001
+                        logger.debug("remote_jobs settle skip", exc_info=True)
 
         out_dir = self.data_dir / "chat_images"
         out_dir.mkdir(parents=True, exist_ok=True)
         fname = f"gen_{uuid.uuid4().hex[:12]}.png"
         (out_dir / fname).write_bytes(img_bytes)
+        if store is not None:
+            try:
+                store.settle(job_id, status="succeeded", result_ref=fname)
+            except Exception:  # noqa: BLE001
+                logger.debug("remote_jobs settle skip", exc_info=True)
 
         latency_ms = int((time.perf_counter() - t0) * 1000)
         prompt_text = self._build_prompt_text(req)

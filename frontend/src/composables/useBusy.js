@@ -13,6 +13,11 @@ export function useBusy() {
     state.keys[k] = true
     try {
       return await fn()
+    } catch (e) {
+      // API 层已 toast 过的业务错误不再冒泡，避免 Vue native-event
+      // errorHandler 再弹一条 [Vue:runtime-5] 重复提示。
+      if (e && e.alreadyToasted) return
+      throw e
     } finally {
       state.keys[k] = false
     }

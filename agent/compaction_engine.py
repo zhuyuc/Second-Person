@@ -87,6 +87,7 @@ class CompactionEngine:
                                  protected_indices: set[int] | None = None,
                                  trigger: str = "pressure",
                                  force: bool = False,
+                                 recall_context: str | None = None,
                                  ) -> CompactionResult | None:
         """Check pressure and compact when needed.
 
@@ -96,6 +97,8 @@ class CompactionEngine:
         as `conversations` rows — a None or unknown id blocks compacting
         past that position (safety: we cannot advance the watermark past
         a message we cannot identify).
+        `recall_context` is host-side working-set / file-card text forced
+        into the summarizer and appended as a recall stub after save.
         """
         window = getattr(snap, "context_window", None) or 128000
         threshold = int(window * self.threshold_ratio)
@@ -120,8 +123,10 @@ class CompactionEngine:
                 logger.info("压缩：无可压区间（尾部保留占满全部消息），跳过")
                 return None
             try:
-                summary_text = await self._summarize(snap, span, system, tools,
-                                                      session_id=session_id)
+                summary_text = await self._summarize(
+                    snap, span, system, tools,
+                    session_id=session_id,
+                    recall_context=recall_context)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("压缩生成失败：%s", exc)
                 # 失败标记：不阻断主链路，但让摘要文件带 compression_failed 便于观察
@@ -130,6 +135,8 @@ class CompactionEngine:
                 except Exception:  # noqa: BLE001
                     pass
                 return result
+            from agent.working_set import append_recall_stub
+            summary_text = append_recall_stub(summary_text, recall_context)
             wrapped = self._wrap_preamble(summary_text)
             # 落盘 + 推水位
             try:
@@ -182,12 +189,14 @@ class CompactionEngine:
                            tools: list[dict] | None,
                            message_ids: list[int] | None = None,
                            protected_indices: set[int] | None = None,
+                           recall_context: str | None = None,
                            ) -> CompactionResult | None:
         """Force one compaction pass regardless of threshold (for `/compact`)."""
         return await self.compact_if_needed(
             session_id=session_id, snap=snap, messages=messages,
             system=system, tools=tools, message_ids=message_ids,
-            protected_indices=protected_indices, trigger="manual", force=True)
+            protected_indices=protected_indices, trigger="manual", force=True,
+            recall_context=recall_context)
 
     # ------------------------------------------------------------------
     # 内部：pressure 与 span 选择
@@ -294,7 +303,8 @@ class CompactionEngine:
 
     async def _summarize(self, snap, span: _Span, system: str,
                           tools: list[dict] | None,
-                          session_id: str | None = None) -> str:
+                          session_id: str | None = None,
+                          recall_context: str | None = None) -> str:
         """Call the routed chat model with the SESSION'S OWN prefix.
 
         `system` + `tools` + span messages + final instruction — mirrors the
@@ -307,6 +317,15 @@ class CompactionEngine:
             prompt.append({"role": "system", "content": system})
         # 复用会话 message 前缀；直接引用不复制
         prompt.extend(span.messages)
+        if recall_context:
+            prompt.append({
+                "role": "user",
+                "content": (
+                    "以下为本会话当前文件工作集与操作痕迹，压缩时「文件与代码」"
+                    "与路径定位必须优先保留这些 exact path：\n\n"
+                    + recall_context
+                ),
+            })
         prompt.append({"role": "user", "content": instruction})
         resp = await self.llm.chat(
             snap, prompt, source="system_agent",

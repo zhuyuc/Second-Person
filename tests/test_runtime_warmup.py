@@ -131,3 +131,22 @@ def test_warmup_coalesces_within_window():
         assert c.embed_calls == 1
 
     asyncio.run(scenario())
+
+
+def test_warmup_cloud_video_skipped():
+    async def scenario():
+        class _Snap:
+            provider_type = "openai_compatible"
+            base_url = "https://api.kling.example"
+            model_id = "kling-v3-turbo"
+
+        c = _FakeContainer()
+        c.providers = _FakeProviders(media={"video_gen": _Snap()})
+        warmer = RuntimeWarmer(c, coalesce_seconds=0)
+        out = await warmer.warm(reason="cloud")
+        assert out["video_gen"]["ok"] is True
+        assert out["video_gen"]["skipped"] == "cloud"
+        assert out["image_gen"]["ok"] is False
+        assert out["image_gen"].get("error") == "unconfigured"
+
+    asyncio.run(scenario())

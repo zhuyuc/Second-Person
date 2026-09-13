@@ -27,7 +27,10 @@ async function testChat() {
   try {
     const r = await onboardingApi.testConnection(chat.value)
     chatOk.value = r.ok
-    toast.push(r.ok ? 'success' : 'error', r.ok ? '连接成功' : '连接失败：' + r.error)
+    toast.push(
+      r.ok ? 'success' : 'error',
+      r.ok ? '模型连接成功' : '模型连接失败：' + (r.error || '请检查地址、密钥与模型名'),
+    )
   } finally {
     testing.value = false
   }
