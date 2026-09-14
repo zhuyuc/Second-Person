@@ -241,6 +241,29 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
     async def web_fetch_tool(url: str, timeout: int = 15) -> str:
         # LLM 传入的 timeout 生效，上限不超过全局配置防滥用
         from memory import _constants as _mem_const
+        import tempfile
+        from pathlib import Path as _Path
+
+        def _pdf_bytes_extract(raw: bytes) -> str:
+            """web_fetch PDF 分支：落临时文件后走 ingest 纯文字提取。"""
+            from scheduler.ingest import extract_text
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                        suffix=".pdf", delete=False) as f:
+                    f.write(raw or b"")
+                    tmp = _Path(f.name)
+                return extract_text(tmp) or ""
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("web_fetch PDF 解析失败：%s", exc)
+                return ""
+            finally:
+                if tmp is not None:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+
         cap = _mem_const.WEB_FETCH_TIMEOUT_SECONDS
         large_cap = _mem_const.WEB_FETCH_TIMEOUT_LARGE_SECONDS
         wf = config.get_raw("web_fetch", {}) or {}
@@ -264,7 +287,8 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             prefer_pdf=prefer_pdf,
             max_response_bytes=max_bytes,
             max_body_chars=max_chars,
-            timeout_large=large_cap)
+            timeout_large=large_cap,
+            pdf_extract_fn=_pdf_bytes_extract)
 
     async def web_search_tool(query: str, max_results: int = 5) -> list:
         from memory import _constants as _mem_const

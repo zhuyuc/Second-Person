@@ -74,7 +74,8 @@ class PolicyStore:
     def __init__(self, db, projects_store, config, *,
                  legacy_workspace: Path,
                  legacy_whitelist: list[Path] | None = None,
-                 spill_read_root: Path | None = None):
+                 spill_read_root: Path | None = None,
+                 attachments_read_root: Path | None = None):
         self.db = db
         self.projects = projects_store
         self.config = config
@@ -84,6 +85,10 @@ class PolicyStore:
         # 工具结果溢写目录：只读并入 read_roots，供 fs_read/fs_grep 续读
         self.spill_read_root = (
             Path(spill_read_root).resolve() if spill_read_root else None)
+        # 聊天附件解析目录：只读并入，供超预算附件续读
+        self.attachments_read_root = (
+            Path(attachments_read_root).resolve()
+            if attachments_read_root else None)
 
     def resolve(self, session_id: str) -> SandboxPolicy:
         row = self.db.query_one(
@@ -147,7 +152,7 @@ class PolicyStore:
         else:
             work_roots = (self.legacy_workspace, *self.legacy_whitelist)
 
-        read_roots = self._with_spill_root(work_roots)
+        read_roots = self._with_extra_read_roots(work_roots)
         if mode == "read-only":
             return SandboxPolicy(
                 mode=mode, project_id=project_id, project_root=project_root,
@@ -171,9 +176,9 @@ class PolicyStore:
             mode="read-only", project_id=project_id, project_root=project_root,
             writable_roots=(), read_roots=read_roots)
 
-    def _with_spill_root(self, roots: tuple[Path, ...]) -> tuple[Path, ...]:
-        if not self.spill_read_root:
-            return roots
-        if self.spill_read_root in roots:
-            return roots
-        return (*roots, self.spill_read_root)
+    def _with_extra_read_roots(self, roots: tuple[Path, ...]) -> tuple[Path, ...]:
+        out = list(roots)
+        for extra in (self.spill_read_root, self.attachments_read_root):
+            if extra and extra not in out:
+                out.append(extra)
+        return tuple(out)

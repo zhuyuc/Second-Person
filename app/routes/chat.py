@@ -220,8 +220,9 @@ async def chat_send(request: Request):
         images = images or None
     if attachment_ids:
         try:
-            attachment_context = c.attachments.context_for(
-                attachment_ids, max_chars=max(0, 64_000 - len(message) - 512))
+            from app.attachment_store import INLINE_BUDGET_CHARS
+            attachment_context, _plan = c.attachments.build_attachment_context(
+                attachment_ids, inline_budget=INLINE_BUDGET_CHARS)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if attachment_context:

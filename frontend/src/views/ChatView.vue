@@ -669,15 +669,30 @@ async function uploadFiles(fileList) {
         text: d.text,
         truncated: d.truncated,
         parsed: d.parsed,
+        parseCode: d.parse_code,
+        inlineBudget: d.inline_budget_chars || 35000,
         uploading: false,
         isImage: false,
         file: f,
         origin,
       }
       if (!d.parsed) {
+        const code = d.parse_code || ''
+        const tip = code === 'empty_text_scanned_pdf'
+          ? '疑似扫描件，可在设置中开启 PDF 页级 OCR'
+          : code === 'encrypted'
+            ? 'PDF 已加密，请解密后重新上传'
+            : code === 'corrupt'
+              ? '文件损坏或无法打开'
+              : '可能是扫描件、加密 PDF 或空文档'
         toast.push(
           'warning',
-          `「${d.filename}」未能提取出文字（可能是扫描件、加密 PDF 或空文档）。对话仍可发送，但模型读不到正文`,
+          `「${d.filename}」未能提取出文字（${tip}）。对话仍可发送，但模型读不到正文`,
+        )
+      } else if (d.chars > (d.inline_budget_chars || 35000)) {
+        toast.push(
+          'info',
+          `「${d.filename}」共 ${d.chars} 字，超过本轮附件注入预算 ${d.inline_budget_chars || 35000} 字；对话将部分注入，其余可由助手用 fs_read 续读`,
         )
       }
     } catch {
@@ -2833,7 +2848,7 @@ onUnmounted(() => {
               <span v-else-if="a.error" class="dang">失败</span>
               <span v-else-if="a.isImage" class="muted">图片</span>
               <span v-else-if="!a.parsed" class="dang">无文本</span>
-              <span v-else class="muted">{{ a.chars }} 字{{ a.truncated ? '·已截断' : '' }}</span>
+              <span v-else class="muted">{{ a.chars }} 字{{ a.truncated ? '·预览截断' : '' }}{{ a.chars > (a.inlineBudget || 35000) ? '·将部分注入' : '' }}</span>
               <span
                 v-if="a.kind === 'quote' && a.comment"
                 class="quote-comment-mark"

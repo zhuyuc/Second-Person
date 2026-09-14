@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from memory.naming import raw_doc_id
@@ -22,6 +23,36 @@ MAX_FILE_MB = 50
 RAW_TOTAL_WARN_GB = 2
 OVERLAP_CHARS = 500  # 约 200 token
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+_SCAN_EMPTY_PAGE_RATIO = 0.5
+_SCAN_CHARS_PER_PAGE = 20
+
+
+@dataclass
+class ExtractResult:
+    """文档解析结构化结果（聊天附件 / 知识库共用）。"""
+
+    text: str
+    parse_code: str  # ok | empty_text | empty_text_scanned_pdf | encrypted | corrupt
+    page_count: int = 0
+    empty_page_count: int = 0
+
+
+def _classify_open_exception(exc: BaseException) -> str:
+    msg = str(exc).lower()
+    name = type(exc).__name__.lower()
+    if "encrypt" in msg or "password" in msg or "encrypted" in name:
+        return "encrypted"
+    return "corrupt"
+
+
+def _looks_scanned(page_count: int, empty_page_count: int, text: str) -> bool:
+    if page_count <= 0:
+        return False
+    if empty_page_count / page_count >= _SCAN_EMPTY_PAGE_RATIO:
+        return True
+    if len((text or "").strip()) < page_count * _SCAN_CHARS_PER_PAGE:
+        return True
+    return False
 
 
 def image_to_data_url(path: Path) -> str:
@@ -55,31 +86,59 @@ async def ocr_extract_text(path: Path) -> str:
         return ""
 
 
-async def extract_text_async(path: Path, image_fn=None, mime: str = "") -> str:
-    """统一异步文本提取入口：图片走 image_fn（VLM/OCR），其余走同步 extract_text。
+async def extract_document(
+        path: Path, image_fn=None, mime: str = "", *,
+        pdf_page_ocr: str = "auto") -> ExtractResult:
+    """统一异步文档提取，带 parse_code。
 
-    PDF/DOCX 走富解析：文字 + 内嵌图片（逐张过 image_fn）+ 表格（DOCX 转 Markdown）。
-    image_fn 为空或返回空时，图片按“仅缓存不解析”降级（返回空串）。
+    pdf_page_ocr: off | auto | always
+      - always: PDF 空白/疑似扫描页尝试渲染后 OCR/VLM
+      - auto: 文字层过空或疑似扫描时回退页 OCR
+      - off: 不回退；疑似扫描返回 empty_text_scanned_pdf
     """
     ext = path.suffix.lower()
+    mode = (pdf_page_ocr or "auto").lower()
+    if mode not in ("off", "auto", "always"):
+        mode = "auto"
+
     if ext in IMAGE_EXTS:
         if image_fn is None:
-            return ""
-        return (await image_fn(path)) or ""
+            return ExtractResult("", "empty_text")
+        try:
+            text = (await image_fn(path)) or ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning("图片解析失败：%s", e)
+            return ExtractResult("", "corrupt")
+        return ExtractResult(text, "ok" if text.strip() else "empty_text")
+
     if ext == ".docx":
         try:
-            return await _extract_docx_rich(path, image_fn)
+            text = await _extract_docx_rich(path, image_fn)
         except Exception as e:  # noqa: BLE001
             logger.warning("DOCX 富解析失败，降级纯文字提取：%s", e)
-            return await asyncio.to_thread(extract_text, path, mime)
+            try:
+                text = await asyncio.to_thread(extract_text, path, mime)
+            except Exception as e2:  # noqa: BLE001
+                return ExtractResult("", _classify_open_exception(e2))
+        return ExtractResult(
+            text or "", "ok" if (text or "").strip() else "empty_text")
+
     if ext == ".pdf":
-        try:
-            return await _extract_pdf_rich(path, image_fn)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("PDF 富解析失败，降级纯文字提取：%s", e)
-            return await asyncio.to_thread(extract_text, path, mime)
-    # 纯文本/其余格式同样丢线程：大文件读盘解码也不占事件循环
-    return await asyncio.to_thread(extract_text, path, mime)
+        return await _extract_pdf_document(path, image_fn, page_ocr=mode)
+
+    try:
+        text = await asyncio.to_thread(extract_text, path, mime)
+    except Exception as e:  # noqa: BLE001
+        return ExtractResult("", _classify_open_exception(e))
+    return ExtractResult(
+        text or "", "ok" if (text or "").strip() else "empty_text")
+
+
+async def extract_text_async(path: Path, image_fn=None, mime: str = "", *,
+                             pdf_page_ocr: str = "auto") -> str:
+    """统一异步文本提取入口（兼容旧调用方，只返回正文）。"""
+    return (await extract_document(
+        path, image_fn, mime, pdf_page_ocr=pdf_page_ocr)).text
 
 
 # ---- 混合文档富解析：文字 + 内嵌图片 + 表格 ------------------------------
@@ -196,48 +255,129 @@ async def _extract_docx_rich(path: Path, image_fn) -> str:
     return "\n".join(parts)
 
 
-async def _extract_pdf_rich(path: Path, image_fn) -> str:
-    """PDF 富解析：逐页文字 + 该页内嵌图片（pypdf 提字节 → VLM）追加页尾。
-
-    pdfplumber/pypdf 解析均为 CPU 密集，丢工作线程执行。
-    """
-    def _pdf_texts() -> list[str]:
+def _pdf_page_png_bytes(path: Path, page_index: int, resolution: int = 150) -> bytes | None:
+    """渲染单页为 PNG 字节；依赖 pdfplumber.to_image（需 pypdfium2 等）。失败返回 None。"""
+    try:
+        import io
         import pdfplumber
         with pdfplumber.open(path) as pdf:
-            return [p.extract_text() or "" for p in pdf.pages]
-
-    page_texts = await asyncio.to_thread(_pdf_texts)
-    # 无解析回调时与旧行为一致，只返回文字
-    if image_fn is None:
-        return "\n".join(page_texts)
-
-    def _pdf_image_blobs() -> list[tuple]:
-        from pypdf import PdfReader
-        reader = PdfReader(str(path))
-        out: list[tuple] = []
-        for i, page in enumerate(reader.pages):
-            for img in page.images:
-                suffix = Path(img.name or "x.png").suffix or ".png"
-                out.append((i, img.data, suffix))
-        return out
-
-    page_images: dict[int, list[str]] = {}
-    try:
-        blobs = await asyncio.to_thread(_pdf_image_blobs)
-        for i, data, suffix in blobs:
-            text = await _image_blob_to_text(data, suffix, image_fn)
-            if text:
-                page_images.setdefault(i, []).append(f"【图片内容】{text}")
-    except ImportError:
-        logger.info("未安装 pypdf，PDF 内嵌图片跳过解析")
+            if page_index < 0 or page_index >= len(pdf.pages):
+                return None
+            im = pdf.pages[page_index].to_image(resolution=resolution)
+            buf = io.BytesIO()
+            im.original.save(buf, format="PNG")
+            return buf.getvalue()
     except Exception as e:  # noqa: BLE001
-        logger.warning("PDF 内嵌图片提取失败（仅保留文字）：%s", e)
-    parts: list[str] = []
-    for i, text in enumerate(page_texts):
+        logger.info("PDF 页渲染失败 page=%s：%s", page_index, e)
+        return None
+
+
+async def _ocr_pdf_pages(
+        path: Path, page_indices: list[int], image_fn) -> dict[int, str]:
+    """对指定页渲染后走 image_fn（VLM/OCR）。"""
+    out: dict[int, str] = {}
+    if not image_fn or not page_indices:
+        return out
+    for i in page_indices:
+        blob = await asyncio.to_thread(_pdf_page_png_bytes, path, i)
+        if not blob:
+            continue
+        # 页图通常 >5KB；绕过装饰图过滤阈值
+        text = await _image_blob_to_text(blob, ".png", image_fn)
+        if not text and len(blob) >= _MIN_IMAGE_BYTES:
+            # _image_blob_to_text 在 image_fn 失败时已记日志
+            pass
         if text:
-            parts.append(text)
-        parts.extend(page_images.get(i, []))
-    return "\n".join(parts)
+            out[i] = text
+    return out
+
+
+async def _extract_pdf_document(
+        path: Path, image_fn, *, page_ocr: str = "auto") -> ExtractResult:
+    """PDF 富解析 + 可选页级 OCR 回退，返回 ExtractResult。"""
+    try:
+        def _pdf_texts() -> list[str]:
+            import pdfplumber
+            with pdfplumber.open(path) as pdf:
+                return [p.extract_text() or "" for p in pdf.pages]
+
+        page_texts = await asyncio.to_thread(_pdf_texts)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("PDF 打开/文字提取失败：%s", e)
+        return ExtractResult("", _classify_open_exception(e))
+
+    page_count = len(page_texts)
+    empty_page_count = sum(1 for t in page_texts if not (t or "").strip())
+    page_images: dict[int, list[str]] = {}
+
+    if image_fn is not None:
+        def _pdf_image_blobs() -> list[tuple]:
+            from pypdf import PdfReader
+            reader = PdfReader(str(path))
+            out: list[tuple] = []
+            for i, page in enumerate(reader.pages):
+                for img in page.images:
+                    suffix = Path(img.name or "x.png").suffix or ".png"
+                    out.append((i, img.data, suffix))
+            return out
+
+        try:
+            blobs = await asyncio.to_thread(_pdf_image_blobs)
+            for i, data, suffix in blobs:
+                text = await _image_blob_to_text(data, suffix, image_fn)
+                if text:
+                    page_images.setdefault(i, []).append(f"【图片内容】{text}")
+        except ImportError:
+            logger.info("未安装 pypdf，PDF 内嵌图片跳过解析")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("PDF 内嵌图片提取失败（仅保留文字）：%s", e)
+
+    def _join_pages() -> str:
+        parts: list[str] = []
+        for i, text in enumerate(page_texts):
+            if text:
+                parts.append(text)
+            parts.extend(page_images.get(i, []))
+        return "\n".join(parts)
+
+    text = _join_pages()
+    scanned = _looks_scanned(page_count, empty_page_count, text)
+    need_page_ocr = (
+        page_ocr == "always"
+        or (page_ocr == "auto" and scanned)
+    )
+
+    if need_page_ocr and image_fn is not None:
+        targets = [
+            i for i, t in enumerate(page_texts)
+            if page_ocr == "always" or not (t or "").strip()
+        ]
+        ocr_map = await _ocr_pdf_pages(path, targets, image_fn)
+        for i, ocr_text in ocr_map.items():
+            if ocr_text.strip():
+                page_texts[i] = ocr_text.strip()
+                empty_page_count = sum(
+                    1 for t in page_texts if not (t or "").strip())
+        text = _join_pages()
+        scanned = _looks_scanned(page_count, empty_page_count, text)
+
+    if text.strip():
+        return ExtractResult(
+            text, "ok", page_count=page_count,
+            empty_page_count=empty_page_count)
+
+    if scanned:
+        return ExtractResult(
+            "", "empty_text_scanned_pdf",
+            page_count=page_count, empty_page_count=empty_page_count)
+    return ExtractResult(
+        "", "empty_text",
+        page_count=page_count, empty_page_count=empty_page_count)
+
+
+async def _extract_pdf_rich(path: Path, image_fn) -> str:
+    """PDF 富解析：逐页文字 + 内嵌图；兼容旧调用方。"""
+    return (await _extract_pdf_document(path, image_fn, page_ocr="auto")).text
 
 
 def extract_text(path: Path, mime: str = "") -> str:
@@ -386,8 +526,24 @@ class IngestManager:
         try:
             if progress_cb:
                 await progress_cb("extracting", {})
-            text = await extract_text_async(stored, self.image_extract_fn)
+            pdf_page_ocr = str(
+                self.config.get("pdf_page_ocr", "auto") or "auto")
+            extracted = await extract_document(
+                stored, self.image_extract_fn, pdf_page_ocr=pdf_page_ocr)
+            text = extracted.text or ""
             is_image = stored.suffix.lower() in IMAGE_EXTS
+            if extracted.parse_code != "ok" and not text.strip():
+                # 空解析不静默当成功：通知 + 仍落盘便于排查，但不进入假「0 条记忆成功」无提示
+                code = extracted.parse_code
+                hints = {
+                    "empty_text_scanned_pdf": "疑似扫描件且页 OCR 未产出文字",
+                    "encrypted": "文件已加密",
+                    "corrupt": "文件损坏或无法打开",
+                    "empty_text": "未提取到文本",
+                }
+                self.notify(
+                    "doc_parse_empty",
+                    f"文档「{filename}」解析失败：{hints.get(code, code)}")
             from memory import _constants as _mem_const
             chunk_chars = _mem_const.INGEST_CHUNK_TOKENS * 2  # token→char 粗略
             chunks = chunk_text(text, chunk_chars)
@@ -419,7 +575,7 @@ class IngestManager:
                     "review_status) VALUES(?,?,?,?,?,?,?,?,?,'pending')",
                     (doc_id, filename, str(stored.relative_to(self.data_dir)),
                      len(content), stored.suffix, source, "[]", now,
-                     text if is_image else None))
+                     text or None))
                 self.db.execute(
                     "INSERT OR REPLACE INTO pending_imports(doc_id,items,created_at) "
                     "VALUES(?,?,?)",
@@ -467,13 +623,16 @@ class IngestManager:
             (doc_id, filename, str(stored.relative_to(self.data_dir)), len(content),
              stored.suffix, source, json.dumps(written, ensure_ascii=False),
              now_cst().isoformat(timespec="seconds"),
-             text if is_image else None))
+             text or None))
         self._check_capacity()
         # 图片启用解析后仍无文本：明确告知用户仅缓存，消除“以为已收录”的静默隐患
         if is_image and not (text or "").strip():
             self.notify("image_not_parsed",
                         f"图片「{filename}」未解析（未启用视觉/OCR 或模型不支持），仅缓存")
-        if self.config.get("silent_doc_import", True):
+        if not is_image and not (text or "").strip():
+            # 非图片空文本已在提取阶段 notify；此处避免再报「已提取 0 条」造成误导
+            pass
+        elif self.config.get("silent_doc_import", True):
             msg = f"已从文档提取 {len(written)} 条记忆"
             if failed:
                 msg += f"（{failed} 个分块提炼失败已跳过）"
@@ -560,9 +719,18 @@ class IngestManager:
                          "summary": r["summary"]} for r in mrows]
         content = ""
         if row["file_path"]:
-            f = self.data_dir / row["file_path"]
-            if f.exists():
-                content = extract_text(f)
+            # 优先复用入库时缓存的全文，避免详情页弱路径重解析
+            cached = None
+            try:
+                cached = row["extracted_text"]
+            except (KeyError, IndexError):
+                cached = None
+            if cached:
+                content = cached
+            else:
+                f = self.data_dir / row["file_path"]
+                if f.exists():
+                    content = extract_text(f)
         # 被引用记录：该文档提炼的记忆被对话引用的明细（知识库侧使用凭证）
         cites = self.db.query_all(
             "SELECT ce.memory_id, ce.session_id, ce.cited_at, "

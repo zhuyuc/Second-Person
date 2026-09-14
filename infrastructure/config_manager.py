@@ -84,6 +84,10 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "default": "vlm", "effect": "next_turn", "group": "memory", "order": 6,
      "label": "图片解析引擎",
      "desc": "上传图片时如何提取内容：vlm=视觉大模型（可识文字+理解图表，需模型支持视觉）；ocr=本地 OCR（仅识文字、离线）；off=不解析仅缓存。"},
+    {"key": "pdf_page_ocr", "type": "enum", "options": ["auto", "always", "off"],
+     "default": "auto", "effect": "next_turn", "group": "memory", "order": 8,
+     "label": "PDF 页级 OCR",
+     "desc": "扫描/纯图 PDF 时是否把页面渲染后走图片引擎识别：auto=文字层过空时回退；always=尽量每页识别（成本高）；off=不回退，空文本明确报错。"},
     # -- 本地目录接入 --
     {"key": "local_dir_scan_interval_hours", "type": "int", "min": 1, "max": 168,
      "default": 24, "effect": "immediate", "group": "memory", "order": 7,

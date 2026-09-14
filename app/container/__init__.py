@@ -145,6 +145,7 @@ class AppContainer:
         except Exception:  # noqa: BLE001
             logger.warning("remote_jobs resume schedule failed", exc_info=True)
         from app.attachment_store import AttachmentStore
+        # Placeholder; re-bound after image_extract_fn is ready.
         self.attachments = AttachmentStore(d)
         self.notifications = NotificationManager(self.db, self.sessions)
 
@@ -174,6 +175,11 @@ class AppContainer:
 
         extract_fn = make_extract_fn(self)
         self.image_extract_fn = make_image_extract_fn(self)
+        self.attachments = AttachmentStore(
+            d,
+            image_extract_fn=self.image_extract_fn,
+            pdf_page_ocr=str(self.config.get("pdf_page_ocr", "auto") or "auto"),
+        )
         skill_draft_fn = make_skill_draft_fn(self)
         soul_feedback_fn = make_soul_feedback_fn(self)
         self.merge_judge_fn = make_merge_judge_fn(self)
@@ -219,7 +225,8 @@ class AppContainer:
             self.db, self.projects, self.config,
             legacy_workspace=self.sandbox.workspace,
             legacy_whitelist=self.sandbox.whitelist,
-            spill_read_root=d / "temp" / "spills")
+            spill_read_root=d / "temp" / "spills",
+            attachments_read_root=d / "temp" / "attachments")
         self.workspace_resolver = WorkspaceResolver(self.policy_store)
         register_fs_tools(self.registry,
                           observation_store=self.fs_observations,
