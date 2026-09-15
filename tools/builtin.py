@@ -658,6 +658,23 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                 pass
 
         await on_progress("prepare", "准备生图…" if not local_gpu else "准备本地生图…")
+        if local_gpu:
+            try:
+                from infrastructure.lazy_services import ensure_comfyui
+                await on_progress("prepare", "检查本地生图服务…")
+                ensured = await ensure_comfyui(timeout=180.0, data_dir=data_dir)
+                if not ensured.get("ok"):
+                    raise RuntimeError(
+                        ensured.get("error")
+                        or "本地生图服务未启动")
+                if ensured.get("started"):
+                    await on_progress("prepare", "本地生图服务已拉起，继续…")
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "本地生图服务未启动：请先运行 image_gen/comfyui 下的 "
+                    "run_nvidia_gpu.bat，并确认 http://127.0.0.1:8188 可访问"
+                    f"（{exc}）"
+                ) from exc
         refine_on = bool(config.get("image_gen_refine_enabled", True)) and local_gpu
         if refine_on and llm is not None:
             refine_snap = providers.snapshot_for("retriever_refine") \

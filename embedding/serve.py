@@ -8,11 +8,14 @@ base_url 指向本服务即可（见 infrastructure/llm_provider.py 的 _do_embe
 
 只用 Python 标准库 http.server，不引入 web 框架，保持 venv 零额外依赖。
 
+启动优化：先绑定端口并对外返回 status=loading，再后台加载模型，避免主程序
+同步傻等整段 torch/BGE 冷启动。
+
 启动：
     embedding/venv/Scripts/python.exe embedding/serve.py --port 8100
 
 接口：
-    GET  /health              -> {"status": "ready"|"loading", "model": ..., "dim": ...}
+    GET  /health              -> {"status": "ready"|"loading"|"error", "model": ..., "dim": ...}
     POST /embeddings          -> OpenAI 兼容，请求 {"model","input": str|[str]}
     POST /v1/embeddings       -> 同上（兼容带 /v1 前缀的 base_url）
 """
@@ -43,24 +46,39 @@ MODEL_NAME = "BAAI/bge-m3"
 _model = None
 _model_dim: int | None = None
 _encode_lock = threading.Lock()
+_load_error: str | None = None
+_load_started = False
 
 
 def _load_model() -> None:
     """加载 BGE-M3 到全局单例。有 CUDA 用 CUDA，否则回退 CPU。"""
-    global _model, _model_dim
-    import torch
-    from sentence_transformers import SentenceTransformer
+    global _model, _model_dim, _load_error
+    try:
+        import torch
+        from sentence_transformers import SentenceTransformer
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    logger.info("加载模型 %s（device=%s，HF_HOME=%s）...",
-                MODEL_NAME, device, os.environ["HF_HOME"])
-    model = SentenceTransformer(MODEL_NAME, device=device)
-    _model = model
-    # sentence-transformers 5.x 已将方法重命名，兼容新旧两种
-    dim_fn = (getattr(model, "get_embedding_dimension", None)
-              or model.get_sentence_embedding_dimension)
-    _model_dim = int(dim_fn())
-    logger.info("模型加载完成，向量维度=%d", _model_dim)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("加载模型 %s（device=%s，HF_HOME=%s）...",
+                    MODEL_NAME, device, os.environ["HF_HOME"])
+        model = SentenceTransformer(MODEL_NAME, device=device)
+        _model = model
+        # sentence-transformers 5.x 已将方法重命名，兼容新旧两种
+        dim_fn = (getattr(model, "get_embedding_dimension", None)
+                  or model.get_sentence_embedding_dimension)
+        _model_dim = int(dim_fn())
+        _load_error = None
+        logger.info("模型加载完成，向量维度=%d", _model_dim)
+    except Exception as exc:  # noqa: BLE001
+        _load_error = str(exc)[:500]
+        logger.exception("模型加载失败")
+
+
+def _start_load_once() -> None:
+    global _load_started
+    if _load_started:
+        return
+    _load_started = True
+    threading.Thread(target=_load_model, name="emb-model-load", daemon=True).start()
 
 
 def _encode(texts: list[str]) -> list[list[float]]:
@@ -87,10 +105,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.rstrip("/") in ("/health", "/v1/health"):
-            ready = _model is not None
+            if _model is not None:
+                status = "ready"
+            elif _load_error:
+                status = "error"
+            else:
+                status = "loading"
             self._send_json(200, {
-                "status": "ready" if ready else "loading",
-                "model": MODEL_NAME, "dim": _model_dim})
+                "status": status,
+                "model": MODEL_NAME,
+                "dim": _model_dim,
+                "error": _load_error,
+            })
             return
         self._send_json(404, {"error": {"message": "not found"}})
 
@@ -99,7 +125,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": {"message": "not found"}})
             return
         if _model is None:
-            self._send_json(503, {"error": {"message": "模型加载中，请稍候"}})
+            msg = ("模型加载失败，请查看 embedding 日志"
+                   if _load_error else "模型加载中，请稍候")
+            self._send_json(503, {"error": {"message": msg}})
             return
         try:
             length = int(self.headers.get("Content-Length", 0))
@@ -140,9 +168,11 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8100)
     args = parser.parse_args()
 
-    _load_model()  # 服务开始监听前完成预热，之后 /health 即 ready
+    # 先听端口再加载模型：主程序可立即探测到进程存活，/health 返回 loading
     server = ThreadingHTTPServer((args.host, args.port), Handler)
-    logger.info("Embedding 服务已就绪：http://%s:%d", args.host, args.port)
+    _start_load_once()
+    logger.info("Embedding 服务已监听：http://%s:%d（模型后台加载中）",
+                args.host, args.port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

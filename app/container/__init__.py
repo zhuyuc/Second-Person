@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -534,66 +535,132 @@ class AppContainer:
 
     async def startup(self) -> None:
         # 主事件循环引用：供 watcher 的 Timer 线程将索引重建投递回单写者
+        from infrastructure.startup_status import status as startup_status
+        from infrastructure.startup_timing import StartupTimer
+        from infrastructure import background_tasks
+
+        timer = StartupTimer()
+        startup_status.set("core", "starting")
         self._loop = asyncio.get_running_loop()
+
+        # ---- 关键路径：足以支持 Web 对话 ----
         await self.tracer.start()
         self._ensure_local_embedding_provider()
         self.vs.load()
+        timer.mark("vector_cache")
         try:
             self.plugins.discover_and_load()
         except Exception:  # noqa: BLE001
             logger.warning("插件加载出错")
         await self.fw.start()
         await self.vector_compensator.start()
-        try:
-            self.file_watcher.start()
-        except Exception:  # noqa: BLE001
-            logger.warning("文件 watcher 启动出错")
         await self.scheduler.start()
-        try:
-            await self.connectors.reconnect_all()
-        except Exception:  # noqa: BLE001
-            logger.warning("连接器重连出错")
         self.notifications.flush_pending()
+        # 意识提示轻量，留在关键路径，避免首轮对话缺重要记忆关键词
         try:
-            await self.adapters.load_enabled()
+            self.refresh_consciousness_hint()
         except Exception:  # noqa: BLE001
-            logger.warning("IM 适配器加载出错")
-        # 启动自检：一致性校验 + 子系统状态概览
-        try:
-            from memory.recovery import consistency_check
-            cc = consistency_check(self.db, self.data_dir)
-            if not cc["consistent"]:
-                logger.warning("启动一致性校验：md=%s index=%s 不一致，建议 --rebuild-index",
-                               cc["md"], cc["index"])
-            vc = self.vs.consistency_check()
-            if not vc["consistent"]:
-                logger.warning("向量缓存与 vectors 表不一致：%s", vc)
-            logger.info("启动自检：记忆 md=%s/index=%s，向量缓存 %s 条",
-                        cc["md"], cc["index"], vc.get("memory"))
-        except Exception:  # noqa: BLE001
-            logger.warning("启动自检出错", exc_info=True)
-        # 启动时初始化一次意识提示（存量重要记忆无需等待首次写入）
-        self.refresh_consciousness_hint()
-        # tiktoken 编码器预热（首次加载数百毫秒，避免首个无 usage 的流式响应
-        # 在事件循环上触发同步加载），后台线程执行不阻塞启动
+            logger.debug("consciousness hint refresh failed", exc_info=True)
 
-        async def _warm_tiktoken() -> None:
-            try:
-                import tiktoken
-                await asyncio.to_thread(tiktoken.get_encoding, "cl100k_base")
-            except Exception:  # noqa: BLE001
-                pass  # 未安装/加载失败时 estimate_tokens 自有降级
-        asyncio.create_task(_warm_tiktoken())
-        try:
-            self.runtime_warmer.schedule("startup")
-        except Exception:  # noqa: BLE001
-            logger.debug("schedule startup warmup failed", exc_info=True)
-        # 事件循环卡顿哨兵：任何同步重操作阻塞循环（会冻结对话 SSE）
-        # 都会在日志中立即现形，防未来回归
         from infrastructure.observability import EventLoopMonitor
         self.loop_monitor = EventLoopMonitor()
         await self.loop_monitor.start()
-        logger.info("AppContainer 启动完成")
+        startup_status.set("core", "ready")
+        timer.mark("core_ready")
+        logger.info("AppContainer 核心就绪（外围服务后台加载）")
+
+        # ---- 外围：不挡 Application startup complete ----
+        async def _peripheral_boot() -> None:
+            try:
+                try:
+                    self.file_watcher.start()
+                except Exception:  # noqa: BLE001
+                    logger.warning("文件 watcher 启动出错")
+                try:
+                    await self.connectors.reconnect_all()
+                except Exception:  # noqa: BLE001
+                    logger.warning("连接器重连出错")
+                startup_status.set("gateway", "starting")
+                try:
+                    await self.adapters.load_enabled()
+                    startup_status.set(
+                        "gateway",
+                        "ready" if self.adapters.active else "skipped")
+                except Exception:  # noqa: BLE001
+                    startup_status.set("gateway", "error")
+                    logger.warning("IM 适配器加载出错")
+                try:
+                    from memory.recovery import consistency_check
+                    cc = await asyncio.to_thread(
+                        consistency_check, self.db, self.data_dir)
+                    if not cc["consistent"]:
+                        logger.warning(
+                            "启动一致性校验：md=%s index=%s 不一致，建议 --rebuild-index",
+                            cc["md"], cc["index"])
+                    vc = await asyncio.to_thread(self.vs.consistency_check)
+                    if not vc["consistent"]:
+                        logger.warning("向量缓存与 vectors 表不一致：%s", vc)
+                    logger.info(
+                        "启动自检：记忆 md=%s/index=%s，向量缓存 %s 条",
+                        cc["md"], cc["index"], vc.get("memory"))
+                except Exception:  # noqa: BLE001
+                    logger.warning("启动自检出错", exc_info=True)
+                startup_status.set("peripherals", "ready")
+            except Exception:  # noqa: BLE001
+                startup_status.set("peripherals", "error")
+                logger.warning("外围启动出错", exc_info=True)
+            finally:
+                # 外围就绪后再预热，避免与飞书/Comfy 抢资源把事件循环打满
+                async def _warm_tiktoken() -> None:
+                    try:
+                        import tiktoken
+                        await asyncio.to_thread(
+                            tiktoken.get_encoding, "cl100k_base")
+                    except Exception:  # noqa: BLE001
+                        pass
+                background_tasks.track_task(
+                    _warm_tiktoken(), name="warm_tiktoken")
+                try:
+                    self.runtime_warmer.schedule("startup")
+                except Exception:  # noqa: BLE001
+                    logger.debug("schedule startup warmup failed", exc_info=True)
+
+        background_tasks.track_task(
+            _peripheral_boot(), name="peripheral_boot")
+
+        # Embedding 状态后台轮询（不阻塞）
+        background_tasks.track_task(
+            self._poll_embedding_stage(), name="embed_stage_poll")
+        try:
+            timer.dump(self.data_dir / "logs" / "startup-timing-lifespan.json")
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _poll_embedding_stage(self) -> None:
+        """轮询本地 Embedding /health，更新 startup_status.embedding。"""
+        from infrastructure.startup_status import status as startup_status
+        import httpx
+
+        local = self.config.get_raw("local_embedding", {}) or {}
+        if not local.get("enabled", True):
+            startup_status.set("embedding", "disabled")
+            return
+        base = (local.get("base_url") or "http://127.0.0.1:8100").rstrip("/")
+        url = f"{base}/health"
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    r = await client.get(url)
+                    body = r.json() if r.status_code == 200 else {}
+                    st = body.get("status") or "loading"
+                    startup_status.set("embedding", st, dim=body.get("dim"))
+                    if st in ("ready", "error"):
+                        return
+            except Exception:  # noqa: BLE001
+                startup_status.set("embedding", "loading")
+            await asyncio.sleep(1.0)
+        startup_status.set("embedding", "error", reason="poll_timeout")
 
     async def shutdown(self) -> None:
         if getattr(self, "loop_monitor", None):

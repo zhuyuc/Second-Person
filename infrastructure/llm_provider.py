@@ -746,14 +746,34 @@ class LLMClient:
 
     async def _do_embed(self, snap, texts) -> list[list[float]]:
         # 本地 Embedding 微服务毫秒级返回，用短读超时快速失败（不再傻等 120s）
+        # 冷启动先听后载时可能短暂 503 / 连接拒绝：仅对此有限重试
         c = self._get_client()
-        r = await c.post(f"{snap.base_url.rstrip('/')}/embeddings",
-                         json={"model": snap.model_id, "input": texts},
-                         headers={"Authorization": f"Bearer {snap.api_key}"},
-                         timeout=timeout_for("embedding"))
-        r.raise_for_status()
-        data = r.json()
-        return [item["embedding"] for item in data["data"]]
+        url = f"{snap.base_url.rstrip('/')}/embeddings"
+        headers = {"Authorization": f"Bearer {snap.api_key}"}
+        body = {"model": snap.model_id, "input": texts}
+        last_exc: Exception | None = None
+        for attempt in range(10):
+            try:
+                r = await c.post(url, json=body, headers=headers,
+                                 timeout=timeout_for("embedding"))
+                if r.status_code == 503:
+                    await asyncio.sleep(min(0.8 + attempt * 0.4, 3.0))
+                    continue
+                r.raise_for_status()
+                data = r.json()
+                return [item["embedding"] for item in data["data"]]
+            except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+                last_exc = exc
+                await asyncio.sleep(min(0.5 + attempt * 0.3, 2.0))
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 503:
+                    last_exc = exc
+                    await asyncio.sleep(min(0.8 + attempt * 0.4, 3.0))
+                    continue
+                raise
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("Embedding 服务暂不可用（模型加载中）")
 
     async def _do_stream(self, snap, messages, usage, images=None,
                          extra_tools=None, tools=None,

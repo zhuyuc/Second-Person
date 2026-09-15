@@ -98,6 +98,16 @@ async def execute_video_gen(
         if not img_name else
         ("本地暂不支持图生视频…" if local_gpu else "正在图生视频…"),
     )
+    if local_gpu:
+        from infrastructure.lazy_services import ensure_comfyui
+        await _progress("prepare", "检查本地生视频服务…")
+        ensured = await ensure_comfyui(timeout=180.0, data_dir=data_dir)
+        if not ensured.get("ok"):
+            raise RuntimeError(
+                "本地生视频服务未启动："
+                f"{ensured.get('error') or 'ComfyUI 不可用'}")
+        if ensured.get("started"):
+            await _progress("prepare", "本地生视频服务已拉起，继续…")
     refine_on = profile.refine == "wan_en" and llm is not None and not img_name
     if refine_on:
         refine_snap = providers.snapshot_for("retriever_refine") \

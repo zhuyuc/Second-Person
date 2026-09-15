@@ -386,11 +386,19 @@ async def health():
         "md_sqlite_consistency": "ok" if _consistency_ok(c) else "warning",
         "llm_provider": provider_state, "embedding": embedding_state,
     }
-    # 三级判定：数据库坏/对话模型均不可用 → unhealthy；有降级项 → degraded
+    from infrastructure.startup_status import status as startup_status
+    stages = startup_status.snapshot()
+    # 三级判定：数据库坏/对话模型不可用 → unhealthy；有降级项 → degraded
     if not db_ok or provider_state == "unavailable":
         status = "unhealthy"
-    elif all(v in ("ok",) for v in checks.values()):
+    elif all(v == "ok" for v in checks.values()):
         status = "healthy"
     else:
         status = "degraded"
-    return {"code": 200, "data": {"status": status, "checks": checks}}
+    return {"code": 200, "data": {
+        "status": status,
+        "checks": checks,
+        "stages": stages.get("stages"),
+        "core_ready": bool(stages.get("core_ready")),
+        "stage_details": stages.get("details"),
+    }}
