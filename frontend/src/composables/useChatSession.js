@@ -56,9 +56,25 @@ export function normalizeMessageAttachments(messages) {
   return messages
 }
 
+// 流式在途孤儿行：进程被硬杀/服务重启打断时，增量落库的 streaming 行来不及被
+// 终态收口覆盖，正文里没有后端那行中断标记。加载时补齐，保证刷新后所见与中断
+// 当时屏上一致。
+export function markOrphanedStreaming(msgs) {
+  for (const m of msgs) {
+    if (
+      m.role === 'assistant' &&
+      m.analysis_metadata?.end_reason === 'streaming' &&
+      !String(m.content || '').includes('本回复未完成')
+    ) {
+      m.content = `${m.content || ''}\n\n> ⚠️ 本回复未完成：生成已中断`
+    }
+  }
+  return msgs
+}
+
 export async function fetchSessionMessages(sid, { before_id, limit } = {}) {
   const msgs = await chatApi.messages(sid, { before_id, limit })
-  return stripToastNotifs(normalizeMessageAttachments(msgs))
+  return markOrphanedStreaming(stripToastNotifs(normalizeMessageAttachments(msgs)))
 }
 
 export async function fetchSessionMetrics(sid) {

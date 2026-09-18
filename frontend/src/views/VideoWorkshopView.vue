@@ -816,10 +816,6 @@ function videoSrc(p) {
   return p.public_url || (p.filename ? `/chat-videos/${p.filename}` : '')
 }
 
-function statusLabel(s) {
-  return { draft: '待创作', doing: '生成中', done: '已完成', failed: '失败' }[s] || s
-}
-
 function fmtDate(iso) {
   if (!iso) return ''
   try {

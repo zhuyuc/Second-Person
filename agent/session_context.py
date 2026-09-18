@@ -334,6 +334,32 @@ class SessionStore:
             "WHERE session_id=?", (_now(), sid))
         return msg_id
 
+    def update_message(self, msg_id: int, *, content: str | None = None,
+                       analysis_metadata: dict | None = None,
+                       thinking: str | None = None,
+                       visuals: list | None = None) -> None:
+        """覆盖一条已存在消息的正文/元数据（流式增量落库与终态收口）。"""
+        sets: list[str] = []
+        args: list = []
+        if content is not None:
+            sets.append("content=?")
+            args.append(content)
+        if analysis_metadata is not None:
+            sets.append("analysis_metadata_json=?")
+            args.append(json.dumps(analysis_metadata, ensure_ascii=False))
+        if thinking is not None:
+            sets.append("thinking=?")
+            args.append(thinking)
+        if visuals is not None:
+            sets.append("visuals=?")
+            args.append(json.dumps(visuals, ensure_ascii=False))
+        if not sets:
+            return
+        args.append(msg_id)
+        self.db.execute(
+            f"UPDATE conversations SET {', '.join(sets)} WHERE id=?",
+            tuple(args))
+
     def get_messages(self, sid: str, before_id: int = None, limit: int = 50) -> list[dict]:
         # 仅加载活跃分支（is_active=1 或 NULL 兼容未迁移数据）
         if before_id:

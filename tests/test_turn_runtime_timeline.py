@@ -22,6 +22,12 @@ class _Sessions:
         self.messages.append({"role": role, "content": content, **kw})
         return len(self.messages)
 
+    def update_message(self, msg_id, **fields):
+        target = self.messages[msg_id - 1]
+        for key, value in fields.items():
+            if value is not None:
+                target[key] = value
+
 
 class _Provider:
     model_id = "test-model"

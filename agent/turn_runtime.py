@@ -116,6 +116,7 @@ class TurnRuntime:
         turn_id = turn["id"]
         started = time.monotonic()
         calls = 0
+        step = 0   # 预置：循环开始前被中断时，except 分支仍可安全引用
         thinking_parts: list[str] = []
         reasoning_parts: list[str] = []
         system_parts: list[str] = []
@@ -212,6 +213,81 @@ class TurnRuntime:
             if evt.get("citations"):
                 orphan["citations"] = evt["citations"]
             timeline.append(orphan)
+
+        # ---- 流式增量落库 ----
+        # 已输出正文按节流写进一条在途 assistant 行：进程被硬杀、服务重启这类
+        # 非协作中断也留得下用户已经看到的内容；正常结束时覆盖同一行收口，
+        # 因此一轮只有一条 assistant 消息。
+        stream_msg_id: int | None = None
+        last_checkpoint = 0.0
+        checkpointed_chars = 0
+        CHECKPOINT_MIN_INTERVAL = 2.0   # 秒：常规写入间隔
+        CHECKPOINT_MIN_CHARS = 400      # 字：攒够这么多新增就提前落一次
+
+        def _persist_assistant(content: str, *, end_reason: str,
+                               thinking: str | None = None,
+                               visuals: list | None = None) -> tuple[int, dict]:
+            """终态收口：覆盖在途行或新建，返回 (message_id, analysis_metadata)。"""
+            nonlocal stream_msg_id
+            meta = self._analysis_metadata(
+                turn_id=turn_id, reasoning_effort=reasoning_effort,
+                reasoning_parts=reasoning_parts, system_parts=system_parts,
+                tool_events=tool_events, decision_notices=decision_notices,
+                reasoning_source=reasoning_source, end_reason=end_reason,
+                timeline=timeline)
+            if stream_msg_id is not None:
+                self.sessions.update_message(
+                    stream_msg_id, content=content, analysis_metadata=meta,
+                    thinking=thinking, visuals=visuals)
+                return stream_msg_id, meta
+            stream_msg_id = self.sessions.append_message(
+                session_id, "assistant", content, thinking=thinking,
+                analysis_metadata=meta, visuals=visuals,
+                parent_id=assistant_parent_id,
+                version_group_id=assistant_version_group_id)
+            return stream_msg_id, meta
+
+        def _checkpoint_stream(force: bool = False) -> None:
+            """把已输出正文增量落到在途行；失败只记日志，绝不打断生成。"""
+            nonlocal last_checkpoint, checkpointed_chars
+            body = turn_body.strip()
+            if not body:
+                return
+            now = time.monotonic()
+            if not force and (now - last_checkpoint < CHECKPOINT_MIN_INTERVAL
+                              and len(body) - checkpointed_chars < CHECKPOINT_MIN_CHARS):
+                return
+            try:
+                _persist_assistant(body, end_reason="streaming",
+                                   thinking="".join(thinking_parts) or None)
+                last_checkpoint = now
+                checkpointed_chars = len(body)
+            except Exception:  # noqa: BLE001
+                logger.debug("stream checkpoint failed", exc_info=True)
+
+        def _salvage_partial(*, end_reason: str,
+                             note: str) -> tuple[int, dict, str] | None:
+            """中断/失败时收口已输出内容。
+
+            判定与前端 finishStream 的气泡条件对齐：只要屏上出现过东西
+            （正文、时间线、推理、工具、进度、决策提示）就必须落库，
+            否则刷新后会出现"屏上有、库里无"的内容丢失。
+            """
+            partial_body = turn_body.strip()
+            has_output = bool(
+                partial_body or timeline or reasoning_parts or tool_events
+                or thinking_parts or decision_notices or system_parts
+                or stream_msg_id is not None)
+            if not has_output:
+                return None
+            marker = f"> ⚠️ 本回复未完成：{note}"
+            content = (f"{partial_body}\n\n{marker}" if partial_body
+                       else f"{marker}，仅输出了处理进度")
+            msg_id, meta = _persist_assistant(
+                content, end_reason=end_reason,
+                thinking="".join(thinking_parts) or None)
+            return msg_id, meta, content
+
         from memory import _constants as _mem_const
         repeat_guard = RepeatToolGuard(_mem_const.REPEAT_TOOL_THRESHOLDS)
         reasoning_source = "none"
@@ -295,6 +371,10 @@ class TurnRuntime:
                 await runtime_emit("step_started", {"turn_id": turn_id, "step": step})
 
                 async def _progress(phase: str, label: str, detail: str = "") -> None:
+                    # 媒体进度在前端挂到对应工具行，不进"系统进度"车道，避免重复
+                    if phase not in ("video_gen", "image_gen") and label:
+                        system_parts.append(
+                            f"【{label}】{detail}\n" if detail else f"【{label}】\n")
                     await emit("step_progress", {
                         "turn_id": turn_id, "step": step,
                         "phase": phase, "label": label, "detail": detail,
@@ -553,12 +633,15 @@ class TurnRuntime:
                                 content_parts.append(data)
                                 if not narration_reset_done:
                                     turn_body += data
+                                    _checkpoint_stream()
                                 await emit("content_delta", {"text": data})
                             elif kind == "reasoning":
                                 reasoning_source = "provider"
                                 reasoning_parts.append(data)
                                 step_reasoning_parts.append(data)
                                 _tl_append_reasoning(data)
+                                if sum(len(x) for x in reasoning_parts) >= 1500:
+                                    _checkpoint_stream()
                                 await emit("reasoning_delta", {
                                     "text": data, "source": "provider"})
                             elif kind == "tool_start":
@@ -652,19 +735,10 @@ class TurnRuntime:
                             logger.debug("commit_anchor 失败，忽略", exc_info=True)
                     if not tool_calls:
                         content = "".join(content_parts)
-                        analysis_metadata = self._analysis_metadata(
-                            turn_id=turn_id, reasoning_effort=reasoning_effort,
-                            reasoning_parts=reasoning_parts, system_parts=system_parts,
-                            tool_events=tool_events, decision_notices=decision_notices,
-                            reasoning_source=reasoning_source, end_reason="final_answer",
-                            timeline=timeline)
-                        msg_id = self.sessions.append_message(
-                            session_id, "assistant", content,
+                        msg_id, analysis_metadata = _persist_assistant(
+                            content, end_reason="final_answer",
                             thinking="".join(thinking_parts) or None,
-                            analysis_metadata=analysis_metadata,
-                            visuals=turn_visuals or None,
-                            parent_id=assistant_parent_id,
-                            version_group_id=assistant_version_group_id)
+                            visuals=turn_visuals or None)
                         self.events.append(
                             turn_id, "assistant.message", actor="model", step=step,
                             model_visible=True,
@@ -769,27 +843,13 @@ class TurnRuntime:
             else:
                 content = (f"本次任务经过 {max_steps} 步仍未产出回复，可能任务粒度过大或工具调用出现循环。"
                            "建议拆分为更小的子问题重试，或新开一个会话。")
-            msg_id = self.sessions.append_message(
-                session_id, "assistant", content,
-                thinking="".join(thinking_parts) or None,
-                analysis_metadata=self._analysis_metadata(
-                    turn_id=turn_id, reasoning_effort=reasoning_effort,
-                    reasoning_parts=reasoning_parts, system_parts=system_parts,
-                    tool_events=tool_events, decision_notices=decision_notices,
-                    reasoning_source=reasoning_source, end_reason="max_steps",
-                    timeline=timeline),
-                parent_id=assistant_parent_id,
-                version_group_id=assistant_version_group_id)
+            msg_id, analysis_metadata = _persist_assistant(
+                content, end_reason="max_steps",
+                thinking="".join(thinking_parts) or None)
             self.events.append(turn_id, "assistant.message", actor="host", step=max_steps,
                                model_visible=True, payload={"content": content, "message_id": msg_id})
             self.events.finish(turn_id, status="completed", end_reason="max_steps", step=max_steps)
             await runtime_emit("content_delta", {"text": content})
-            analysis_metadata = self._analysis_metadata(
-                turn_id=turn_id, reasoning_effort=reasoning_effort,
-                reasoning_parts=reasoning_parts, system_parts=system_parts,
-                tool_events=tool_events, decision_notices=decision_notices,
-                reasoning_source=reasoning_source, end_reason="max_steps",
-                timeline=timeline)
             await runtime_emit("turn_completed", {
                 "message_id": msg_id, "turn_id": turn_id,
                 "reasoning_effort": reasoning_effort,
@@ -805,27 +865,11 @@ class TurnRuntime:
                 "langfuse_trace_id": getattr(trace, "id", None),
             }
         except asyncio.CancelledError:
-            partial_body = turn_body.strip()
-            has_progress = bool(
-                partial_body or timeline or reasoning_parts or tool_events or thinking_parts)
-            if has_progress:
-                marker = "> ⚠️ 本回复未完成：生成已中断"
-                content = (f"{partial_body}\n\n{marker}" if partial_body
-                           else f"{marker}，仅输出了处理进度")
-                analysis_metadata = self._analysis_metadata(
-                    turn_id=turn_id, reasoning_effort=reasoning_effort,
-                    reasoning_parts=reasoning_parts, system_parts=system_parts,
-                    tool_events=tool_events, decision_notices=decision_notices,
-                    reasoning_source=reasoning_source, end_reason="cancelled",
-                    timeline=timeline)
-                msg_id = self.sessions.append_message(
-                    session_id, "assistant", content,
-                    thinking="".join(thinking_parts) or None,
-                    analysis_metadata=analysis_metadata,
-                    parent_id=assistant_parent_id,
-                    version_group_id=assistant_version_group_id)
-                self.events.append(turn_id, "assistant.message", actor="host", step=step,
-                                   model_visible=True,
+            salvaged = _salvage_partial(end_reason="cancelled", note="生成已中断")
+            if salvaged:
+                msg_id, analysis_metadata, content = salvaged
+                self.events.append(turn_id, "assistant.message", actor="host",
+                                   step=step, model_visible=True,
                                    payload={"content": content, "message_id": msg_id})
                 try:
                     await runtime_emit("turn_completed", {
@@ -838,10 +882,19 @@ class TurnRuntime:
                     })
                 except asyncio.CancelledError:
                     pass
-            self.events.finish(turn_id, status="cancelled", end_reason="cancelled", step=step)
+            self.events.finish(turn_id, status="cancelled", end_reason="cancelled",
+                               step=step)
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("Agent turn failed: %s", turn_id)
+            # 失败轮次同样收口：已输出正文不能因为报错就整体丢掉
+            salvaged = _salvage_partial(
+                end_reason="error", note=f"生成失败：{str(exc)[:120]}")
+            if salvaged:
+                msg_id, _, content = salvaged
+                self.events.append(turn_id, "assistant.message", actor="host",
+                                   step=step, model_visible=True,
+                                   payload={"content": content, "message_id": msg_id})
             self.events.finish(turn_id, status="failed", end_reason="error", step=0,
                                payload={"error": str(exc)[:500]})
             trace.update(level="ERROR", status_message=str(exc)[:500])

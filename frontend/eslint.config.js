@@ -112,7 +112,7 @@ export default [
       'no-alert': 'error',
       'no-var': 'error',
       'prefer-const': 'warn',
-      eqeqeq: ['warn', 'always'],
+      eqeqeq: ['warn', 'always', { null: 'ignore' }],
       curly: 'off',
     },
   },
