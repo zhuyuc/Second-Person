@@ -172,8 +172,9 @@ class TurnEventStore:
                 "context.constraints",
                 "context.working_set",
                 "context.file_cards",
+                "context.skills",
             }:
-                # 项目/情绪/位置/本轮约束/工作集：一律 messages 尾部，不进 system。
+                # 项目/情绪/位置/本轮约束/工作集/显式@技能：一律 messages 尾部，不进 system。
                 messages.append({"role": "user", "content": payload.get("content", "")})
         return messages, last_seq
 

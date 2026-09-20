@@ -33,12 +33,23 @@ vi.mock('@/components/asideChatLoader.js', () => ({
     }),
 }))
 
+vi.mock('vue-router', () => ({
+  useRoute: () => ({
+    get path() {
+      return routePath
+    },
+  }),
+}))
+
+let routePath = '/chat'
+
 import SideChatDrawer from './SideChatDrawer.vue'
 
 describe('SideChatDrawer openAside quote injection', () => {
   let wrapper
 
   beforeEach(() => {
+    routePath = '/chat'
     injectQuote.mockReset()
     resolveChatView = null
     setActivePinia(createPinia())
@@ -109,5 +120,13 @@ describe('SideChatDrawer openAside quote injection', () => {
     expect(injectQuote).toHaveBeenCalledWith(
       expect.objectContaining({ text: '已挂载后再引用' }),
     )
+  })
+
+  it('hides drawer when not on /chat even if aside entry exists', async () => {
+    routePath = '/workshop/abc'
+    wrapper = mount(SideChatDrawer, { attachTo: document.body })
+    await wrapper.vm.openAside({ text: '工坊页不应露抽屉' })
+    await nextTick()
+    expect(wrapper.find('.aside-drawer.open').exists()).toBe(false)
   })
 })

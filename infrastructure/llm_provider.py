@@ -19,6 +19,8 @@ from typing import Any, AsyncIterator
 
 import httpx
 
+from infrastructure.provider_modality import endpoint_url
+
 from .http_client import timeout_for
 from .observability import get_trace_id
 from infrastructure.timeutil import now_cst
@@ -671,7 +673,8 @@ class LLMClient:
         # （如 DeepSeek 的 thinking.type；thinking_enabled 原样透传会被忽略）
         body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         c = self._get_client()
-        r = await c.post(f"{snap.base_url.rstrip('/')}/chat/completions",
+        r = await c.post(
+            endpoint_url(snap.base_url, snap.provider_type, "/chat/completions"),
                          json=body,
                          headers={"Authorization": f"Bearer {snap.api_key}"},
                          timeout=timeout_for("default"))
@@ -748,7 +751,7 @@ class LLMClient:
         # 本地 Embedding 微服务毫秒级返回，用短读超时快速失败（不再傻等 120s）
         # 冷启动先听后载时可能短暂 503 / 连接拒绝：仅对此有限重试
         c = self._get_client()
-        url = f"{snap.base_url.rstrip('/')}/embeddings"
+        url = endpoint_url(snap.base_url, snap.provider_type, "/embeddings")
         headers = {"Authorization": f"Bearer {snap.api_key}"}
         body = {"model": snap.model_id, "input": texts}
         last_exc: Exception | None = None
@@ -821,7 +824,9 @@ class LLMClient:
         body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         # 流式回复可持续数分钟：读超时按 chunk 间隔计时，用 stream 长超时
         c = self._get_client()
-        async with c.stream("POST", f"{snap.base_url.rstrip('/')}/chat/completions",
+        async with c.stream(
+                "POST",
+                endpoint_url(snap.base_url, snap.provider_type, "/chat/completions"),
                             json=body,
                             headers={"Authorization": f"Bearer {snap.api_key}"},
                             timeout=timeout_for("stream")) as r:

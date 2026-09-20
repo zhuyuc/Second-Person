@@ -322,7 +322,7 @@ def test_image_factory_picks_cloud_adapter(tmp_path: Path):
         def __init__(self, provider_type):
             self.provider_type = provider_type
 
-    for ptype in ("openai_compatible", "anthropic", "custom"):
+    for ptype in ("openai_compatible", "custom"):
         adapter = get_image_adapter(_Snap(ptype), _Config(), tmp_path)
         assert isinstance(adapter, OpenAIImageAdapter)
 
@@ -396,6 +396,43 @@ def test_openai_image_adapter_download(tmp_path: Path, monkeypatch):
     assert path.exists()
     assert result.backend == "cloud"
     assert result.n == 1
+
+
+def test_custom_image_posts_to_the_url_as_written(tmp_path: Path, monkeypatch):
+    import infrastructure.image_gen.cloud_adapter as mod
+    from infrastructure.image_gen import OpenAIImageAdapter, ImageGenRequest
+
+    seen = {}
+    raw = "https://example.com/api/v1/services/aigc/text2image/image-synthesis"
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"data": [{"b64_json": "aGk="}]}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            seen["url"] = url
+            return _Resp()
+
+    monkeypatch.setattr(mod.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(mod, "get_store", lambda: None)
+    adapter = OpenAIImageAdapter(
+        base_url=raw, api_key="sk", data_dir=tmp_path,
+        model_id="wanx", provider_type="custom")
+    _run(adapter.generate(ImageGenRequest(prompt="猫"), session_id="s"))
+    assert seen["url"] == raw
 
 
 def test_generate_image_skips_empty_retry():

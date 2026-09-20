@@ -116,6 +116,8 @@ class ChatSendRequest(BaseModel):
     location: str | None = None
     handoff_path: str | None = None
     reasoning_effort: str | None = None
+    # Explicit @ skill names only (max 2). Empty/absent → do not load skill bodies.
+    skill_refs: list[str] | None = None
 
     @field_validator("session_id", mode="before")
     @classmethod
@@ -235,6 +237,27 @@ class ChatSendRequest(BaseModel):
         if normalized != value:
             raise ValueError("reasoning_effort must be off, low, high, or max")
         return normalized
+
+    @field_validator("skill_refs", mode="before")
+    @classmethod
+    def _validate_skill_refs(cls, value: Any) -> list[str] | None:
+        if value in (None, []):
+            return None
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError("skill_refs must be a list of strings")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            name = str(item).strip()
+            if not name or name in seen:
+                continue
+            if len(name) > 64:
+                raise ValueError("skill_refs entries must be at most 64 characters")
+            seen.add(name)
+            cleaned.append(name)
+            if len(cleaned) >= 2:
+                break
+        return cleaned or None
 
     @model_validator(mode="after")
     def _fill_reasoning_effort(self) -> "ChatSendRequest":

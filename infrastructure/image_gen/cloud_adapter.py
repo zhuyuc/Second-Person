@@ -15,6 +15,7 @@ from infrastructure.image_gen import active_jobs
 from infrastructure.remote_jobs import JobCancelled, get_store, runtime
 from infrastructure.remote_jobs.fetch import fetch_url_bytes
 
+from infrastructure.provider_modality import endpoint_url, is_custom
 from .types import ImageGenRequest, ImageGenResult
 
 logger = logging.getLogger("second_person.image_gen.cloud")
@@ -31,6 +32,7 @@ class OpenAIImageAdapter:
         data_dir: Path,
         timeout_sec: float = 120.0,
         model_id: str = "",
+        provider_type: str = "openai_compatible",
     ) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self.api_key = api_key or ""
@@ -38,6 +40,7 @@ class OpenAIImageAdapter:
         # 仅作「单次生成 POST」读超时；下载走可重试获取，不受此限制结案
         self.timeout_sec = timeout_sec
         self.model_id = model_id
+        self.provider_type = (provider_type or "openai_compatible").strip().lower()
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -46,12 +49,15 @@ class OpenAIImageAdapter:
         }
 
     async def probe(self, timeout: float = 12.0) -> dict:
-        url = f"{self.base_url}/models"
+        url = endpoint_url(self.base_url, self.provider_type, "/models")
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.get(url, headers=self._headers())
-            if resp.status_code < 400:
-                return {"ok": True, "protocol": "image"}
+            if resp.status_code < 400 or (
+                is_custom(self.provider_type) and resp.status_code in (400, 405)
+            ):
+                protocol = "custom" if is_custom(self.provider_type) else "image"
+                return {"ok": True, "protocol": protocol}
             return {"ok": False, "error": f"图片接口返回 HTTP {resp.status_code}"}
         except httpx.ConnectError:
             return {"ok": False, "error": "无法连接云端图片服务"}
@@ -95,7 +101,7 @@ class OpenAIImageAdapter:
                 "n": 1,
                 "size": size,
             }
-            url = f"{self.base_url}/images/generations"
+            url = endpoint_url(self.base_url, self.provider_type, "/images/generations")
             # 生成 POST：跟到响应或用户取消；ReadTimeout 视为「可能已扣费无句柄」——禁盲重试
             post_timeout = httpx.Timeout(
                 max(300.0, float(self.timeout_sec) * 2), connect=30.0)

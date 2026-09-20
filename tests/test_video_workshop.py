@@ -285,6 +285,41 @@ def test_re_render_removes_old_file(tmp_path: Path):
     assert store.get(p.id).filename is None
 
 
+def test_compile_model_prompt_keeps_picture_drops_commentary():
+    from agent.workshop_prompt import compile_model_prompt
+
+    script = """共享设定
+- 人物识别：青布短打，右手哨棒
+- 背景锁定：景阳冈乱石
+- 本片主冲突：要活着下冈
+- 行为路径：站定再打
+
+**镜 1 · 5 秒**
+人物：武松朝右，棒横在身前
+背景：枯松
+声光：余晖打在棒上
+音乐：一记鼓
+对白：武松对虎，「好大的虫」
+动作：右脚踩实，棒换到身前
+冲突：第一扑还没来
+"""
+    text, mode = compile_model_prompt(script)
+    assert mode == "shots"
+    assert "青布短打" in text
+    assert "景阳冈乱石" in text
+    assert "武松朝右" in text
+    assert "右脚踩实" in text
+    assert "余晖打在棒上" in text
+    assert "好大的虫" in text
+    assert "要活着下冈" not in text
+    assert "一记鼓" not in text
+    assert "第一扑还没来" not in text
+
+    raw, raw_mode = compile_model_prompt("一只猫走过门口")
+    assert raw_mode == "raw"
+    assert raw == "一只猫走过门口"
+
+
 def test_latest_active_excludes_workshop(tmp_path: Path):
     _, sessions, _, _ = _mk(tmp_path)
     main = sessions.create_session()

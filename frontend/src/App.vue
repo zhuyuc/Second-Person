@@ -1,12 +1,13 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { chatApi } from '@/api/chat'
 import SideChatDrawer from '@/components/SideChatDrawer.vue'
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 const confirm = useConfirm()
 const health = ref('healthy')
@@ -88,6 +89,8 @@ function copyTraceId(tid) {
 // 划词「侧边会话」：主视图 ChatView emit('open-aside') → 交给右侧抽屉开/续侧边会话
 const asideDrawer = ref(null)
 function onOpenAside(quote) {
+  // 工坊/记忆/设置页不接收侧边会话（keep-alive 残留事件也不开）
+  if (route.path !== '/chat' && !route.path.startsWith('/chat/')) return
   asideDrawer.value?.openAside(quote)
 }
 </script>

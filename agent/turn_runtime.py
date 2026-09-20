@@ -89,11 +89,13 @@ class TurnRuntime:
                   user_version_group_id: int | None = None,
                   assistant_parent_id: int | None = None,
                   assistant_version_group_id: int | None = None,
-                  handoff_path: str | None = None) -> dict[str, Any]:
+                  handoff_path: str | None = None,
+                  skill_refs: list[str] | None = None) -> dict[str, Any]:
         from memory import _constants as _mem_const
         # v7：允许 config 覆盖，方便运维按会话类型或 A/B 分组调整
         max_steps = int(self.config.get(
             "agent_max_steps", _mem_const.AGENT_MAX_STEPS))
+        skill_refs = list(skill_refs or [])[:2]
         tracer = get_tracer()
         # 侧边 / 工坊会话在 Langfuse 打 tag，便于按会话类型独立分析。
         _ch_row = self.db.query_one(
@@ -390,7 +392,7 @@ class TurnRuntime:
                     turn_context = await self.context_loader(
                         session_id=session_id, turn_id=turn_id, message=message,
                         onboarding=onboarding, step=step, handoff_path=handoff_path,
-                        location=location, emit=emit)
+                        location=location, emit=emit, skill_refs=skill_refs)
                     memory_timeline = turn_context.get("memory_timeline") or []
                     if memory_timeline:
                         timeline.extend(memory_timeline)
@@ -399,6 +401,7 @@ class TurnRuntime:
                         "memories": turn_context.get("memory_count", 0),
                         # 预筛/精筛/注入明细（含 id/title/summary），供 Langfuse 对照
                         "retrieval": turn_context.get("retrieval_diagnostics") or {},
+                        "skills": skill_refs,
                     })
                     memory_ctx = turn_context.get("memory_context")
                     if memory_ctx:
@@ -437,6 +440,7 @@ class TurnRuntime:
                         ("context.constraints", "constraints_context"),
                         ("context.working_set", "working_set_context"),
                         ("context.file_cards", "file_cards_context"),
+                        ("context.skills", "skills_context"),
                     ):
                         content = turn_context.get(key)
                         if content:
@@ -529,7 +533,7 @@ class TurnRuntime:
                         turn_context = await self.context_loader(
                             session_id=session_id, turn_id=turn_id, message=message,
                             onboarding=onboarding, step=step, handoff_path=handoff_path,
-                            location=location, emit=emit)
+                            location=location, emit=emit, skill_refs=skill_refs)
                         memory_timeline = turn_context.get("memory_timeline") or []
                         if memory_timeline:
                             timeline.extend(memory_timeline)
@@ -694,7 +698,8 @@ class TurnRuntime:
                                     session_id=session_id, turn_id=turn_id,
                                     message=message, onboarding=onboarding,
                                     step=step, handoff_path=handoff_path,
-                                    location=location, emit=emit)
+                                    location=location, emit=emit,
+                                    skill_refs=skill_refs)
                                 cached_system_content = None
                                 prompt_fingerprint = None
                                 step_span.end(output={"outcome": "overflow_retry"})

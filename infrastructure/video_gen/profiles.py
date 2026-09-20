@@ -37,8 +37,8 @@ CLOUD_PROFILE = VideoProfile(
     engine="cloud",
     local_gpu=False,
     min_duration=3,
-    max_duration=15,
-    default_duration=5,
+    max_duration=60,
+    default_duration=15,
     allowed_sizes=("480x832", "832x480", "1:1", "9:16", "16:9"),
     default_size="480x832",
     # 与主对话 generate_video 工具预算对齐（tool_executor 用 video_gen_timeout_sec）

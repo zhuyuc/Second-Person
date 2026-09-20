@@ -210,6 +210,7 @@ async def chat_send(request: Request):
     location = payload.location
     handoff_path = payload.handoff_path
     reasoning_effort = payload.reasoning_effort
+    skill_refs = payload.skill_refs
     c = _c()
     # 已落盘图片：服务端读盘转 dataURI（与编辑消息 keep_image_names 同源）
     if image_names:
@@ -402,7 +403,8 @@ async def chat_send(request: Request):
                                         handoff_path=handoff_path,
                                         reasoning_effort=reasoning_effort,
                                         edit_parent_id=_ep,
-                                        edit_version_group_id=_evg):
+                                        edit_version_group_id=_evg,
+                                        skill_refs=skill_refs):
                 try:
                     validate_sse_event(evt.get("event", ""), evt.get("data"))
                 except SSEContractError as exc:

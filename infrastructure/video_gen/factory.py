@@ -3,10 +3,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .anthropic_adapter import AnthropicVideoAdapter
 from .cloud_adapter import KlingVideoAdapter
 from .comfyui_adapter import ComfyUIVideoAdapter
+from .custom_adapter import CustomVideoAdapter
+from .dashscope_adapter import DashScopeVideoAdapter
+from .google_adapter import GoogleVideoAdapter
+from .openai_adapter import OpenAIVideoAdapter
 from .profiles import video_profile_for
-from infrastructure.provider_modality import is_cloud_http
 
 
 def get_video_adapter(snap, config, data_dir: Path):
@@ -31,13 +35,25 @@ def get_video_adapter(snap, config, data_dir: Path):
             prompt_max_chars=int(
                 config.get("video_gen_prompt_max_chars", 1500) or 1500),
         )
-    if is_cloud_http(ptype):
-        return KlingVideoAdapter(
-            base_url=snap.base_url or "",
-            api_key=getattr(snap, "api_key", "") or "",
-            data_dir=Path(data_dir),
-            profile=profile,
-            model_id=snap.model_id or "",
-        )
+    common = dict(
+        base_url=snap.base_url or "",
+        api_key=getattr(snap, "api_key", "") or "",
+        data_dir=Path(data_dir),
+        profile=profile,
+        model_id=snap.model_id or "",
+    )
+    if ptype == "kling":
+        return KlingVideoAdapter(**common)
+    if ptype == "dashscope":
+        return DashScopeVideoAdapter(**common)
+    if ptype == "custom":
+        return CustomVideoAdapter(**common)
+    if ptype == "openai_compatible":
+        return OpenAIVideoAdapter(**common)
+    if ptype == "google":
+        return GoogleVideoAdapter(**common)
+    if ptype == "anthropic":
+        return AnthropicVideoAdapter(**common)
     raise RuntimeError(
-        f"文生视频不支持协议 {ptype or '（空）'}，请使用云端协议或本地 ComfyUI")
+        f"文生视频不支持协议 {ptype or '（空）'}，"
+        "请选择 OpenAI 兼容、Anthropic、自定义、Google 或本地 ComfyUI")

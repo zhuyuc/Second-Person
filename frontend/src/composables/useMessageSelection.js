@@ -15,6 +15,8 @@ export function useMessageSelection(options = {}) {
   const rect = ref(null)
   const sourceMsgId = ref(null)
   const sourceRole = ref(null)
+  // keep-alive 切走对话页后仍挂着 document 监听；禁用后不再弹浮条，避免工坊等页面误触
+  let enabled = true
 
   function hide() {
     visible.value = false
@@ -22,6 +24,11 @@ export function useMessageSelection(options = {}) {
     rect.value = null
     sourceMsgId.value = null
     sourceRole.value = null
+  }
+
+  function setEnabled(next) {
+    enabled = !!next
+    if (!enabled) hide()
   }
 
   // 排除法：消息项内的文字默认都可选，只有落在这些交互控件上才放弃。
@@ -45,6 +52,7 @@ export function useMessageSelection(options = {}) {
   }
 
   function evaluate() {
+    if (!enabled) return hide()
     const sel = window.getSelection?.()
     if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return hide()
     const raw = sel.toString()
@@ -75,6 +83,7 @@ export function useMessageSelection(options = {}) {
   // mouseup / touchend 触发一次判定；用 setTimeout 让浏览器先把 selection
   // 更新到 window.getSelection()（Chrome/Safari 都需要这一拍）
   function onPointerUp() {
+    if (!enabled) return
     setTimeout(evaluate, 0)
   }
 
@@ -115,5 +124,5 @@ export function useMessageSelection(options = {}) {
     window.removeEventListener('scroll', onScrollOrResize, true)
   })
 
-  return { visible, text, rect, sourceMsgId, sourceRole, hide }
+  return { visible, text, rect, sourceMsgId, sourceRole, hide, setEnabled }
 }

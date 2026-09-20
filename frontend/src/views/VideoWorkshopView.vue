@@ -8,6 +8,7 @@ import { useConfirm } from '@/stores/confirm'
 import { useBusy } from '@/composables/useBusy'
 import { formatTimeFull, friendlyError } from '@/utils/format'
 import BaseModal from '@/components/BaseModal.vue'
+import FilePickerPanel from '@/components/FilePickerPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,8 +47,13 @@ const caps = ref(null)
 const cur = ref(null)
 const filterType = ref('all')
 const searchQ = ref('')
-const rewriting = ref(false)
-const rendering = ref(false)
+const rewritingId = ref('')
+const renderingId = ref('')
+const skillRefs = ref([])
+const scriptPickerVisible = ref(false)
+const scriptPickerQuery = ref('')
+const scriptPickerRef = ref(null)
+const scriptTa = ref(null)
 const progressLabel = ref('')
 const openMenuId = ref(null)
 /** 列表页正在播放的成片 id */
@@ -65,24 +71,31 @@ const aspectOptions = computed(() => caps.value?.aspects || [])
 const resolutionOptions = computed(() => caps.value?.resolutions || [])
 const maxRefs = computed(() => caps.value?.max_refs || 6)
 const durMin = computed(() => caps.value?.min_duration || 2)
-const durMax = computed(() => caps.value?.max_duration || 15)
-const durDefault = computed(() => caps.value?.default_duration || 5)
+const durMax = computed(() => caps.value?.max_duration || 60)
+const durDefault = computed(() => caps.value?.default_duration || 15)
+
+const isRewritingCur = computed(
+  () => !!cur.value?.id && rewritingId.value === cur.value.id,
+)
+const isRenderingCur = computed(
+  () => !!cur.value?.id && renderingId.value === cur.value.id,
+)
 
 const canRewrite = computed(() => {
   if (!cur.value) return false
-  if (rewriting.value || rendering.value || cur.value.status === 'doing') return false
+  if (isRewritingCur.value || isRenderingCur.value || cur.value.status === 'doing') return false
   const hasScript = !!(cur.value.script || '').trim()
   const hasRefs = (cur.value.refs || []).length > 0
   return hasScript || hasRefs
 })
 const canRender = computed(() => {
   if (!cur.value) return false
-  if (cur.value.status === 'doing' || rendering.value || rewriting.value) return false
+  if (cur.value.status === 'doing' || isRenderingCur.value || isRewritingCur.value) return false
   if (!caps.value?.configured) return false
   return !!(cur.value.script || '').trim()
 })
 const editorLocked = computed(
-  () => rendering.value || rewriting.value || cur.value?.status === 'doing',
+  () => isRenderingCur.value || isRewritingCur.value || cur.value?.status === 'doing',
 )
 
 const filterChips = computed(() => {
@@ -157,11 +170,11 @@ function startListPoll() {
     if (!list.value.some((x) => x.status === 'doing')) return
     try {
       await loadList()
-      if (cur.value?.id && (cur.value.status === 'doing' || rendering.value)) {
+      if (cur.value?.id && (cur.value.status === 'doing' || isRenderingCur.value)) {
         const latest = list.value.find((x) => x.id === cur.value.id)
         if (latest && cur.value.id === latest.id) {
           cur.value = { ...cur.value, ...latest }
-          if (latest.status !== 'doing' && !rendering.value) progressLabel.value = ''
+          if (latest.status !== 'doing' && !isRenderingCur.value) progressLabel.value = ''
         }
       }
     } catch {
@@ -179,15 +192,15 @@ function stopListPoll() {
 /** 本地卡在 doing 但流已结束时，定期与服务端对齐（防 SSE 尾包丢失） */
 let reconcileTimer = null
 watch(
-  () => [cur.value?.id, cur.value?.status, rendering.value],
-  ([id, status, busy]) => {
+  () => [cur.value?.id, cur.value?.status, renderingId.value],
+  ([id, status, busyId]) => {
     if (reconcileTimer) {
       clearInterval(reconcileTimer)
       reconcileTimer = null
     }
-    if (!id || status !== 'doing' || busy) return
+    if (!id || status !== 'doing' || busyId === id) return
     reconcileTimer = setInterval(async () => {
-      if (!cur.value || cur.value.id !== id || rendering.value) return
+      if (!cur.value || cur.value.id !== id || renderingId.value === id) return
       try {
         const latest = await workshopApi.get(id)
         if (cur.value?.id !== id) return
@@ -214,6 +227,8 @@ let patchSeq = 0
 
 onUnmounted(() => {
   document.removeEventListener('click', onDocClick)
+  window.removeEventListener('keydown', onScriptFsKey)
+  document.body.style.overflow = ''
   stopListPoll()
   if (reconcileTimer) {
     clearInterval(reconcileTimer)
@@ -274,6 +289,11 @@ async function openDetail(item, { syncRoute = true } = {}) {
   stopThumbPlayback()
   openMenuId.value = null
   videoDurationSec.value = null
+  skillRefs.value = []
+  scriptPickerVisible.value = false
+  scriptExpanded.value = false
+  promptOpen.value = false
+  progressLabel.value = ''
   try {
     cur.value = await workshopApi.get(item.id)
   } catch (e) {
@@ -287,7 +307,6 @@ async function openDetail(item, { syncRoute = true } = {}) {
     cur.value.duration_sec = durDefault.value
   }
   view.value = 'detail'
-  progressLabel.value = ''
   if (syncRoute) syncRouteToDetail(cur.value.id)
   resetShellScroll()
 }
@@ -295,6 +314,11 @@ async function openDetail(item, { syncRoute = true } = {}) {
 function goList({ syncRoute = true } = {}) {
   // 出片中离开详情：后台任务继续，但不再往已清空的 cur 写字段
   stopThumbPlayback()
+  scriptExpanded.value = false
+  promptOpen.value = false
+  skillRefs.value = []
+  scriptPickerVisible.value = false
+  progressLabel.value = ''
   view.value = 'list'
   aspectOpen.value = false
   resOpen.value = false
@@ -328,6 +352,7 @@ async function restoreFromRoute() {
 
 onMounted(async () => {
   document.addEventListener('click', onDocClick)
+  window.addEventListener('keydown', onScriptFsKey)
   await run('load', async () => {
     await loadCaps()
     await loadList()
@@ -481,9 +506,6 @@ function schedulePatch(fields) {
 function onTitleInput(e) {
   schedulePatch({ title: e.target.value })
 }
-function onScriptInput(e) {
-  schedulePatch({ script: e.target.value })
-}
 function setAspect(v) {
   aspectOpen.value = false
   schedulePatch({ aspect: v })
@@ -567,50 +589,200 @@ function openRefImage(src) {
 }
 
 function buildRewriteMessage(proj) {
-  const desc = proj.type_desc || ''
   const script = (proj.script || '').trim()
   const hasRefs = (proj.refs || []).length > 0
-  let body = `【视频工坊·剧本优化改写】
-类型：${proj.type}${desc ? `（${desc}）` : ''}
-标题：${proj.title}
-画幅意向：${proj.aspect || '16:9'}
-时长意向：${proj.duration_sec > 0 ? proj.duration_sec : durDefault.value} 秒
+  let body = `【视频工坊·代为撰写】
+请使用系统内置分镜能力写镜头卡：每一镜写清人物、背景、声光、音乐、动作、冲突。
+镜与镜要接成一条行为路径：人为什么换地方、为什么动手，都要在上一镜留下那一下，下一镜接着写，不要每镜另起一张已经到了或已经打起来的画。
+人物用的兵器必须符合他自己的设定。武打按港片/武侠写：有距离与步法、招式有来有回、兵器有重量、借景打，不要站桩互挥。
+神话/仙术按神话片写：每人能力有名称与视觉签名、蓄放、规则、代价、对撞与余痕；禁止彩色光球对砸。
+打斗结构：试探→对手真本事→斗智→绝境→险胜。对手要会打，主角要先落入绝境再翻盘。
+若用户故事很长、当前时长装不下整段，只写能在此时长内成立的阶段性成果（写清本段范围与停在哪一拍），不要为了讲完而压缩成低质量速通或假结局。
+着装必须符合用户这一场的地方与时候。用户已经写了穿着就沿用，不要换成另一套。
+打斗要写出这一击的声光、打在周围的痕迹，以及落在人身上的伤或增益（正面或负面），下一镜接着这个身体状态。
+对白写进镜头卡：谁对谁说、原句用引号。某一镜可以不说话，但不能整片像无声默片。
+若用户 @ 了大师风格，按该技能的取舍决定六项谁靠前、冲突押在哪一项；不改朝向、行为路径、兵器归属、能力规则、这场着装，也不把打戏写成过家家碾压。
+遵守系统注入的【本次约束】（画幅/时长等表单当前值）。
+只输出结果正文：不要调用工具，不要生成视频，不要解释过程。
 `
   if (script) {
     body += `
-以下是用户当前的剧本原文，请基于它做优化改写（不是从零另写一套无关内容）：
+用户当前内容（请基于它优化/改写，不要另起无关剧情）：
 ---
 ${script}
 ---
 `
   } else if (hasRefs) {
     body += `
-用户未写文字剧本，但提供了参考图。请结合参考图写出一段可直接用于出片的中文镜头脚本（侧重动作与运镜）。
+用户未写文字，但提供了参考图。请结合参考图写出分镜结果。
 `
   }
-  body += `
-要求：
-- 这是「基于用户已有内容的优化改写 / 补全」
-- 单一主体 + 明确动作时间线；含场景、光线、运镜、风格
-- 信息密度匹配短视频时长
-- 只输出脚本正文，不要调用任何工具，不要生成视频，不要解释过程
-`
   return body
 }
 
+function onScriptInput(e) {
+  schedulePatch({ script: e.target.value })
+  const inputEl = e?.target || scriptTa.value
+  if (!inputEl) {
+    scriptPickerVisible.value = false
+    return
+  }
+  const val = inputEl.value || ''
+  const pos = inputEl.selectionStart || 0
+  const before = val.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  if (atIdx < 0 || (atIdx > 0 && !/\s/.test(before[atIdx - 1]))) {
+    scriptPickerVisible.value = false
+    return
+  }
+  const seg = before.slice(atIdx + 1)
+  if (/[\s\r\n]/.test(seg)) {
+    scriptPickerVisible.value = false
+    return
+  }
+  scriptPickerQuery.value = seg
+  scriptPickerVisible.value = true
+}
+
+function onScriptSkillPicked(s) {
+  if (!cur.value || !s?.name) return
+  const chip = s.ui_chip || s.name
+  const inputEl = scriptTa.value
+  const val = cur.value.script || ''
+  const pos = inputEl?.selectionStart ?? val.length
+  const before = val.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  if (atIdx < 0) {
+    cur.value.script = `${val}@${chip} `.trimStart()
+  } else {
+    const after = val.slice(pos)
+    cur.value.script = val.slice(0, atIdx) + `@${chip} ` + after
+  }
+  if (!skillRefs.value.some((r) => r.name === s.name)) {
+    skillRefs.value = [...skillRefs.value, { name: s.name, chip }].slice(0, 2)
+  }
+  scriptPickerVisible.value = false
+  schedulePatch({ script: cur.value.script })
+  nextTick(() => {
+    inputEl?.focus()
+  })
+}
+
+function removeWorkshopSkill(name) {
+  skillRefs.value = skillRefs.value.filter((r) => r.name !== name)
+}
+
+const scriptExpanded = ref(false)
+const promptOpen = ref(false)
+const promptText = ref('')
+const promptMode = ref('')
+const promptLoading = ref(false)
+const promptHint = computed(() => {
+  if (promptLoading.value) return '按当前分镜整理实际会提交的文字'
+  if (promptMode.value === 'shots') {
+    return '点「立即生成视频」时提交下面这段，不是左侧完整分镜。冲突说明和音乐拍点不会送出。'
+  }
+  if (promptMode.value === 'raw') return '这段还不是分镜卡，生成时会把原文提交给模型。'
+  if (!promptText.value) return '左侧还没有可提交的文字。'
+  return '点「立即生成视频」时提交下面这段。'
+})
+
+function toggleScriptExpand() {
+  scriptExpanded.value = !scriptExpanded.value
+  if (scriptExpanded.value) {
+    nextTick(() => scriptTa.value?.focus())
+  }
+}
+
+async function openModelPrompt() {
+  promptOpen.value = true
+  promptLoading.value = true
+  promptText.value = ''
+  promptMode.value = ''
+  try {
+    const data = await workshopApi.promptPreview(cur.value?.script || '')
+    promptText.value = data?.prompt || ''
+    promptMode.value = data?.mode || ''
+  } catch (e) {
+    promptOpen.value = false
+    if (!e?.alreadyToasted) toast.push('error', e?.message || '读不出提交内容')
+  } finally {
+    promptLoading.value = false
+  }
+}
+
+const promptTextEl = ref(null)
+const promptViewEl = ref(null)
+
+async function copyModelPrompt() {
+  const t = (promptText.value || '').trim()
+  if (!t) {
+    toast.push('warning', '还没有可复制的内容')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(t)
+    toast.push('success', '已复制出片内容')
+  } catch {
+    toast.push('error', '复制失败')
+  }
+}
+
+function onPromptKeydown(e) {
+  // Ctrl/Cmd+A 只选 pre 正文，避免整页全选带上抽屉标题「侧边会话」等壳层文字
+  if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'a') return
+  if (promptLoading.value || !promptTextEl.value) return
+  e.preventDefault()
+  const range = document.createRange()
+  range.selectNodeContents(promptTextEl.value)
+  const sel = window.getSelection()
+  sel?.removeAllRanges()
+  sel?.addRange(range)
+}
+
+watch(promptOpen, (open) => {
+  if (!open) return
+  nextTick(() => promptViewEl.value?.focus?.())
+})
+
+function onScriptFsKey(e) {
+  if (e.key !== 'Escape') return
+  if (scriptPickerVisible.value) return
+  if (promptOpen.value) {
+    promptOpen.value = false
+    return
+  }
+  if (!scriptExpanded.value) return
+  scriptExpanded.value = false
+}
+
+function onScriptPickerKey(e) {
+  if (scriptPickerVisible.value && scriptPickerRef.value) {
+    if (['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(e.key)) {
+      scriptPickerRef.value.onKey(e)
+      e.stopPropagation()
+    }
+  }
+}
+
 async function doRewrite() {
-  if (!canRewrite.value || rewriting.value || !cur.value) return
+  if (!canRewrite.value || isRewritingCur.value || !cur.value) return
   await flushPatch()
+  if (!cur.value) return
   const projectId = cur.value.id
-  rewriting.value = true
+  const message = buildRewriteMessage(cur.value)
+  const imageNames = (cur.value.refs || [])
+    .map(refBasename)
+    .filter((n) => n && !String(n).startsWith('data:'))
+  const skillsAtStart = skillRefs.value.map((r) => r.name)
+  // 共用一条 SSE：换项目再代写时打断上一条，避免串流
+  if (rewritingId.value && rewritingId.value !== projectId) {
+    try { sse.abort() } catch { /* ignore */ }
+  }
+  rewritingId.value = projectId
   try {
     const { session_id } = await workshopApi.ensureSession(projectId)
     if (cur.value?.id === projectId) cur.value.session_id = session_id
-    const message = buildRewriteMessage(cur.value)
-    // 与主对话 keep_image_names 同源：只传已落盘文件名，服务端读盘
-    const imageNames = (cur.value.refs || [])
-      .map(refBasename)
-      .filter((n) => n && !String(n).startsWith('data:'))
     let text = ''
     let finished = false
     const timeout = setTimeout(() => {
@@ -629,6 +801,7 @@ async function doRewrite() {
             sessionId: session_id,
             message,
             imageNames: imageNames.length ? imageNames : undefined,
+            skillRefs: skillsAtStart.length ? skillsAtStart : undefined,
             trackActive: false,
             onEvent: (ev, data) => {
               if (ev === 'content_delta') text += data.text || ''
@@ -672,10 +845,13 @@ async function doRewrite() {
     await workshopApi.patch(projectId, { script: out })
     toast.push('success', '已根据当前内容优化脚本')
   } catch (e) {
-    if (e?.name === 'AbortError') toast.push('warning', '代写已取消或超时')
-    else if (!e?.alreadyToasted) toast.push('error', friendlyError(e?.message, '代写失败'))
+    if (e?.name === 'AbortError') {
+      if (rewritingId.value === projectId) {
+        toast.push('warning', '代写已取消或超时')
+      }
+    } else if (!e?.alreadyToasted) toast.push('error', friendlyError(e?.message, '代写失败'))
   } finally {
-    rewriting.value = false
+    if (rewritingId.value === projectId) rewritingId.value = ''
   }
 }
 
@@ -694,13 +870,13 @@ async function doRender() {
   if (renderAbort) renderAbort.abort()
   renderAbort = new AbortController()
   const signal = renderAbort.signal
-  rendering.value = true
+  renderingId.value = projectId
   if (cur.value?.id === projectId) {
     cur.value.status = 'doing'
     cur.value.progress = 5
     cur.value.error_message = null
   }
-  progressLabel.value = '开始生成…'
+  if (cur.value?.id === projectId) progressLabel.value = '开始生成…'
   applyProjectToList({ id: projectId, status: 'doing', progress: 5 })
   let terminal = false
   try {
@@ -709,7 +885,7 @@ async function doRender() {
       onEvent: (ev, data) => {
         const pid = data?.project_id || data?.project?.id || projectId
         if (ev === 'workshop_progress') {
-          progressLabel.value = data.label || '生成中…'
+          if (cur.value?.id === pid) progressLabel.value = data.label || '生成中…'
           const prog = typeof data.progress === 'number' ? data.progress : undefined
           applyProjectToList({
             id: pid,
@@ -726,7 +902,7 @@ async function doRender() {
             applyProjectToList(data.project)
             if (cur.value?.id === pid) cur.value = data.project
           }
-          progressLabel.value = ''
+          if (cur.value?.id === pid) progressLabel.value = ''
           toast.push('success', '视频已生成')
         } else if (ev === 'workshop_error') {
           terminal = true
@@ -737,7 +913,7 @@ async function doRender() {
             cur.value.status = data.cancelled ? 'cancelled' : 'failed'
             cur.value.error_message = data.message
           }
-          progressLabel.value = ''
+          if (cur.value?.id === pid) progressLabel.value = ''
           if (data.cancelled) toast.push('warning', data.message || '已停止生成')
           else toast.push('error', data.message || '生成失败')
         }
@@ -750,7 +926,7 @@ async function doRender() {
       toast.push('error', friendlyError(e?.message, '生成失败'))
     }
   } finally {
-    rendering.value = false
+    if (renderingId.value === projectId) renderingId.value = ''
     try {
       const latest = await workshopApi.get(projectId)
       applyProjectToList(latest)
@@ -1008,30 +1184,75 @@ watch(
             </div>
           </div>
 
-          <div class="cp-block cp-script-block">
+          <div class="cp-block cp-script-block" :class="{ 'script-fs': scriptExpanded }">
+            <div v-if="scriptExpanded" class="script-fs-head">
+              <span class="script-fs-title">分镜脚本</span>
+              <button type="button" class="btn soft sm" @click="scriptExpanded = false">
+                <i class="ti ti-minimize" aria-hidden="true"></i>
+                退出全屏
+              </button>
+            </div>
             <div class="cp-script-fill">
               <textarea
+                ref="scriptTa"
                 class="cp-script"
                 :value="cur.script"
-                placeholder="输入视频脚本，使用参考图，或【代为撰写】…"
+                placeholder="输入脚本；@ 可选大师风格，【代为撰写】自动分镜…"
                 maxlength="10000"
                 :disabled="editorLocked"
                 @input="onScriptInput"
+                @keydown="onScriptPickerKey"
               />
+              <FilePickerPanel
+                ref="scriptPickerRef"
+                :project-id="''"
+                :enable-files="false"
+                :visible="scriptPickerVisible"
+                :query="scriptPickerQuery"
+                @pick-skill="onScriptSkillPicked"
+                @close="scriptPickerVisible = false"
+              />
+            </div>
+            <div v-if="skillRefs.length" class="skill-chips ws-skill-chips">
+              <span v-for="r in skillRefs" :key="r.name" class="skill-chip">
+                @{{ r.chip || r.name }}
+                <button type="button" class="chip-x" @click="removeWorkshopSkill(r.name)">✕</button>
+              </span>
             </div>
             <div class="cp-script-foot">
               <button
                 type="button"
                 class="linkbtn"
-                :class="{ busy: rewriting }"
-                :disabled="rewriting || !canRewrite || isBusy('create', 'load', 'delete')"
-                :aria-busy="rewriting ? 'true' : undefined"
+                :class="{ busy: isRewritingCur }"
+                :disabled="isRewritingCur || !canRewrite || isBusy('create', 'load', 'delete')"
+                :aria-busy="isRewritingCur ? 'true' : undefined"
                 @click="doRewrite"
               >
-                <i v-if="rewriting" class="ti ti-loader-2" aria-hidden="true"></i>
-                <span class="linkbtn-txt">{{ rewriting ? '正在撰写…' : '✨ 代为撰写' }}</span>
+                <i v-if="isRewritingCur" class="ti ti-loader-2" aria-hidden="true"></i>
+                <span class="linkbtn-txt">{{ isRewritingCur ? '正在撰写…' : '✨ 代为撰写' }}</span>
               </button>
-              <span class="cp-char">{{ (cur.script || '').length }}/10000</span>
+              <span class="cp-script-tools">
+                <button
+                  type="button"
+                  class="linkbtn script-fs-btn"
+                  title="查看提交给模型的内容"
+                  @click="openModelPrompt"
+                >
+                  <i class="ti ti-file-text" aria-hidden="true"></i>
+                  出片内容
+                </button>
+                <button
+                  type="button"
+                  class="linkbtn script-fs-btn"
+                  :aria-pressed="scriptExpanded ? 'true' : 'false'"
+                  :title="scriptExpanded ? '退出全屏' : '放大查看分镜'"
+                  @click="toggleScriptExpand"
+                >
+                  <i class="ti" :class="scriptExpanded ? 'ti-minimize' : 'ti-maximize'" aria-hidden="true"></i>
+                  {{ scriptExpanded ? '退出全屏' : '放大' }}
+                </button>
+                <span class="cp-char">{{ (cur.script || '').length }}/10000</span>
+              </span>
             </div>
           </div>
 
@@ -1127,13 +1348,13 @@ watch(
             <button
               type="button"
               class="btn primary gen-btn"
-              :disabled="!canRender || isBusy('create', 'load', 'delete') || cur.status === 'doing' || rendering"
+              :disabled="!canRender || isBusy('create', 'load', 'delete') || cur.status === 'doing' || isRenderingCur"
               @click="doRender"
             >
-              {{ cur.status === 'doing' || rendering ? '生成中…' : '▶ 立即生成视频' }}
+              {{ cur.status === 'doing' || isRenderingCur ? '生成中…' : '▶ 立即生成视频' }}
             </button>
             <button
-              v-if="cur.status === 'doing' || rendering"
+              v-if="cur.status === 'doing' || isRenderingCur"
               type="button"
               class="btn soft gen-btn"
               @click="doCancelRender"
@@ -1145,7 +1366,7 @@ watch(
         </div>
 
         <div class="card preview">
-          <template v-if="cur.status === 'doing' || rendering">
+          <template v-if="cur.status === 'doing' || isRenderingCur">
             <div class="pv-title">⚙️ 正在生成视频</div>
             <div class="pv-sub">{{ progressLabel || 'AI 正在生成短片，请稍候…' }}</div>
             <div class="bigprog"><i :style="{ width: (cur.progress || 0) + '%' }" /></div>
@@ -1265,6 +1486,43 @@ watch(
         <button type="button" @click="refImageView = null">关闭</button>
       </template>
     </BaseModal>
+
+    <div
+      v-if="promptOpen"
+      ref="promptViewEl"
+      class="prompt-view"
+      role="dialog"
+      aria-modal="true"
+      aria-label="本次提交给模型"
+      tabindex="-1"
+      @keydown="onPromptKeydown"
+    >
+      <div class="prompt-view-head">
+        <div>
+          <div class="prompt-view-title">本次提交给模型</div>
+          <div class="prompt-view-sub">{{ promptHint }}</div>
+        </div>
+        <div class="prompt-view-actions">
+          <button
+            type="button"
+            class="btn soft sm"
+            :disabled="promptLoading || !promptText"
+            @click="copyModelPrompt"
+          >
+            <i class="ti ti-copy" aria-hidden="true"></i>
+            复制
+          </button>
+          <button type="button" class="btn soft sm" @click="promptOpen = false">
+            <i class="ti ti-x" aria-hidden="true"></i>
+            关闭
+          </button>
+        </div>
+      </div>
+      <div class="prompt-view-body">
+        <p v-if="promptLoading" class="prompt-view-wait">正在整理…</p>
+        <pre v-else ref="promptTextEl" class="prompt-view-text">{{ promptText || '还没有可提交的内容' }}</pre>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -2027,6 +2285,9 @@ watch(
   min-height: 120px;
   position: relative;
 }
+.ws-skill-chips {
+  padding: 4px 2px 0;
+}
 .composer .cp-script {
   position: absolute;
   inset: 0;
@@ -2051,6 +2312,105 @@ watch(
   margin-top: var(--ws-sp-2);
   gap: var(--ws-sp-3);
   flex-shrink: 0;
+}
+.cp-script-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ws-sp-3);
+  margin-left: auto;
+}
+.script-fs-btn {
+  color: var(--ws-muted);
+}
+.script-fs-btn:hover:not(:disabled) {
+  color: var(--ws-text);
+  text-decoration: none;
+}
+.cp-script-block.script-fs {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  margin: 0;
+  padding: 16px 24px 20px;
+  background: #0e1116;
+  border-radius: 0;
+  box-sizing: border-box;
+  user-select: none;
+}
+.script-fs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ws-sp-3);
+  margin-bottom: var(--ws-sp-3);
+  flex-shrink: 0;
+}
+.script-fs-title {
+  font: 600 var(--ws-fs-title) / var(--ws-lh-tight) var(--ws-font);
+  color: var(--ws-text);
+}
+.script-fs .cp-script {
+  font-size: 16px;
+  line-height: 1.75;
+  padding: 18px 20px;
+  user-select: text;
+}
+.script-fs .script-fs-btn {
+  color: var(--ws-text);
+}
+.prompt-view {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal-2);
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  padding: 16px 24px 20px;
+  background: #0e1116;
+  user-select: none;
+}
+.prompt-view-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ws-sp-4);
+  margin-bottom: var(--ws-sp-3);
+  flex-shrink: 0;
+}
+.prompt-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.prompt-view-title {
+  font: 600 var(--ws-fs-title) / var(--ws-lh-tight) var(--ws-font);
+  color: var(--ws-text);
+}
+.prompt-view-sub {
+  margin-top: 4px;
+  color: var(--ws-muted);
+  font: var(--ws-fs-caption) / var(--ws-lh) var(--ws-font);
+}
+.prompt-view-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: var(--ws-line);
+  border-radius: var(--ws-r-lg);
+  background: var(--ws-panel);
+}
+.prompt-view-wait,
+.prompt-view-text {
+  margin: 0;
+  padding: 18px 20px;
+  color: var(--ws-text);
+  font: 16px / 1.75 var(--ws-font);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.prompt-view-text {
+  user-select: text;
 }
 .linkbtn {
   background: none;

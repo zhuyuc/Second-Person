@@ -24,6 +24,7 @@ export function useSSE() {
     onError,
     handoffPath,
     reasoningEffort = 'high',
+    skillRefs,
     // 是否把本次 crid 写入全局 sp_active_crid（刷新后续推的锚点）。
     // 侧边会话是临时窗口、刷新即弃，传 false 以免覆盖主对话的续推锚点。
     trackActive = true,
@@ -60,6 +61,7 @@ export function useSSE() {
             location: location || undefined,
             handoff_path: handoffPath || undefined,
             reasoning_effort: normalizeReasoningEffort(reasoningEffort),
+            skill_refs: skillRefs?.length ? skillRefs : undefined,
           },
           { signal: controller.signal }
         )

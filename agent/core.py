@@ -98,7 +98,8 @@ class AgentCore:
                   handoff_path: str | None = None,
                   reasoning_effort: str | None = None,
                   edit_parent_id: int | None = None,
-                  edit_version_group_id: int | None = None) -> AsyncIterator[dict]:
+                  edit_version_group_id: int | None = None,
+                  skill_refs: list[str] | None = None) -> AsyncIterator[dict]:
         """Yield the public SSE event stream for one production turn."""
         del regenerate_message_id
         effort = normalize_reasoning_effort(
@@ -142,7 +143,8 @@ class AgentCore:
                         user_version_group_id=None if regenerate else edit_version_group_id,
                         assistant_parent_id=edit_parent_id if regenerate else None,
                         assistant_version_group_id=edit_version_group_id if regenerate else None,
-                        handoff_path=handoff_path)
+                        handoff_path=handoff_path,
+                        skill_refs=skill_refs)
                     if outcome:
                         from infrastructure.background_tasks import track_task
                         track_task(
@@ -238,7 +240,8 @@ class AgentCore:
                                step: int | None = None,
                                handoff_path: str | None = None,
                                location: str | None = None,
-                               emit=None) -> dict:
+                               emit=None,
+                               skill_refs: list[str] | None = None) -> dict:
         """Load model snapshot, history, and dynamic context for this step."""
         from memory.retriever_progress import upsert_memory_timeline
 
@@ -359,6 +362,31 @@ class AgentCore:
         tail = self._build_turn_tail_contexts(
             sid=session_id, onboarding=onboarding, location=location,
             user_message=message)
+        skills_context = None
+        try:
+            from soul.builtin_skills import STORYBOARD_CORE_NAME
+            ch_row = self.db.query_one(
+                "SELECT channel FROM sessions WHERE session_id=?", (session_id,))
+            channel = (ch_row["channel"] if ch_row else None) or None
+            explicit = self.skills.resolve_explicit_refs(skill_refs)
+            auto: list[str] = []
+            if self.skills.needs_auto_storyboard(
+                channel=channel,
+                message=message or "",
+                has_director_style=bool(explicit),
+            ):
+                if STORYBOARD_CORE_NAME in self.skills.active_names():
+                    auto = [STORYBOARD_CORE_NAME]
+            skills_context = self.skills.assemble_turn_skills_context(
+                auto_names=auto, explicit_names=explicit)
+        except Exception:  # noqa: BLE001
+            logger.debug("组装本轮技能上下文失败", exc_info=True)
+        constraints_context = tail["constraints_context"]
+        workshop_ctx = self._workshop_runtime_constraints(session_id)
+        if workshop_ctx:
+            constraints_context = (
+                f"{constraints_context}\n\n{workshop_ctx}"
+                if constraints_context else workshop_ctx)
         return {"snap": snap, "history": history,
                 "history_ids": history_ids,
                 "history_protected": history_protected,
@@ -374,7 +402,8 @@ class AgentCore:
                 "working_set_recall": recall_context_for_compact(ws_turn),
                 "mood_context": tail["mood_context"],
                 "location_context": tail["location_context"],
-                "constraints_context": tail["constraints_context"],
+                "constraints_context": constraints_context,
+                "skills_context": skills_context,
                 "memory_count": len(retrieval.hits) + len(retrieval.related),
                 "memory_timeline": memory_timeline,
                 "retrieval_diagnostics": retrieval.diagnostics or {},
@@ -607,6 +636,50 @@ class AgentCore:
             for index, (key, content) in enumerate(dynamic_blocks or [], 90)
         ]
         return self.prompt_assembler.assemble(static + dynamic)
+
+    def _workshop_runtime_constraints(self, session_id: str) -> str | None:
+        """For channel=workshop turns: inject current video_project form fields."""
+        try:
+            ch = self.db.query_one(
+                "SELECT channel FROM sessions WHERE session_id=?", (session_id,))
+            if not ch or ch["channel"] != "workshop":
+                return None
+            proj = self.db.query_one(
+                "SELECT title, type, aspect, duration_sec, params_json, refs_json "
+                "FROM video_projects WHERE session_id=? ORDER BY updated_at DESC LIMIT 1",
+                (session_id,))
+            if not proj:
+                return None
+            import json as _json
+            params = {}
+            try:
+                params = _json.loads(proj["params_json"] or "{}") or {}
+            except (TypeError, ValueError):
+                params = {}
+            refs = []
+            try:
+                refs = _json.loads(proj["refs_json"] or "[]") or []
+            except (TypeError, ValueError):
+                refs = []
+            resolution = str(params.get("resolution") or "").strip()
+            duration = proj["duration_sec"]
+            lines = ["【本次约束】（来自视频工坊当前表单，生成时必须遵守这些数值）"]
+            if proj["title"]:
+                lines.append(f"- 标题：{proj['title']}")
+            if proj["type"]:
+                lines.append(f"- 类型：{proj['type']}")
+            if proj["aspect"]:
+                lines.append(f"- 画幅：{proj['aspect']}")
+            if duration and float(duration) > 0:
+                lines.append(f"- 时长：{duration} 秒")
+            if resolution:
+                lines.append(f"- 分辨率：{resolution}")
+            if refs:
+                lines.append(f"- 参考图：已提供 {len(refs)} 张")
+            return "\n".join(lines) if len(lines) > 1 else None
+        except Exception:  # noqa: BLE001
+            logger.debug("组装工坊本次约束失败", exc_info=True)
+            return None
 
     def _build_turn_tail_contexts(self, *, sid: str, onboarding: bool,
                                   location: str | None,

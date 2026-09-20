@@ -3645,6 +3645,30 @@ button.btn-danger:hover {
   gap: var(--sp-2);
   margin-bottom: 10px;
 }
+.skill-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+}
+.skill-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--brand-soft, rgba(60, 120, 220, 0.12));
+  color: var(--acctx, var(--text));
+}
+.skill-chip .chip-x {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 0 2px;
+  color: inherit;
+  opacity: 0.7;
+}
 .msg-actions-mt {
   margin-top: var(--sp-2);
   display: flex;

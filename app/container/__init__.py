@@ -173,6 +173,10 @@ class AppContainer:
         self.memory_gate = MemoryWriteGate(self.db, self.config)
 
         self.skills = SkillManager(d, self.db, self.fw)
+        try:
+            self.skills.ensure_builtin_skills()
+        except Exception:  # noqa: BLE001
+            logger.warning("ensure_builtin_skills failed", exc_info=True)
 
         extract_fn = make_extract_fn(self)
         self.image_extract_fn = make_image_extract_fn(self)

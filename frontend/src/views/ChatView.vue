@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, defineAsyncComponent, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, defineAsyncComponent, onMounted, onUnmounted, onActivated, onDeactivated, nextTick, watch } from 'vue'
 import { chatApi } from '@/api/chat'
 import { useSSE } from '@/composables/useSSE'
 import { useLiveThroughput } from '@/composables/useLiveThroughput'
@@ -99,16 +99,17 @@ const sandboxFallback = computed(
   () => pendingSandboxMode.value || currentProject.value?.sandbox_mode || 'workspace-write'
 )
 
-// M4：@文件面板
+// M4：@ 面板（能力技能 + 可选项目文件）
 const filePickerVisible = ref(false)
 const filePickerQuery = ref('')
 const filePickerRef = ref(null)
+const skillRefs = ref([])
 
 function onComposerInput(e) {
   // 复用原有 autoGrow；这里叠加 @ 触发面板逻辑
   autoGrow()
   const inputEl = e?.target || ta.value
-  if (!inputEl || !currentProject.value) {
+  if (!inputEl) {
     filePickerVisible.value = false
     return
   }
@@ -147,6 +148,33 @@ function onFilePicked(f) {
     inputEl.focus()
     inputEl.setSelectionRange(newPos, newPos)
   })
+}
+
+function onSkillPicked(s) {
+  const inputEl = ta.value
+  if (!inputEl || !s?.name) return
+  const chip = s.ui_chip || s.name
+  const val = inputEl.value || ''
+  const pos = inputEl.selectionStart || 0
+  const before = val.slice(0, pos)
+  const atIdx = before.lastIndexOf('@')
+  if (atIdx < 0) return
+  const after = val.slice(pos)
+  const insertion = `@${chip} `
+  input.value = val.slice(0, atIdx) + insertion + after
+  if (!skillRefs.value.some((r) => r.name === s.name)) {
+    skillRefs.value = [...skillRefs.value, { name: s.name, chip }].slice(0, 2)
+  }
+  filePickerVisible.value = false
+  nextTick(() => {
+    const newPos = atIdx + insertion.length
+    inputEl.focus()
+    inputEl.setSelectionRange(newPos, newPos)
+  })
+}
+
+function removeSkillRef(name) {
+  skillRefs.value = skillRefs.value.filter((r) => r.name !== name)
 }
 
 function onComposerKeyDown(e) {
@@ -781,6 +809,14 @@ function cancelQuoteComposer() {
     forAside: false,
   }
 }
+// keep-alive：离开对话页时关掉划词浮条与监听，避免工坊/记忆页误弹「侧边会话」
+onDeactivated(() => {
+  selection.setEnabled(false)
+  cancelQuoteComposer()
+})
+onActivated(() => {
+  selection.setEnabled(true)
+})
 // 把一条引用（原文 + 可选评论）压入本实例输入框的附件条。抽出复用：既供
 // 本地「引用」确认，也供侧边会话被 SideChatDrawer 注入选中文本（injectQuote）。
 function pushQuoteAttachment({ text, comment, sourceMsgId, sourceRole }) {
@@ -1504,6 +1540,7 @@ async function send() {
     location: geoEnabled.value ? cachedLocation() : undefined,
     handoffPath: hPath,
     reasoningEffort: reasoningEffort.value,
+    skillRefs: skillRefs.value.length ? skillRefs.value.map((r) => r.name) : undefined,
     clientRequestId: streamCrid.value,
     trackActive: !props.asideMode,
     onEvent: (ev, data) => handleEvent(ev, data),
@@ -1512,6 +1549,7 @@ async function send() {
       finishStream()
     },
   })
+  skillRefs.value = []
   // 兜底：始终未收到 turn_completed/error（服务重启等异常断开）时，
   // 同样保留已输出内容并释放输入锁，避免 UI 卡在生成中
   if (generating.value) finishStream()
@@ -2177,11 +2215,15 @@ function autoGrow() {
 // 点击侧栏 logo：回到空白新对话（欢迎页，不立即建会话）
 // 仅断开读者不取消生成：回复继续在后台完成并落库，切回会话可见
 function resetToHome() {
+  // 作废进行中的 openSession，避免长会话的分页结果晚到后把按钮画回欢迎页
+  openSessionToken += 1
   if (editingId.value) cancelEdit()
   if (generating.value) sse.abort()
   cleanupRaf()
   sessStore.setCurrent(null)
   messages.value = []
+  hasMoreMessages.value = false
+  loadingMore.value = false
   sessionMetrics.value = null
   currentTurnMetrics.value = null
   streamText.value = ''
@@ -2406,7 +2448,7 @@ onUnmounted(() => {
             <h2>Second Person 比你更懂你！</h2>
           </div>
           <button
-            v-if="hasMoreMessages"
+            v-if="hasMoreMessages && messages.length"
             type="button"
             class="load-older-btn"
             :disabled="loadingMore"
@@ -2872,7 +2914,7 @@ onUnmounted(() => {
                 ? '已达容量上限，请开启新会话'
                 : editingId
                   ? '编辑消息（Enter 提交修改，Esc 取消）'
-                  : '发消息给 Second Person（Enter 发送，Shift+Enter 换行，可拖入/粘贴文件；项目会话内输入 @ 可插入文件）'
+                  : '发消息给 Second Person（Enter 发送，Shift+Enter 换行；@ 可选大师风格，写分镜时系统自动启用分镜能力）'
             "
             rows="1"
             :disabled="thresholdBreached === 'hard'"
@@ -2884,15 +2926,21 @@ onUnmounted(() => {
             @drop.prevent.stop="onDrop"
           ></textarea>
           <FilePickerPanel
-            v-if="currentProject"
             ref="filePickerRef"
-            :project-id="currentProject.id"
+            :project-id="currentProject?.id || ''"
+            :enable-files="!!currentProject"
             :visible="filePickerVisible"
             :query="filePickerQuery"
             @pick="onFilePicked"
+            @pick-skill="onSkillPicked"
             @close="filePickerVisible = false"
           />
-          <!-- 表情选择面板（absolute 定位在 composer 上方，选择后保持打开可连续插入） -->
+          <div v-if="skillRefs.length" class="skill-chips">
+            <span v-for="r in skillRefs" :key="r.name" class="skill-chip">
+              @{{ r.chip || r.name }}
+              <button type="button" class="chip-x" @click="removeSkillRef(r.name)">✕</button>
+            </span>
+          </div>          <!-- 表情选择面板（absolute 定位在 composer 上方，选择后保持打开可连续插入） -->
           <div v-if="emojiOpen" class="emoji-panel" @click.stop>
             <div v-for="g in EMOJI_GROUPS" :key="g.name" class="emoji-group">
               <div class="emoji-group-name">{{ g.name }}</div>

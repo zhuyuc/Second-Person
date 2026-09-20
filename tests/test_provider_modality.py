@@ -28,40 +28,58 @@ class _Config:
         return self.values.get(k, default)
 
 
-def test_protocols_by_modality():
-    for modality in ("text", "image", "video"):
-        assert "openai_compatible" in protocols_for(modality)
-        assert "anthropic" in protocols_for(modality)
-        assert "custom" in protocols_for(modality)
+def test_custom_endpoint_uses_the_url_as_written():
+    from infrastructure.provider_modality import endpoint_url
+    raw = "https://example.com/api/v1/services/aigc/text2image/image-synthesis"
+    assert endpoint_url(raw, "custom", "/images/generations") == raw
+    assert endpoint_url(raw, "custom", "/chat/completions") == raw
+    assert endpoint_url(
+        "https://api.example.com/v1", "openai_compatible", "/chat/completions",
+    ) == "https://api.example.com/v1/chat/completions"
+    assert "openai_compatible" in protocols_for("text")
+    assert "anthropic" in protocols_for("text")
+    assert "custom" in protocols_for("text")
     assert "google" in protocols_for("text")
+    assert protocols_for("image") == frozenset({
+        "openai_compatible", "anthropic", "custom", "google", "comfyui"})
+    assert protocols_for("video") == frozenset({
+        "openai_compatible", "anthropic", "custom", "google", "comfyui",
+        "kling", "dashscope"})
     assert "comfyui" not in protocols_for("text")
-    assert "comfyui" in protocols_for("image")
-    assert "comfyui" in protocols_for("video")
-    assert "google" not in protocols_for("image")
-    assert "google" not in protocols_for("video")
+    assert "google" in protocols_for("image")
+    assert "google" in protocols_for("video")
+    assert "anthropic" in protocols_for("image")
+    assert "custom" in protocols_for("video")
 
 
-def test_validate_combo_allows_cloud_protocols_on_all_modalities():
-    for modality in ("text", "image", "video"):
-        validate_combo(modality, "openai_compatible")
-        validate_combo(modality, "anthropic")
-        validate_combo(modality, "custom")
+def test_validate_combo_follows_text_protocol_split():
+    validate_combo("text", "openai_compatible")
+    validate_combo("text", "anthropic")
+    validate_combo("text", "custom")
+    validate_combo("image", "openai_compatible")
+    validate_combo("image", "anthropic")
+    validate_combo("image", "custom")
+    validate_combo("image", "google")
     validate_combo("image", "comfyui")
+    validate_combo("video", "openai_compatible")
+    validate_combo("video", "anthropic")
+    validate_combo("video", "custom")
+    validate_combo("video", "google")
+    validate_combo("video", "kling")
+    validate_combo("video", "dashscope")
     validate_combo("video", "comfyui")
     with pytest.raises(ValueError, match="不支持协议"):
         validate_combo("text", "comfyui")
     with pytest.raises(ValueError, match="不支持协议"):
-        validate_combo("video", "google")
-    with pytest.raises(ValueError, match="不支持协议"):
-        validate_combo("image", "google")
+        validate_combo("text", "kling")
 
 
-def test_validate_provider_accepts_kling_video_custom():
+def test_validate_provider_accepts_kling_protocol():
     from app.services.settings_service import SettingsService
     body = {
         "display_name": "kling-3.0-turbo",
         "modality": "video",
-        "provider_type": "custom",
+        "provider_type": "kling",
         "base_url": "https://api-beijing.klingai.com",
         "api_key": "ak:sk",
         "model_id": "kling-3.0-turbo",
@@ -74,8 +92,10 @@ def test_validate_provider_accepts_kling_video_custom():
 def test_infer_modality_comfyui_wan():
     assert infer_modality("comfyui", "wan2.1_t2v_1.3B_fp16.safetensors") == "video"
     assert infer_modality("comfyui", "sd_xl_base_1.0.safetensors") == "image"
-    assert infer_modality("openai_compatible", "kling-v3-turbo") == "video"
-    assert infer_modality("custom", "kling-3.0-turbo") == "video"
+    assert infer_modality("kling", "kling-3.0-turbo") == "video"
+    assert infer_modality("dashscope", "wan2.6-t2v") == "video"
+    assert infer_modality("openai_compatible", "kling-v3-turbo") == "text"
+    assert infer_modality("custom", "wan2.6-t2v") == "text"
 
 
 def test_probe_snapshot_video_custom_skips_llm_chat(monkeypatch):
@@ -101,7 +121,7 @@ def test_probe_snapshot_video_custom_skips_llm_chat(monkeypatch):
         "infrastructure.video_gen.cloud_adapter.KlingVideoAdapter.probe",
         fake_probe)
     snap = ProviderSnapshot(
-        "test", "custom", "https://api-beijing.klingai.com",
+        "test", "kling", "https://api-beijing.klingai.com",
         "ak:sk", "kling-3.0-turbo", modality="video")
 
     async def scenario():
@@ -119,16 +139,16 @@ def test_cloud_profile_ignores_local_yaml_duration_cap():
     snap = type("S", (), {"provider_type": "openai_compatible"})()
     profile = video_profile_for(snap, _Config(
         video_gen_max_duration_sec=4, video_gen_default_duration_sec=3))
-    assert profile.max_duration == 15
-    assert profile.default_duration == 5
+    assert profile.max_duration == 60
+    assert profile.default_duration == 15
     assert profile.refine == "off"
     assert profile.local_gpu is False
     # 云端等待上限必须跟主对话工具预算同源，不能再写死 180
     assert profile.timeout_sec == 600.0
-    d, clamped = clamp_duration(profile, 20)
-    assert d == 15 and clamped is True
-    d2, c2 = clamp_duration(CLOUD_PROFILE, 5)
-    assert d2 == 5 and c2 is False
+    d, clamped = clamp_duration(profile, 90)
+    assert d == 60 and clamped is True
+    d2, c2 = clamp_duration(CLOUD_PROFILE, 15)
+    assert d2 == 15 and c2 is False
     assert normalize_video_size(CLOUD_PROFILE, "9:16") == "9:16"
     assert normalize_video_size(CLOUD_PROFILE, "16:9") == "16:9"
     assert "云端" in capability_hint(CLOUD_PROFILE)
@@ -172,7 +192,7 @@ def test_set_assignment_rejects_wrong_modality(tmp_path: Path):
             modality="text")
         vid_id = reg.add_provider(
             pid="prov_vid", display_name="Kling",
-            provider_type="openai_compatible",
+            provider_type="kling",
             base_url="https://api.kling.com",
             model_id="kling-v3-turbo", api_key="ak:sk",
             input_price=None, output_price=0.4, context_window=0,
@@ -199,11 +219,11 @@ def test_add_provider_rejects_invalid_combo(tmp_path: Path):
         with pytest.raises(ValueError, match="不支持协议"):
             reg.add_provider(
                 pid="prov_bad", display_name="Bad",
-                provider_type="google",
-                base_url="https://api.example.com",
-                model_id="x", api_key="k",
+                provider_type="comfyui",
+                base_url="http://127.0.0.1:8188",
+                model_id="x", api_key="local",
                 input_price=None, output_price=None, context_window=0,
-                modality="video")
+                modality="text")
     finally:
         db.close()
 
@@ -220,7 +240,7 @@ def test_ensure_does_not_overwrite_cloud_video(tmp_path: Path):
         reg = ProviderRegistry(db, creds)
         pid = reg.add_provider(
             pid="prov_kling", display_name="Kling Turbo",
-            provider_type="openai_compatible",
+            provider_type="kling",
             base_url="https://api.kling.com",
             model_id="kling-v3-turbo", api_key="ak:sk",
             input_price=None, output_price=0.4, context_window=0,
@@ -231,7 +251,7 @@ def test_ensure_does_not_overwrite_cloud_video(tmp_path: Path):
         assert reg.assignment("video_gen") == pid
         snap = reg.snapshot_for("video_gen")
         assert snap.model_id == "kling-v3-turbo"
-        assert snap.provider_type == "openai_compatible"
+        assert snap.provider_type == "kling"
     finally:
         db.close()
 

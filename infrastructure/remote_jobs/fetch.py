@@ -131,9 +131,12 @@ async def http_get_json_resilient(
             if resp.status_code >= 500:
                 raise RuntimeError(f"查询{label} HTTP {resp.status_code}")
             if resp.status_code >= 400:
-                # 鉴权/参数类错误不盲重试
-                raise RuntimeError(
-                    f"查询{label}失败 HTTP {resp.status_code}")
+                # 鉴权/参数类错误不盲重试，带上正文避免只剩状态码
+                detail = (resp.text or "").strip().replace("\n", " ")[:180]
+                msg = f"查询{label}失败 HTTP {resp.status_code}"
+                if detail:
+                    msg = f"{msg}：{detail}"
+                raise RuntimeError(msg)
             return resp.json()
         except JobCancelled:
             raise

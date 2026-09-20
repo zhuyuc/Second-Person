@@ -21,6 +21,7 @@ export const workshopApi = {
   uploadRefs: (id, form) => api.upload(`/workshop/projects/${id}/refs`, form),
   remove: (id) => api.del(`/workshop/projects/${id}`),
   ensureSession: (id) => api.post(`/workshop/projects/${id}/ensure-session`, {}),
+  promptPreview: (script) => api.post('/workshop/prompt-preview', { script: script || '' }),
   /** SSE 出片：onEvent(eventName, data) */
   async render(id, { onEvent, signal } = {}) {
     const resp = await postJsonStream(`/workshop/projects/${id}/render`, {}, { signal })

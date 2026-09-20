@@ -527,7 +527,7 @@ def test_video_factory_picks_cloud_adapter(tmp_path: Path):
         def __init__(self, provider_type):
             self.provider_type = provider_type
 
-    for ptype in ("openai_compatible", "anthropic", "custom"):
+    for ptype in ("kling",):
         adapter = get_video_adapter(_Snap(ptype), _Config(), tmp_path)
         assert isinstance(adapter, KlingVideoAdapter)
 

@@ -213,18 +213,35 @@ const MODALITY_OPTIONS = [
   { value: 'image', label: '图片' },
   { value: 'video', label: '视频' },
 ]
-const CLOUD_PROTOCOLS = [
+const TEXT_PROTOCOLS = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'custom', label: '自定义' },
+  { value: 'google', label: 'Google' },
 ]
-const PROTOCOLS_BY_MODALITY = {
-  text: [...CLOUD_PROTOCOLS, { value: 'google', label: 'Google' }],
-  image: [...CLOUD_PROTOCOLS, { value: 'comfyui', label: 'ComfyUI（本地）' }],
-  video: [...CLOUD_PROTOCOLS, { value: 'comfyui', label: 'ComfyUI（本地）' }],
+const LOCAL_PROTOCOL = { value: 'comfyui', label: 'ComfyUI（本地）' }
+const LEGACY_PROTOCOL_LABEL = {
+  kling: '可灵',
+  dashscope: '百炼',
 }
-function protocolsFor(modality) {
-  return PROTOCOLS_BY_MODALITY[modality] || PROTOCOLS_BY_MODALITY.text
+const PROTOCOLS_BY_MODALITY = {
+  text: TEXT_PROTOCOLS,
+  image: [...TEXT_PROTOCOLS, LOCAL_PROTOCOL],
+  video: [...TEXT_PROTOCOLS, LOCAL_PROTOCOL],
+}
+function protocolsFor(modality, current) {
+  const list = PROTOCOLS_BY_MODALITY[modality] || PROTOCOLS_BY_MODALITY.text
+  if (
+    modality === 'video'
+    && (current === 'kling' || current === 'dashscope')
+    && !list.some((x) => x.value === current)
+  ) {
+    return [...list, {
+      value: current,
+      label: LEGACY_PROTOCOL_LABEL[current] || current,
+    }]
+  }
+  return list
 }
 function isComfyProtocol(ptype) {
   return ptype === 'comfyui'
@@ -249,13 +266,39 @@ function providerPriceLabel(p) {
   }
   return `¥${p.input_price || 0}/M · ¥${p.output_price || 0}/M`
 }
+function videoUrlPlaceholder(data) {
+  if (data?.provider_type === 'dashscope') return 'https://dashscope.aliyuncs.com/api/v1'
+  if (data?.provider_type === 'kling') return 'https://api-beijing.klingai.com'
+  return ''
+}
+function videoUrlHint(data) {
+  if (data?.provider_type === 'custom') {
+    return '按填写的地址原样请求，不会自动补路径'
+  }
+  if (data?.provider_type === 'dashscope') {
+    return '百炼 API Key。地址用 https://dashscope.aliyuncs.com/api/v1'
+  }
+  if (data?.provider_type === 'kling') {
+    return '可灵官方域名 https://api-beijing.klingai.com；新版填控制台 API Key'
+  }
+  return ''
+}
+function videoKeyLabel(data) {
+  if (data?.provider_type === 'dashscope') return 'API Key（百炼）'
+  if (data?.provider_type === 'kling') {
+    return 'API Key（可灵控制台密钥；旧版 kling-v* 可填 AccessKey:SecretKey）'
+  }
+  return 'API Key'
+}
+function videoModelPlaceholder(data) {
+  if (data?.provider_type === 'dashscope') return 'wan2.6-t2v'
+  if (data?.provider_type === 'kling') return 'kling-3.0-turbo'
+  return ''
+}
 function applyModalityDefaults(data) {
-  const allowed = protocolsFor(data.modality).map((x) => x.value)
+  const allowed = protocolsFor(data.modality, data.provider_type).map((x) => x.value)
   if (!allowed.includes(data.provider_type)) {
     data.provider_type = allowed[0]
-  }
-    if (isVideoCloud(data) && !data.model_id) {
-    data.model_id = 'kling-3.0-turbo'
   }
 }
 function openAddProvider() {
@@ -1580,7 +1623,12 @@ onActivated(() => selectTab(tab.value))
   </BaseModal>
 
   <!-- 添加 Provider 弹窗 -->
-  <BaseModal v-if="showAddProvider" title="添加模型" @close="showAddProvider = false">
+  <BaseModal
+    v-if="showAddProvider"
+    title="添加模型"
+    :close-on-overlay="false"
+    @close="showAddProvider = false"
+  >
     <div class="form-group">
       <label class="label">模态</label>
       <select v-model="newProvider.modality" @change="applyModalityDefaults(newProvider)">
@@ -1602,18 +1650,12 @@ onActivated(() => selectTab(tab.value))
       <label class="label">基础地址</label>
       <input
         v-model="newProvider.base_url"
-        :placeholder="isVideoCloud(newProvider) ? 'https://api-beijing.klingai.com' : ''"
+        :placeholder="videoUrlPlaceholder(newProvider)"
       />
-      <div v-if="isVideoCloud(newProvider)" class="muted">
-        国内官方域名 https://api-beijing.klingai.com；新版填控制台 API Key
-      </div>
+      <div v-if="videoUrlHint(newProvider)" class="muted">{{ videoUrlHint(newProvider) }}</div>
     </div>
     <div class="form-group">
-      <label class="label">{{
-        isVideoCloud(newProvider)
-          ? 'API Key（新版控制台密钥；旧版 kling-v* 可填 AccessKey:SecretKey）'
-          : 'API Key'
-      }}</label>
+      <label class="label">{{ videoKeyLabel(newProvider) }}</label>
       <div class="input-affix">
         <input v-model="newProvider.api_key" :type="showAddKey ? 'text' : 'password'" />
         <i
@@ -1626,11 +1668,7 @@ onActivated(() => selectTab(tab.value))
       <label class="label">模型 ID</label>
       <input
         v-model="newProvider.model_id"
-        :placeholder="
-          isVideoCloud(newProvider)
-            ? 'kling-3.0-turbo'
-            : ''
-        "
+        :placeholder="videoModelPlaceholder(newProvider)"
       />
     </div>
     <div v-if="newProvider.modality === 'text'" class="form-grid">
@@ -1977,7 +2015,7 @@ onActivated(() => selectTab(tab.value))
     <div class="form-group">
       <label class="label">API 兼容</label>
       <select v-model="editData.provider_type" @change="applyModalityDefaults(editData)">
-        <option v-for="pt in protocolsFor(editData.modality)" :key="pt.value" :value="pt.value">
+        <option v-for="pt in protocolsFor(editData.modality, editData.provider_type)" :key="pt.value" :value="pt.value">
           {{ pt.label }}
         </option>
       </select>
@@ -1989,18 +2027,12 @@ onActivated(() => selectTab(tab.value))
       <label class="label">基础地址</label>
       <input
         v-model="editData.base_url"
-        :placeholder="isVideoCloud(editData) ? 'https://api-beijing.klingai.com' : ''"
+        :placeholder="videoUrlPlaceholder(editData)"
       />
-      <div v-if="isVideoCloud(editData)" class="muted">
-        国内官方域名 https://api-beijing.klingai.com；新版填控制台 API Key
-      </div>
+      <div v-if="videoUrlHint(editData)" class="muted">{{ videoUrlHint(editData) }}</div>
     </div>
     <div class="form-group">
-      <label class="label">{{
-        isVideoCloud(editData)
-          ? 'API Key（新版控制台密钥；旧版 kling-v* 可填 AccessKey:SecretKey）'
-          : 'API Key'
-      }}</label>
+      <label class="label">{{ videoKeyLabel(editData) }}</label>
       <div class="input-affix">
         <input v-model="editData.api_key" :type="showEditKey ? 'text' : 'password'" />
         <i
@@ -2013,11 +2045,7 @@ onActivated(() => selectTab(tab.value))
       <label class="label">模型 ID</label>
       <input
         v-model="editData.model_id"
-        :placeholder="
-          isVideoCloud(editData)
-            ? 'kling-3.0-turbo'
-            : ''
-        "
+        :placeholder="videoModelPlaceholder(editData)"
       />
     </div>
     <div v-if="editData.modality === 'text'" class="form-grid">

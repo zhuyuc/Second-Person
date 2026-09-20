@@ -63,18 +63,14 @@ class SettingsService:
                 from infrastructure.image_gen import probe_comfyui
                 return await probe_comfyui(snap.base_url)
             if modality == "video":
-                from infrastructure.video_gen.cloud_adapter import KlingVideoAdapter
-                from infrastructure.video_gen.profiles import CLOUD_PROFILE
-                adapter = KlingVideoAdapter(
-                    base_url=snap.base_url, api_key=snap.api_key,
-                    data_dir=Path("."), profile=CLOUD_PROFILE,
-                    model_id=snap.model_id or "")
+                from infrastructure.video_gen.factory import get_video_adapter
+                adapter = get_video_adapter(
+                    snap, getattr(self.c, "config", None), Path("."))
                 return await adapter.probe()
             if modality == "image":
-                from infrastructure.image_gen.cloud_adapter import OpenAIImageAdapter
-                adapter = OpenAIImageAdapter(
-                    base_url=snap.base_url, api_key=snap.api_key,
-                    data_dir=Path("."), model_id=snap.model_id or "")
+                from infrastructure.image_gen.factory import get_image_adapter
+                adapter = get_image_adapter(
+                    snap, getattr(self.c, "config", None), Path("."))
                 return await adapter.probe()
             return await self.c.llm.probe(snap)
         except Exception as exc:  # noqa: BLE001

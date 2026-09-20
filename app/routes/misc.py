@@ -402,3 +402,14 @@ async def health():
         "core_ready": bool(stages.get("core_ready")),
         "stage_details": stages.get("details"),
     }}
+
+
+@router.get("/skills")
+async def list_skills(q: str = "", category: str = "director-style"):
+    """@ capability picker. Default: director-style only (storyboard is auto)."""
+    c = _c()
+    items = c.skills.list_for_picker(q or "")
+    cat = (category or "").strip().lower()
+    if cat and cat not in {"*", "all"}:
+        items = [it for it in items if str(it.get("category") or "").lower() == cat]
+    return {"code": 200, "data": {"skills": items}}

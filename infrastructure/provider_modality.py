@@ -6,13 +6,18 @@ MODALITY_IMAGE = "image"
 MODALITY_VIDEO = "video"
 MODALITIES = (MODALITY_TEXT, MODALITY_IMAGE, MODALITY_VIDEO)
 
-# 三种模态共用的云端协议；文本另加 google，图/视频另加本地 ComfyUI。
+# 三种模态共用同一套协议名。OpenAI 兼容才补本模态的标准路径；
+# 自定义按填写地址原样请求；Anthropic / Google 走各自的固定接口。
+# 图和视频另有本地 ComfyUI。kling / dashscope 只留给已经保存的旧记录。
+TEXT_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom", "google"})
 CLOUD_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom"})
+OPENAI_WIRE = frozenset({"openai_compatible"})
+LEGACY_VIDEO = frozenset({"kling", "dashscope"})
 
 PROTOCOLS_BY_MODALITY: dict[str, frozenset[str]] = {
-    MODALITY_TEXT: CLOUD_PROTOCOLS | frozenset({"google"}),
-    MODALITY_IMAGE: CLOUD_PROTOCOLS | frozenset({"comfyui"}),
-    MODALITY_VIDEO: CLOUD_PROTOCOLS | frozenset({"comfyui"}),
+    MODALITY_TEXT: TEXT_PROTOCOLS,
+    MODALITY_IMAGE: TEXT_PROTOCOLS | frozenset({"comfyui"}),
+    MODALITY_VIDEO: TEXT_PROTOCOLS | frozenset({"comfyui"}) | LEGACY_VIDEO,
 }
 
 SLOT_MODALITY: dict[str, str] = {
@@ -38,10 +43,8 @@ def infer_modality(provider_type: str, model_id: str = "") -> str:
         if "wan" in mid:
             return MODALITY_VIDEO
         return MODALITY_IMAGE
-    if "kling" in mid or "wan" in mid:
+    if ptype in ("kling", "dashscope"):
         return MODALITY_VIDEO
-    if any(k in mid for k in ("dall-e", "dalle", "sdxl", "gpt-image")):
-        return MODALITY_IMAGE
     return MODALITY_TEXT
 
 
@@ -66,5 +69,18 @@ def is_local_gpu(snap) -> bool:
     return ptype == "comfyui"
 
 
-def is_cloud_http(provider_type: str) -> bool:
-    return (provider_type or "").strip().lower() in CLOUD_PROTOCOLS
+def is_openai_wire(provider_type: str) -> bool:
+    return (provider_type or "").strip().lower() in OPENAI_WIRE
+
+
+def is_custom(provider_type: str) -> bool:
+    return (provider_type or "").strip().lower() == "custom"
+
+
+def endpoint_url(base_url: str, provider_type: str, suffix: str) -> str:
+    """OpenAI 兼容才补路径。自定义用用户填写的地址，不再改写成 OpenAI 路径。"""
+    base = (base_url or "").rstrip("/")
+    if is_custom(provider_type):
+        return base
+    path = suffix if str(suffix).startswith("/") else f"/{suffix}"
+    return base + path

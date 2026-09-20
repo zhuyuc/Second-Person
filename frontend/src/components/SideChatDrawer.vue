@@ -9,14 +9,19 @@
 //
 // 实例常驻（v-show 而非 v-if）以保活消息 + 进行中流 + 未发草稿；切主会话仅切换可见性。
 import { ref, computed, defineAsyncComponent, nextTick, onMounted, onUnmounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { useSessions } from '@/stores/sessions'
 import { loadAsideChatView } from '@/components/asideChatLoader'
 // 侧边会话只有用户主动划词后才会出现；不要因抽屉常驻而把完整 ChatView
 // （及其图表依赖）并入首屏入口。
 const ChatView = defineAsyncComponent(loadAsideChatView)
 
+const route = useRoute()
 const sessStore = useSessions()
 const activeMainSid = computed(() => sessStore.currentSid)
+// 抽屉挂在 App 常驻；离开 /chat（工坊/记忆/设置）必须藏起，否则会盖住其它页，
+// 且全选复制时把「侧边会话」标题一并写进剪贴板。
+const onChatRoute = computed(() => route.path === '/chat' || route.path.startsWith('/chat/'))
 
 // entries: [{ mainSid, projectId, sessionId(aside sid, 首条发送后回填) }]
 const entries = ref([])
@@ -54,7 +59,7 @@ function setAsideRef(mainSid, el) {
 const activeEntry = computed(
   () => entries.value.find((e) => e.mainSid === activeMainSid.value) || null
 )
-const visible = computed(() => !!activeEntry.value)
+const visible = computed(() => onChatRoute.value && !!activeEntry.value)
 
 // 抽屉宽度：可拖拽调整，localStorage 记住下次打开复用
 const WIDTH_KEY = 'sp_aside_drawer_width'

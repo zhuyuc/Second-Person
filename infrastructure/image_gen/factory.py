@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .cloud_adapter import OpenAIImageAdapter
 from .comfyui_adapter import ComfyUIAdapter
-from infrastructure.provider_modality import is_cloud_http
+from .named_adapters import AnthropicImageAdapter, GoogleImageAdapter
 
 
 def get_image_adapter(snap, config, data_dir: Path):
@@ -25,13 +25,25 @@ def get_image_adapter(snap, config, data_dir: Path):
             prompt_max_chars=int(
                 config.get("image_gen_prompt_max_chars", 1500) or 1500),
         )
-    if is_cloud_http(ptype):
+    if ptype in ("openai_compatible", "custom"):
         return OpenAIImageAdapter(
             base_url=snap.base_url or "",
             api_key=getattr(snap, "api_key", "") or "",
             data_dir=Path(data_dir),
             timeout_sec=float(config.get("image_gen_timeout_sec", 180) or 180),
             model_id=snap.model_id or "",
+            provider_type=ptype,
         )
+    common = dict(
+        base_url=snap.base_url or "",
+        api_key=getattr(snap, "api_key", "") or "",
+        data_dir=Path(data_dir),
+        timeout_sec=float(config.get("image_gen_timeout_sec", 180) or 180),
+        model_id=snap.model_id or "",
+    )
+    if ptype == "google":
+        return GoogleImageAdapter(**common)
+    if ptype == "anthropic":
+        return AnthropicImageAdapter(**common)
     raise RuntimeError(
-        f"文生图不支持协议 {ptype or '（空）'}，请使用云端协议或本地 ComfyUI")
+        f"文生图不支持协议 {ptype or '（空）'}，请选择 OpenAI 兼容、Anthropic、自定义、Google 或本地 ComfyUI")

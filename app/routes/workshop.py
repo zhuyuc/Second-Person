@@ -29,6 +29,7 @@ from agent.video_workshop import (
     WorkshopError,
     VideoWorkshopStore,
 )
+from agent.workshop_prompt import compile_model_prompt
 from infrastructure.video_gen import (
     aspect_ratio_of,
     normalize_video_size,
@@ -316,6 +317,18 @@ def _sse_pack(event: str, data: dict) -> dict:
     return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
 
 
+class PromptPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    script: str = ""
+
+
+@router.post("/workshop/prompt-preview")
+async def prompt_preview(body: PromptPreviewRequest):
+    """与出片使用同一份编译结果，供界面查看实际提交文本。"""
+    prompt, mode = compile_model_prompt(body.script or "")
+    return {"code": 200, "data": {"prompt": prompt, "mode": mode}}
+
+
 @router.post("/workshop/projects/{project_id}/render")
 async def render_project(project_id: str):
     """触发出片：SSE 推大致进度，完成时可播放。"""
@@ -391,8 +404,9 @@ async def render_project(project_id: str):
                 "label": "开始生成视频…", "progress": 5,
                 "project_id": project_id,
             })
+            prompt, _mode = compile_model_prompt(script)
             payload = await execute_video_gen(
-                prompt=script,
+                prompt=prompt,
                 providers=c.providers,
                 config=c.config,
                 data_dir=c.data_dir,
