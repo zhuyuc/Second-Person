@@ -392,7 +392,8 @@ class TurnRuntime:
                     turn_context = await self.context_loader(
                         session_id=session_id, turn_id=turn_id, message=message,
                         onboarding=onboarding, step=step, handoff_path=handoff_path,
-                        location=location, emit=emit, skill_refs=skill_refs)
+                        location=location, emit=emit, skill_refs=skill_refs,
+                        langfuse_trace_id=getattr(trace, "id", None))
                     memory_timeline = turn_context.get("memory_timeline") or []
                     if memory_timeline:
                         timeline.extend(memory_timeline)
@@ -533,7 +534,8 @@ class TurnRuntime:
                         turn_context = await self.context_loader(
                             session_id=session_id, turn_id=turn_id, message=message,
                             onboarding=onboarding, step=step, handoff_path=handoff_path,
-                            location=location, emit=emit, skill_refs=skill_refs)
+                            location=location, emit=emit, skill_refs=skill_refs,
+                            langfuse_trace_id=getattr(trace, "id", None))
                         memory_timeline = turn_context.get("memory_timeline") or []
                         if memory_timeline:
                             timeline.extend(memory_timeline)
@@ -699,7 +701,8 @@ class TurnRuntime:
                                     message=message, onboarding=onboarding,
                                     step=step, handoff_path=handoff_path,
                                     location=location, emit=emit,
-                                    skill_refs=skill_refs)
+                                    skill_refs=skill_refs,
+                                    langfuse_trace_id=getattr(trace, "id", None))
                                 cached_system_content = None
                                 prompt_fingerprint = None
                                 step_span.end(output={"outcome": "overflow_retry"})

@@ -5,6 +5,7 @@ import logging
 
 from infrastructure.json_repair import repair_json
 from infrastructure.prompt_loader import PROMPTS
+from soul.mood_peace import detect_peace_event, normalize_peace_event
 
 logger = logging.getLogger("second_person.mood_judge")
 
@@ -41,11 +42,13 @@ def _normalize_res(raw: dict | None) -> dict:
 async def judge_turn_moods(llm, providers, *, user_message: str,
                            assistant_content: str,
                            trigger_summary: str = "",
-                           session_id: str | None = None) -> tuple[dict, dict]:
-    """Return (user_res, ai_res) for MoodManager.apply_v2."""
+                           session_id: str | None = None
+                           ) -> tuple[dict, dict, str]:
+    """Return (user_res, ai_res, peace_event) for MoodManager.apply_v2."""
     snap = providers.snapshot_for("agent") or providers.snapshot_for("chat")
     if snap is None:
-        return _normalize_res(None), _normalize_res(None)
+        peace = detect_peace_event(user_message, assistant_content)
+        return _normalize_res(None), _normalize_res(None), peace
     parts = [
         f"【用户消息】\n{user_message or ''}",
         f"【助手回复】\n{assistant_content or ''}",
@@ -64,7 +67,13 @@ async def judge_turn_moods(llm, providers, *, user_message: str,
         data = repair_json(resp.get("content") or "")
         user = _normalize_res(data.get("user") if isinstance(data, dict) else None)
         ai = _normalize_res(data.get("ai") if isinstance(data, dict) else None)
-        return user, ai
+        peace = "none"
+        if isinstance(data, dict):
+            peace = normalize_peace_event(data.get("peace_event"))
+        if peace == "none":
+            peace = detect_peace_event(user_message, assistant_content)
+        return user, ai, peace
     except Exception:  # noqa: BLE001
         logger.warning("情绪判定失败，降级 neutral", exc_info=True)
-        return _normalize_res(None), _normalize_res(None)
+        peace = detect_peace_event(user_message, assistant_content)
+        return _normalize_res(None), _normalize_res(None), peace

@@ -205,6 +205,7 @@ const SLOT_MODALITY = {
   embedding: 'text',
   vision: 'text',
   retriever_refine: 'text',
+  mood_fast: 'text',
   image_gen: 'image',
   video_gen: 'video',
 }

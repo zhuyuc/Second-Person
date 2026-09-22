@@ -1,8 +1,9 @@
 """情绪引擎内部常量（不暴露给用户，收敛自 PARAM_SCHEMA）。
 
 这里的数值都是"算法调参"，用户看到它不知道该拧成多少，也不该拧。
-用户可见的情绪开关只有 3 个：mood_enabled / mood_actions_enabled /
-mood_influence_strength，以及两个天数窗口（mood_decay_hours、mood_pattern_window_days）。
+用户可见的情绪开关只有：mood_enabled / mood_actions_enabled /
+mood_influence_strength，天数窗口 mood_decay_hours / mood_pattern_window_days，
+以及快路径 mood_fast_path_*（thinking 仅作用于 mood_fast 单次调用，不写槽位）。
 其它内部权重/阈值集中在这里，便于统一调整。
 """
 from __future__ import annotations
@@ -30,3 +31,9 @@ BASELINE_CURIOUS_THRESHOLD = 2   # 近 1 天好奇/渴望类情绪次数
 
 # 情绪模式提取窗口（天）
 MOOD_PATTERN_WINDOW_DAYS = 14
+
+# 本轮展示融合（S ⊕ P → D，不落库）
+# P 近中性而 S 仍高时：intensity = β·P + (1-β)·S
+PULSE_INERTIA_BETA = 0.35
+# P 强度明显高于 S 时视为尖峰：标签取 P，intensity = max(S, P)
+PULSE_SPIKE_DELTA = 0.15

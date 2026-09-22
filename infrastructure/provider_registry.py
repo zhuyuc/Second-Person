@@ -89,6 +89,15 @@ TASK_SLOTS: dict[str, TaskSlot] = {
         fallback=("agent", "chat"),
         lightweight=True,
     ),
+    "mood_fast": TaskSlot(
+        key="mood_fast",
+        label="情绪快路径模型",
+        desc="回复前对本句用户情绪做极简 JSON 判定（mood/intensity/confidence）。"
+             "推荐配快速 Flash/lite；关思考仅作用于该次调用，不改本槽或其它槽默认。"
+             "未配置时回退系统 Agent → 对话模型。",
+        fallback=("agent", "chat"),
+        lightweight=True,
+    ),
     "image_gen": TaskSlot(
         key="image_gen",
         label="文生图模型",

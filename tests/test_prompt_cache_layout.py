@@ -67,7 +67,7 @@ def test_system_prompt_keeps_mood_rules_only(tmp_path: Path):
         def build_rules(self):
             return "【情绪表达规则】稳定规则正文"
 
-        def build_state_context(self, user_message=None):
+        def build_state_context(self, user_message=None, pulse=None):
             return "[当前情绪状态] 本轮可变状态"
 
     class _Soul:

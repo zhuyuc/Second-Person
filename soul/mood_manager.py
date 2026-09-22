@@ -97,7 +97,86 @@ class MoodManager:
             logger.debug("加载 mood_rules 失败", exc_info=True)
             return ""
 
-    def build_state_context(self, user_message: str | None = None) -> str:
+    def get_decayed_user_state(self) -> dict:
+        """库内用户态 S（读取时惰性衰减）；无行则中性。"""
+        self._ensure_row()
+        row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
+        intensity = self._decay(row["user_intensity"], row["user_updated_at"])
+        mood = row["user_mood"] or "neutral"
+        if intensity < DECAY_FLOOR:
+            mood, intensity = "neutral", 0.0
+        return {
+            "mood": mood,
+            "intensity": intensity,
+            "attribution": row["user_attribution"] or "none",
+            "updated_at": row["user_updated_at"],
+        }
+
+    def get_decayed_ai_state(self) -> dict:
+        """库内 AI 态（读取时惰性衰减）；注入与主动行为用。"""
+        self._ensure_row()
+        row = self.db.query_one("SELECT * FROM mood_state WHERE id=1")
+        intensity = self._decay(row["ai_intensity"], row["ai_updated_at"])
+        mood = row["ai_mood"] or "neutral"
+        if intensity < DECAY_FLOOR:
+            mood, intensity = "neutral", 0.0
+        return {
+            "mood": mood,
+            "intensity": intensity,
+            "attribution": row["ai_attribution"] or "none",
+            "updated_at": row["ai_updated_at"],
+        }
+
+    def fuse_display_pulse(self, pulse: dict | None) -> dict:
+        """本轮展示融合 S ⊕ P → D（不写 mood_state）。
+
+        规则（产品方案 §5）：
+        1. 低置信 → D = S
+        2. P 强度明显高于 S → 标签 P，intensity = max(S, P)
+        3. P 近中性而 S 仍高 → intensity = β·P + (1-β)·S，标签保持 S
+        4. 其它：标签/强度取 P
+        """
+        s = self.get_decayed_user_state()
+        if not pulse or pulse.get("source") == "state":
+            return dict(s)
+        try:
+            confidence = _clamp01(float(pulse.get("confidence") or 0.0))
+        except (TypeError, ValueError):
+            return dict(s)
+        min_conf = float(
+            self.config.get("mood_fast_path_min_confidence", 0.55) or 0.55)
+        if confidence < min_conf:
+            return dict(s)
+
+        p_mood = str(pulse.get("mood") or "neutral").strip().lower() or "neutral"
+        try:
+            p_int = _clamp01(float(pulse.get("intensity") or 0.0))
+        except (TypeError, ValueError):
+            return dict(s)
+        s_mood, s_int = s["mood"], float(s["intensity"])
+
+        # 尖峰：P 明显更高
+        if p_int - s_int >= _mood.PULSE_SPIKE_DELTA:
+            return {
+                **s,
+                "mood": p_mood,
+                "intensity": max(s_int, p_int),
+            }
+
+        # 惯性：P 近中性、S 仍高
+        p_near_neutral = (p_mood == "neutral" or p_int <= DECAY_FLOOR + 0.05)
+        if p_near_neutral and s_int >= 0.3 and s_mood != "neutral":
+            beta = _mood.PULSE_INERTIA_BETA
+            return {
+                **s,
+                "mood": s_mood,
+                "intensity": _clamp01(beta * p_int + (1.0 - beta) * s_int),
+            }
+
+        return {**s, "mood": p_mood, "intensity": p_int}
+
+    def build_state_context(self, user_message: str | None = None,
+                            pulse: dict | None = None) -> str:
         """本轮情绪状态（进 messages 尾部 context.mood，允许每轮变化）。
 
         - strength 调制：根据 mood_influence_strength 调整注入浓度
@@ -105,6 +184,7 @@ class MoodManager:
         - baseline 风味：即使 neutral 也根据历史关系给出有温度的基线描述
         - attribution 提示：告知 AI 当前情绪来源（self/other/shared）
         - 寒暄/无承接的自我歉意：仅弱化本轮展示文案，不改 DB 真值
+        - pulse：本轮快路径脉冲；用户侧用 fuse_display_pulse，AI 侧只用库内衰减态
         """
         if not self.config.get("mood_enabled", True):
             return ""
@@ -131,11 +211,18 @@ class MoodManager:
         else:
             strength_hint = self._strength_hint(strength)
 
+        display_user = self.fuse_display_pulse(pulse)
+        ai_state = self.get_decayed_ai_state()
+
         kwargs: dict[str, object] = {"strength_hint": strength_hint}
+        scope_data = {
+            "user": (display_user["mood"], display_user["intensity"],
+                     display_user.get("updated_at") or row["user_updated_at"]),
+            "ai": (ai_state["mood"], ai_state["intensity"],
+                   ai_state.get("updated_at") or row["ai_updated_at"]),
+        }
         for scope in ("user", "ai"):
-            mood = row[f"{scope}_mood"]
-            raw_intensity = self._decay(
-                row[f"{scope}_intensity"], row[f"{scope}_updated_at"])
+            mood, raw_intensity, updated_at = scope_data[scope]
             adjusted = raw_intensity * strength
             use_baseline = False
             if scope == "ai" and soften_self:
@@ -147,7 +234,7 @@ class MoodManager:
                     band = "低"
                 kwargs[f"{scope}_intensity_band"] = band
                 kwargs[f"{scope}_time_hint"] = (
-                    "" if brief else self._time_hint(row[f"{scope}_updated_at"]))
+                    "" if brief else self._time_hint(updated_at))
             else:
                 kwargs[f"{scope}_mood"] = self._baseline_flavor(scope)
                 kwargs[f"{scope}_intensity_band"] = "低"

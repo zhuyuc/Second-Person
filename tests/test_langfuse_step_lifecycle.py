@@ -186,11 +186,12 @@ def test_mood_judge_uses_dedicated_llm_source(monkeypatch):
 
     async def run():
         from soul.mood_judge import judge_turn_moods
-        user, ai = await judge_turn_moods(
+        user, ai, peace = await judge_turn_moods(
             _FakeLLM(), _Providers(),
             user_message="hi", assistant_content="hello")
         assert user["mood"] == "neutral"
         assert ai["mood"] == "curious"
+        assert peace == "none"
 
     asyncio.run(run())
     assert captured.get("source") == "mood_judge"

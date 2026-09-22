@@ -26,6 +26,7 @@ SLOT_MODALITY: dict[str, str] = {
     "embedding": MODALITY_TEXT,
     "vision": MODALITY_TEXT,
     "retriever_refine": MODALITY_TEXT,
+    "mood_fast": MODALITY_TEXT,
     "image_gen": MODALITY_IMAGE,
     "video_gen": MODALITY_VIDEO,
 }
