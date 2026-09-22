@@ -24,7 +24,9 @@ function fontPreloadPlugin() {
 
 export default defineConfig({
     plugins: [
-        vue(),
+        // scopeId 只哈希相对路径：生产构建默认连源码字节一起哈希，
+        // CRLF/LF 检出差异会导致同一源码产出不同 chunk 哈希（跨机 app/static 冲突）
+        vue({ features: { componentIdGenerator: 'filepath' } }),
         Components({
             dirs: ['src/components'],
             extensions: ['vue'],
