@@ -405,7 +405,7 @@ const chatModelId = ref(null)
 const modelControlOpen = ref(false)
 const modelControlPanel = ref('overview')
 const selectedModelLabel = computed(
-  () => providers.value.find((p) => p.id === chatModelId.value)?.display_name || '未配置模型'
+  () => providers.value.find((p) => p.id === chatModelId.value)?.model_id || '未配置模型'
 )
 async function loadProviders() {
     const all = await chatApi.providers()
@@ -3050,7 +3050,7 @@ onUnmounted(() => {
                       :aria-checked="provider.id === chatModelId"
                       @click="pickChatModel(provider.id)"
                     >
-                      <span>{{ provider.display_name }}</span>
+                      <span>{{ provider.model_id }}</span>
                       <i v-if="provider.id === chatModelId" class="ti ti-check"></i>
                     </button>
                   </template>

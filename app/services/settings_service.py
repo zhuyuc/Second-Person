@@ -29,13 +29,17 @@ class SettingsService:
                   "modality"):
             if isinstance(out.get(k), str):
                 out[k] = out[k].strip()
+        # 展示名与模型 ID 合一：前端已去掉独立显示名称，入库仍写 display_name 兼容旧字段
+        mid = out.get("model_id") or ""
+        if mid:
+            out["display_name"] = mid
         return out
 
     def validate_provider_required(self, body: dict) -> None:
         from infrastructure.provider_modality import (
             infer_modality, normalize_modality, validate_combo)
         ptype = (body.get("provider_type") or "").strip()
-        required = [("base_url", "Base URL"), ("model_id", "模型 ID")]
+        required = [("base_url", "Base URL"), ("model_id", "名称")]
         if ptype != "comfyui":
             required.append(("api_key", "API Key"))
         for field, label in required:
@@ -106,7 +110,7 @@ class SettingsService:
         for ex in c.providers.list_providers():
             if ex["base_url"] == body["base_url"] and ex["model_id"] == body["model_id"]:
                 c.providers.update_provider(ex["id"], {
-                    "display_name": body.get("display_name", ex["display_name"]),
+                    "display_name": body["model_id"],
                     "provider_type": body["provider_type"],
                     "input_price": body.get("input_price"),
                     "output_price": body.get("output_price"),
@@ -117,7 +121,7 @@ class SettingsService:
         from memory.naming import provider_id as mk
         pid = mk(c.providers.next_provider_seq())
         c.providers.add_provider(
-            pid, body.get("display_name") or body["model_id"], body["provider_type"],
+            pid, body["model_id"], body["provider_type"],
             body["base_url"], body["model_id"], body["api_key"],
             body.get("input_price"), body.get("output_price"),
             body.get("context_window", 128000),

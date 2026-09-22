@@ -1,4 +1,4 @@
-"""Anthropic 文生视频：探测与文本一样打 /messages。该协议没有视频生成接口。"""
+"""Anthropic 文生视频：探测与文本一样打 /v1/messages。该协议没有视频生成接口。"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -31,4 +31,4 @@ class AnthropicVideoAdapter:
 
     async def generate(self, req: VideoGenRequest, **_kw) -> VideoGenResult:
         raise RuntimeError(
-            "Anthropic 没有视频生成接口。生视频请改选 OpenAI 兼容、Google 或自定义")
+            "Anthropic 没有视频生成接口。生视频请改选 OpenAI 兼容、自定义或本地 ComfyUI")

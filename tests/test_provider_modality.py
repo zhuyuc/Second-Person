@@ -38,16 +38,35 @@ def test_custom_endpoint_uses_the_url_as_written():
     ) == "https://api.example.com/v1/chat/completions"
     assert "openai_compatible" in protocols_for("text")
     assert "anthropic" in protocols_for("text")
+
+
+def test_anthropic_messages_url_and_headers():
+    from infrastructure.provider_modality import (
+        anthropic_headers, anthropic_messages_url,
+    )
+    assert anthropic_messages_url(
+        "https://ark.cn-beijing.volces.com/api/plan"
+    ) == "https://ark.cn-beijing.volces.com/api/plan/v1/messages"
+    assert anthropic_messages_url(
+        "https://ark.cn-beijing.volces.com/api/coding/"
+    ) == "https://ark.cn-beijing.volces.com/api/coding/v1/messages"
+    assert anthropic_messages_url(
+        "https://api.anthropic.com/v1"
+    ) == "https://api.anthropic.com/v1/messages"
+    headers = anthropic_headers("sk-test")
+    assert headers["Authorization"] == "Bearer sk-test"
+    assert headers["x-api-key"] == "sk-test"
+    assert headers["anthropic-version"] == "2023-06-01"
     assert "custom" in protocols_for("text")
-    assert "google" in protocols_for("text")
+    assert "google" not in protocols_for("text")
     assert protocols_for("image") == frozenset({
-        "openai_compatible", "anthropic", "custom", "google", "comfyui"})
+        "openai_compatible", "anthropic", "custom", "comfyui"})
     assert protocols_for("video") == frozenset({
-        "openai_compatible", "anthropic", "custom", "google", "comfyui",
+        "openai_compatible", "anthropic", "custom", "comfyui",
         "kling", "dashscope"})
     assert "comfyui" not in protocols_for("text")
-    assert "google" in protocols_for("image")
-    assert "google" in protocols_for("video")
+    assert "google" not in protocols_for("image")
+    assert "google" not in protocols_for("video")
     assert "anthropic" in protocols_for("image")
     assert "custom" in protocols_for("video")
 
@@ -59,12 +78,10 @@ def test_validate_combo_follows_text_protocol_split():
     validate_combo("image", "openai_compatible")
     validate_combo("image", "anthropic")
     validate_combo("image", "custom")
-    validate_combo("image", "google")
     validate_combo("image", "comfyui")
     validate_combo("video", "openai_compatible")
     validate_combo("video", "anthropic")
     validate_combo("video", "custom")
-    validate_combo("video", "google")
     validate_combo("video", "kling")
     validate_combo("video", "dashscope")
     validate_combo("video", "comfyui")
@@ -72,6 +89,12 @@ def test_validate_combo_follows_text_protocol_split():
         validate_combo("text", "comfyui")
     with pytest.raises(ValueError, match="不支持协议"):
         validate_combo("text", "kling")
+    with pytest.raises(ValueError, match="不支持协议"):
+        validate_combo("text", "google")
+    with pytest.raises(ValueError, match="不支持协议"):
+        validate_combo("image", "google")
+    with pytest.raises(ValueError, match="不支持协议"):
+        validate_combo("video", "google")
 
 
 def test_validate_provider_accepts_kling_protocol():

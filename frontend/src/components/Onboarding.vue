@@ -12,7 +12,6 @@ const { busy, run } = useBusy()
 const step = ref(1)
 const chat = ref({
   provider_type: 'openai_compatible',
-  display_name: '',
   base_url: '',
   api_key: '',
   model_id: '',
@@ -40,7 +39,6 @@ async function saveChatProvider() {
   // 后端创建/去重更新均返回真实 id，不再用“列表最后一个”推断
   const r = await settingsApi.createProvider({
     ...chat.value,
-    display_name: chat.value.display_name || chat.value.model_id,
   })
   await settingsApi.setModelAssignment({ chat_model: r.id, agent_model: r.id })
   try {
@@ -78,7 +76,6 @@ async function confirmSoul() {
         <select v-model="chat.provider_type" class="w-full">
           <option value="openai_compatible">OpenAI 兼容</option>
           <option value="anthropic">Anthropic</option>
-          <option value="google">Google</option>
         </select>
       </div>
       <div class="mb-10">
@@ -94,7 +91,7 @@ async function confirmSoul() {
         <input v-model="chat.api_key" type="password" placeholder="sk-..." class="w-full" />
       </div>
       <div class="mb-16">
-        <label class="label">模型 ID</label>
+        <label class="label">名称</label>
         <input v-model="chat.model_id" placeholder="deepseek-chat" class="w-full" />
       </div>
       <div class="fg fg-end fg-gap-8">

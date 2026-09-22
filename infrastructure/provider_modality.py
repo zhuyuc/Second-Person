@@ -7,9 +7,9 @@ MODALITY_VIDEO = "video"
 MODALITIES = (MODALITY_TEXT, MODALITY_IMAGE, MODALITY_VIDEO)
 
 # 三种模态共用同一套协议名。OpenAI 兼容才补本模态的标准路径；
-# 自定义按填写地址原样请求；Anthropic / Google 走各自的固定接口。
+# 自定义按填写地址原样请求；Anthropic 走固定 Messages 接口。
 # 图和视频另有本地 ComfyUI。kling / dashscope 只留给已经保存的旧记录。
-TEXT_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom", "google"})
+TEXT_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom"})
 CLOUD_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom"})
 OPENAI_WIRE = frozenset({"openai_compatible"})
 LEGACY_VIDEO = frozenset({"kling", "dashscope"})
@@ -85,3 +85,31 @@ def endpoint_url(base_url: str, provider_type: str, suffix: str) -> str:
         return base
     path = suffix if str(suffix).startswith("/") else f"/{suffix}"
     return base + path
+
+
+def anthropic_messages_url(base_url: str) -> str:
+    """Anthropic Messages 完整地址。
+
+    官方 Anthropic、火山 Agent Plan（/api/plan）、Coding Plan（/api/coding）
+    均走 ``{base}/v1/messages``。若用户已把 ``/v1`` 写进 Base URL，不再重复拼接。
+    """
+    base = (base_url or "").rstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}/messages"
+    return f"{base}/v1/messages"
+
+
+def anthropic_headers(api_key: str) -> dict[str, str]:
+    """Anthropic 兼容鉴权头。
+
+    - 火山方舟 Agent/Coding Plan 等网关按 Claude Code 约定吃 ``Authorization: Bearer``
+    - 原生 Anthropic 吃 ``x-api-key``
+    两边同时带上，避免兼容端点 401。
+    """
+    key = api_key or ""
+    return {
+        "Authorization": f"Bearer {key}",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }

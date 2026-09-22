@@ -190,7 +190,6 @@ const showAddProvider = ref(false)
 const newProvider = ref({
   modality: 'text',
   provider_type: 'openai_compatible',
-  display_name: '',
   base_url: '',
   api_key: '',
   model_id: '',
@@ -218,12 +217,12 @@ const TEXT_PROTOCOLS = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'custom', label: '自定义' },
-  { value: 'google', label: 'Google' },
 ]
 const LOCAL_PROTOCOL = { value: 'comfyui', label: 'ComfyUI（本地）' }
 const LEGACY_PROTOCOL_LABEL = {
   kling: '可灵',
   dashscope: '百炼',
+  google: 'Google',
 }
 const PROTOCOLS_BY_MODALITY = {
   text: TEXT_PROTOCOLS,
@@ -233,22 +232,18 @@ const PROTOCOLS_BY_MODALITY = {
 function protocolsFor(modality, current) {
   const list = PROTOCOLS_BY_MODALITY[modality] || PROTOCOLS_BY_MODALITY.text
   if (
-    modality === 'video'
-    && (current === 'kling' || current === 'dashscope')
+    (current === 'kling' || current === 'dashscope' || current === 'google')
     && !list.some((x) => x.value === current)
   ) {
-    return [...list, {
-      value: current,
-      label: LEGACY_PROTOCOL_LABEL[current] || current,
-    }]
+    // 旧记录仍可编辑展示；新建不再出现 Google / 可灵 / 百炼
+    if (current === 'google' || modality === 'video') {
+      return [...list, {
+        value: current,
+        label: LEGACY_PROTOCOL_LABEL[current] || current,
+      }]
+    }
   }
   return list
-}
-function isComfyProtocol(ptype) {
-  return ptype === 'comfyui'
-}
-function isVideoCloud(data) {
-  return data.modality === 'video' && !isComfyProtocol(data.provider_type)
 }
 function providersForSlot(slotKey) {
   const m = SLOT_MODALITY[slotKey] || 'text'
@@ -306,7 +301,6 @@ function openAddProvider() {
   newProvider.value = {
     modality: 'text',
     provider_type: 'openai_compatible',
-    display_name: '',
     base_url: '',
     api_key: '',
     model_id: '',
@@ -361,7 +355,6 @@ const showAddKey = ref(false)
 async function openEdit(p) {
   editData.value = {
     id: p.id,
-    display_name: p.display_name,
     modality: p.modality || 'text',
     provider_type: p.provider_type,
     base_url: p.base_url,
@@ -987,7 +980,7 @@ onActivated(() => selectTab(tab.value))
             {{ s.fallback && s.fallback.length ? '未配置（自动回退）' : '未配置' }}
           </option>
           <option v-for="p in providersForSlot(s.key)" :key="p.id" :value="p.id">
-            {{ p.display_name }}
+            {{ p.model_id }}
           </option>
         </select>
       </div>
@@ -998,12 +991,13 @@ onActivated(() => selectTab(tab.value))
         <div class="fg fg-gap-8">
           <span class="dot dot-succ"></span>
           <div>
-            <b>{{ p.display_name }}</b>
+            <b>{{ p.model_id }}</b>
+            <span class="muted provider-modality-tag">{{ modalityLabel(p.modality) }}</span>
             <div class="muted">{{ p.base_url }}</div>
           </div>
         </div>
         <div class="fg fg-gap-12">
-          <span class="muted">{{ modalityLabel(p.modality) }} · {{ providerPriceLabel(p) }}</span>
+          <span class="muted">{{ providerPriceLabel(p) }}</span>
           <button
             class="btn-sm"
             :disabled="busy('editP' + p.id)"
@@ -1645,7 +1639,11 @@ onActivated(() => selectTab(tab.value))
       </select>
     </div>
     <div class="form-group">
-      <label class="label">显示名称</label><input v-model="newProvider.display_name" />
+      <label class="label">名称</label>
+      <input
+        v-model="newProvider.model_id"
+        :placeholder="videoModelPlaceholder(newProvider)"
+      />
     </div>
     <div class="form-group">
       <label class="label">基础地址</label>
@@ -1664,13 +1662,6 @@ onActivated(() => selectTab(tab.value))
           @click="showAddKey = !showAddKey"
         ></i>
       </div>
-    </div>
-    <div class="form-group">
-      <label class="label">模型 ID</label>
-      <input
-        v-model="newProvider.model_id"
-        :placeholder="videoModelPlaceholder(newProvider)"
-      />
     </div>
     <div v-if="newProvider.modality === 'text'" class="form-grid">
       <div>
@@ -2006,7 +1997,12 @@ onActivated(() => selectTab(tab.value))
   </BaseModal>
 
   <!-- 编辑 Provider 弹窗 -->
-  <BaseModal v-if="showEdit" title="编辑模型" @close="showEdit = false">
+  <BaseModal
+    v-if="showEdit"
+    title="编辑模型"
+    :close-on-overlay="false"
+    @close="showEdit = false"
+  >
     <div class="form-group">
       <label class="label">模态</label>
       <select v-model="editData.modality" @change="applyModalityDefaults(editData)">
@@ -2022,7 +2018,11 @@ onActivated(() => selectTab(tab.value))
       </select>
     </div>
     <div class="form-group">
-      <label class="label">显示名称</label><input v-model="editData.display_name" />
+      <label class="label">名称</label>
+      <input
+        v-model="editData.model_id"
+        :placeholder="videoModelPlaceholder(editData)"
+      />
     </div>
     <div class="form-group">
       <label class="label">基础地址</label>
@@ -2041,13 +2041,6 @@ onActivated(() => selectTab(tab.value))
           @click="showEditKey = !showEditKey"
         ></i>
       </div>
-    </div>
-    <div class="form-group">
-      <label class="label">模型 ID</label>
-      <input
-        v-model="editData.model_id"
-        :placeholder="videoModelPlaceholder(editData)"
-      />
     </div>
     <div v-if="editData.modality === 'text'" class="form-grid">
       <div>
@@ -2107,5 +2100,11 @@ onActivated(() => selectTab(tab.value))
 
 .param-desc {
   flex-basis: 100%;
+}
+
+.provider-modality-tag {
+  margin-left: 8px;
+  font-size: var(--fs-sm);
+  font-weight: 400;
 }
 </style>

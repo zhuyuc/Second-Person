@@ -19,7 +19,11 @@ from typing import Any, AsyncIterator
 
 import httpx
 
-from infrastructure.provider_modality import endpoint_url
+from infrastructure.provider_modality import (
+    anthropic_headers,
+    anthropic_messages_url,
+    endpoint_url,
+)
 
 from .http_client import timeout_for
 from .observability import get_trace_id
@@ -712,10 +716,10 @@ class LLMClient:
             body["tools"] = tools
         body.update(_normalize_extra_body(snap, kw.get("extra_body")))
         c = self._get_client()
-        r = await c.post(f"{snap.base_url.rstrip('/')}/messages", json=body,
-                         headers={"x-api-key": snap.api_key,
-                                  "anthropic-version": "2023-06-01"},
-                         timeout=timeout_for("default"))
+        r = await c.post(
+            anthropic_messages_url(snap.base_url), json=body,
+            headers=anthropic_headers(snap.api_key),
+            timeout=timeout_for("default"))
         r.raise_for_status()
         data = r.json()
         text = "".join(b.get("text", "") for b in data.get("content", [])

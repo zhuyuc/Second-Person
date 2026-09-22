@@ -10,6 +10,8 @@ from typing import Awaitable, Callable
 
 import httpx
 
+from infrastructure.provider_modality import anthropic_headers, anthropic_messages_url
+
 from .types import ImageGenRequest, ImageGenResult
 
 logger = logging.getLogger("second_person.image_gen.named")
@@ -17,18 +19,10 @@ logger = logging.getLogger("second_person.image_gen.named")
 ProgressCb = Callable[[str, str], Awaitable[None]] | None
 
 
-def _anthropic_headers(api_key: str) -> dict[str, str]:
-    return {
-        "x-api-key": api_key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-
-
 async def probe_anthropic(base_url: str, api_key: str, model_id: str,
                           timeout: float = 12.0) -> dict:
-    """和文本一样打 {地址}/messages，不改成 OpenAI 路径。"""
-    url = f"{(base_url or '').rstrip('/')}/messages"
+    """和文本一样打 {地址}/v1/messages，不改成 OpenAI 路径。"""
+    url = anthropic_messages_url(base_url)
     body = {
         "model": model_id or "claude",
         "max_tokens": 1,
@@ -37,7 +31,7 @@ async def probe_anthropic(base_url: str, api_key: str, model_id: str,
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
-                url, json=body, headers=_anthropic_headers(api_key))
+                url, json=body, headers=anthropic_headers(api_key))
     except httpx.ConnectError:
         return {"ok": False, "error": "无法连接 Anthropic 接口"}
     except Exception as exc:  # noqa: BLE001
@@ -64,7 +58,7 @@ class AnthropicImageAdapter:
 
     async def generate(self, req: ImageGenRequest, **_kw) -> ImageGenResult:
         raise RuntimeError(
-            "Anthropic 没有图片生成接口。生图请改选 OpenAI 兼容、Google 或自定义")
+            "Anthropic 没有图片生成接口。生图请改选 OpenAI 兼容、自定义或本地 ComfyUI")
 
 
 def _inline_image(payload: dict) -> bytes:
