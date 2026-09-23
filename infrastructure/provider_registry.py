@@ -21,7 +21,10 @@ import logging
 from dataclasses import dataclass
 
 from .llm_provider import ProviderSnapshot
-from .provider_modality import infer_modality, normalize_modality, slot_modality, validate_combo
+from .provider_modality import (
+    infer_modality, normalize_modality, slot_modality, validate_combo,
+    validate_slot_provider,
+)
 from infrastructure.timeutil import now_cst
 
 logger = logging.getLogger("second_person.provider_registry")
@@ -243,6 +246,7 @@ class ProviderRegistry:
         if actual != expected:
             raise ValueError(
                 f"槽位 {task_type} 需要 {expected} 模态，当前模型是 {actual}")
+        validate_slot_provider(task_type, snap.provider_type)
         self.db.execute(
             "INSERT INTO model_assignment(task_type,provider_id,updated_at) VALUES(?,?,?) "
             "ON CONFLICT(task_type) DO UPDATE SET provider_id=excluded.provider_id, "

@@ -12,6 +12,7 @@ LLM Provider 抽象层（产品文档 §LLM Provider 抽象层 / 开发文档 §
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -147,6 +148,173 @@ def _observability_parameters(kw: dict, extra_body: dict | None = None) -> dict 
     if extra_body and "reasoning_effort" in extra_body:
         params["reasoning_effort"] = extra_body["reasoning_effort"]
     return params or None
+
+
+def _openai_tools_to_anthropic(tools: list[dict] | None) -> list[dict]:
+    """OpenAI function tools → Anthropic tools（name/description/input_schema）。"""
+    out: list[dict] = []
+    for item in tools or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("name") and item.get("input_schema") is not None:
+            out.append({
+                "name": item["name"],
+                "description": item.get("description") or "",
+                "input_schema": item.get("input_schema") or {"type": "object"},
+            })
+            continue
+        fn = item.get("function") if item.get("type") == "function" else item
+        if not isinstance(fn, dict) or not fn.get("name"):
+            continue
+        out.append({
+            "name": fn["name"],
+            "description": fn.get("description") or "",
+            "input_schema": fn.get("parameters") or {"type": "object"},
+        })
+    return out
+
+
+def _content_to_anthropic_blocks(content: Any) -> list[dict]:
+    """把 OpenAI 风格 content（字符串或多模态数组）转成 Anthropic content blocks。"""
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if not isinstance(content, list):
+        text = str(content)
+        return [{"type": "text", "text": text}] if text else []
+    blocks: list[dict] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            text = part.get("text") or ""
+            if text:
+                blocks.append({"type": "text", "text": text})
+        elif ptype == "image_url":
+            url = ((part.get("image_url") or {}).get("url") or "").strip()
+            if url.startswith("data:") and ";base64," in url:
+                header, b64 = url.split(";base64,", 1)
+                media = header[5:] if header.startswith("data:") else "image/png"
+                blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media or "image/png",
+                        "data": b64,
+                    },
+                })
+            elif url:
+                blocks.append({
+                    "type": "image",
+                    "source": {"type": "url", "url": url},
+                })
+    return blocks
+
+
+def _openai_messages_to_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
+    """OpenAI chat messages → Anthropic (system, messages)。
+
+    - system 拼成顶层 system 字符串
+    - assistant.tool_calls → content 里的 tool_use blocks
+    - 连续 role=tool → 合并成一条 user（多个 tool_result）
+    - 去掉 reasoning_content（厂商思考字段，Anthropic 消息体不认）
+    """
+    system_parts: list[str] = []
+    out: list[dict] = []
+    pending_tool_results: list[dict] = []
+
+    def flush_tool_results() -> None:
+        nonlocal pending_tool_results
+        if not pending_tool_results:
+            return
+        out.append({"role": "user", "content": pending_tool_results})
+        pending_tool_results = []
+
+    for raw in messages or []:
+        if not isinstance(raw, dict):
+            continue
+        role = raw.get("role")
+        if role == "system":
+            flush_tool_results()
+            text = raw.get("content") or ""
+            if isinstance(text, list):
+                text = "".join(
+                    (p.get("text") or "") for p in text
+                    if isinstance(p, dict) and p.get("type") == "text")
+            if text:
+                system_parts.append(str(text))
+            continue
+        if role == "tool":
+            pending_tool_results.append({
+                "type": "tool_result",
+                "tool_use_id": raw.get("tool_call_id") or "",
+                "content": raw.get("content") or "",
+            })
+            continue
+        flush_tool_results()
+        if role == "assistant":
+            blocks = _content_to_anthropic_blocks(raw.get("content"))
+            for tc in raw.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                args_raw = fn.get("arguments") or "{}"
+                try:
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
+                except (TypeError, ValueError):
+                    args = {"_raw": args_raw}
+                if not isinstance(args, dict):
+                    args = {"value": args}
+                blocks.append({
+                    "type": "tool_use",
+                    "id": tc.get("id") or "",
+                    "name": fn.get("name") or "",
+                    "input": args,
+                })
+            if not blocks:
+                blocks = [{"type": "text", "text": ""}]
+            out.append({"role": "assistant", "content": blocks})
+            continue
+        if role == "user":
+            blocks = _content_to_anthropic_blocks(raw.get("content"))
+            if not blocks:
+                blocks = [{"type": "text", "text": ""}]
+            out.append({"role": "user", "content": blocks})
+    flush_tool_results()
+    return "\n\n".join(system_parts), out
+
+
+def _anthropic_request_body(snap, messages: list[dict], tools=None,
+                            extra_tools=None, *, stream: bool = False,
+                            **kw) -> dict[str, Any]:
+    """组装 Anthropic Messages 请求体（含工具/消息格式转换）。"""
+    system, conv = _openai_messages_to_anthropic(messages)
+    body: dict[str, Any] = {
+        "model": snap.model_id,
+        "messages": conv,
+        "max_tokens": kw.get("max_tokens", 4096),
+    }
+    if stream:
+        body["stream"] = True
+    if system:
+        body["system"] = system
+    all_tools: list[dict] = []
+    if tools:
+        all_tools.extend(tools)
+    if extra_tools:
+        all_tools.extend(extra_tools)
+    converted = _openai_tools_to_anthropic(all_tools)
+    if converted:
+        body["tools"] = converted
+    body.update(_normalize_extra_body(snap, kw.get("extra_body")))
+    return body
+
+
+# ---------------------------------------------------------------------------
+# LLMClient
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -288,6 +456,9 @@ class LLMClient:
             return {"ok": True, "protocol": "chat"}
         except Exception as exc:  # noqa: BLE001
             chat_error = exc
+        # Anthropic 无 embeddings 对等接口：chat 失败后不再误打 /embeddings
+        if (snap.provider_type or "").strip().lower() == "anthropic":
+            raise LLMError(f"chat 探测失败：{chat_error}") from chat_error
         try:
             await self._do_embed(snap, ["ping"])
             return {"ok": True, "protocol": "embedding"}
@@ -706,15 +877,7 @@ class LLMClient:
         }
 
     async def _anthropic_chat(self, snap, messages, tools, **kw) -> dict[str, Any]:
-        sys = "".join(m["content"] for m in messages if m["role"] == "system")
-        conv = [m for m in messages if m["role"] != "system"]
-        body: dict[str, Any] = {"model": snap.model_id, "messages": conv,
-                                "max_tokens": kw.get("max_tokens", 4096)}
-        if sys:
-            body["system"] = sys
-        if tools:
-            body["tools"] = tools
-        body.update(_normalize_extra_body(snap, kw.get("extra_body")))
+        body = _anthropic_request_body(snap, messages, tools=tools, stream=False, **kw)
         c = self._get_client()
         r = await c.post(
             anthropic_messages_url(snap.base_url), json=body,
@@ -722,10 +885,30 @@ class LLMClient:
             timeout=timeout_for("default"))
         r.raise_for_status()
         data = r.json()
-        text = "".join(b.get("text", "") for b in data.get("content", [])
-                       if b.get("type") == "text")
+        text_parts: list[str] = []
+        tool_calls: list[dict] = []
+        for block in data.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text_parts.append(block.get("text") or "")
+            elif block.get("type") == "tool_use":
+                tool_calls.append({
+                    "id": block.get("id") or "",
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name") or "",
+                        "arguments": json.dumps(
+                            block.get("input") or {}, ensure_ascii=False),
+                    },
+                })
+        text = "".join(text_parts)
         usage = data.get("usage", {})
-        return {"content": text, "tool_calls": [],
+        if not text and not tool_calls:
+            raise EmptyCompletionError(
+                f"模型 {snap.model_id} 返回空内容"
+                f"（疑似输出全被思考内容占用）")
+        return {"content": text, "tool_calls": tool_calls,
                 "usage": normalize_usage(usage, input_key="input_tokens",
                                           output_key="output_tokens")}
 
@@ -785,9 +968,25 @@ class LLMClient:
     async def _do_stream(self, snap, messages, usage, images=None,
                          extra_tools=None, tools=None,
                          **kw) -> AsyncIterator[tuple]:
-        """先带 stream_options.include_usage 请求（OpenAI 官方系必须显式开启才返回
-        流式 usage）；个别网关不认识该参数报 400 时去掉降级重试一次（400 发生在
-        首 chunk 之前，重试不会产生重复内容）。"""
+        """流式分发：Anthropic 走 /v1/messages；其余走 OpenAI chat/completions。
+
+        OpenAI 系先带 stream_options.include_usage；个别网关不认识该参数报 400
+        时去掉降级重试一次（400 发生在首 chunk 之前，重试不会产生重复内容）。
+        """
+        if snap.provider_type == "anthropic":
+            async for item in self._anthropic_stream(
+                    snap, messages, usage, images=images,
+                    extra_tools=extra_tools, tools=tools, **kw):
+                yield item
+            return
+        if snap.provider_type == "google":
+            # Google 暂无流式适配：回退一次性 chat 再整段吐出
+            res = await self._google_chat(
+                snap, _inject_images(messages, images), **kw)
+            usage.update(res.get("usage") or {})
+            if res.get("content"):
+                yield "content", res["content"]
+            return
         try:
             async for item in self._stream_request(snap, messages, usage,
                                                    images=images, include_usage=True,
@@ -802,6 +1001,96 @@ class LLMClient:
                                                    extra_tools=extra_tools,
                                                    tools=tools, **kw):
                 yield item
+
+    async def _anthropic_stream(self, snap, messages, usage, images=None,
+                                extra_tools=None, tools=None,
+                                **kw) -> AsyncIterator[tuple]:
+        """Anthropic Messages SSE → 与 OpenAI 流相同的 (kind, payload) 事件。"""
+        messages = _inject_images(messages, images)
+        body = _anthropic_request_body(
+            snap, messages, tools=tools, extra_tools=extra_tools,
+            stream=True, **kw)
+        c = self._get_client()
+        # tool_use block index → 对外 OpenAI tool_call index
+        tool_index_by_block: dict[int, int] = {}
+        next_tool_index = 0
+        async with c.stream(
+                "POST",
+                anthropic_messages_url(snap.base_url),
+                json=body,
+                headers=anthropic_headers(snap.api_key),
+                timeout=timeout_for("stream")) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    obj = json.loads(data)
+                except ValueError:
+                    continue
+                etype = obj.get("type")
+                if etype == "content_block_start":
+                    block = obj.get("content_block") or {}
+                    btype = block.get("type")
+                    idx = int(obj.get("index") or 0)
+                    if btype == "tool_use":
+                        tool_index_by_block[idx] = next_tool_index
+                        t_idx = next_tool_index
+                        next_tool_index += 1
+                        yield "tool_call", {
+                            "index": t_idx,
+                            "id": block.get("id") or "",
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name") or "",
+                                "arguments": "",
+                            },
+                        }
+                elif etype == "content_block_delta":
+                    delta = obj.get("delta") or {}
+                    dtype = delta.get("type")
+                    idx = int(obj.get("index") or 0)
+                    if dtype == "text_delta":
+                        text = delta.get("text") or ""
+                        if text:
+                            yield "content", text
+                    elif dtype == "thinking_delta":
+                        text = delta.get("thinking") or delta.get("text") or ""
+                        if text:
+                            yield "reasoning", text
+                    elif dtype == "input_json_delta":
+                        partial = delta.get("partial_json") or ""
+                        t_idx = tool_index_by_block.get(idx)
+                        if t_idx is not None and partial:
+                            yield "tool_call", {
+                                "index": t_idx,
+                                "function": {"arguments": partial},
+                            }
+                elif etype == "message_delta":
+                    u = obj.get("usage") or {}
+                    if u:
+                        # Anthropic message_delta.usage 通常只有 output_tokens
+                        if "output_tokens" in u:
+                            usage["output_tokens"] = int(
+                                u.get("output_tokens") or 0)
+                        if "input_tokens" in u:
+                            usage["input_tokens"] = int(
+                                u.get("input_tokens") or 0)
+                elif etype == "message_start":
+                    msg = obj.get("message") or {}
+                    u = msg.get("usage") or {}
+                    if u.get("input_tokens") is not None:
+                        usage["input_tokens"] = int(u.get("input_tokens") or 0)
+                    # cache tokens（若网关提供）
+                    if u.get("cache_read_input_tokens") is not None:
+                        usage["cache_read_tokens"] = int(
+                            u.get("cache_read_input_tokens") or 0)
+                    if u.get("cache_creation_input_tokens") is not None:
+                        usage["cache_write_tokens"] = int(
+                            u.get("cache_creation_input_tokens") or 0)
 
     async def _stream_request(self, snap, messages, usage, images=None,
                               include_usage=True, extra_tools=None,
@@ -842,7 +1131,6 @@ class LLMClient:
                     if data == "[DONE]":
                         break
                     try:
-                        import json
                         obj = json.loads(data)
                     except ValueError:
                         continue

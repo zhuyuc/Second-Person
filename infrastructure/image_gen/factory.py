@@ -46,4 +46,4 @@ def get_image_adapter(snap, config, data_dir: Path):
     if ptype == "anthropic":
         return AnthropicImageAdapter(**common)
     raise RuntimeError(
-        f"文生图不支持协议 {ptype or '（空）'}，请选择 OpenAI 兼容、Anthropic、自定义或本地 ComfyUI")
+        f"文生图不支持协议 {ptype or '（空）'}，请选择 OpenAI 兼容、自定义或本地 ComfyUI")

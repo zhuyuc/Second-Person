@@ -292,9 +292,19 @@ async def download_generated_file(stored_name: str):
     # 对外文件名去掉 uuid 前缀，还原标题原名
     display = stored_name.split(
         "_", 1)[-1] if "_" in stored_name else stored_name
-    media = ("application/vnd.openxmlformats-officedocument"
-             ".wordprocessingml.document" if stored_name.endswith(".docx")
-             else "text/markdown; charset=utf-8")
+    suffix = Path(stored_name).suffix.lower()
+    media_map = {
+        ".docx": ("application/vnd.openxmlformats-officedocument"
+                  ".wordprocessingml.document"),
+        ".pptx": ("application/vnd.openxmlformats-officedocument"
+                  ".presentationml.presentation"),
+        ".xlsx": ("application/vnd.openxmlformats-officedocument"
+                  ".spreadsheetml.sheet"),
+        ".pdf": "application/pdf",
+        ".md": "text/markdown; charset=utf-8",
+        ".markdown": "text/markdown; charset=utf-8",
+    }
+    media = media_map.get(suffix, "application/octet-stream")
     return FileResponse(path, media_type=media, filename=display)
 
 

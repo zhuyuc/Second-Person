@@ -144,6 +144,9 @@ export function friendlyError(msg, fallback = '操作失败，请重试') {
   ) {
     return '所选模型不可用，请到「设置」更换模型'
   }
+  if (m.includes('404') || m.includes('not found')) {
+    return '要找的内容不存在，可能已被删除'
+  }
   if (m.includes('client error') || (m.includes('400') && m.includes('bad request'))) {
     return '请求参数有误，请检查输入后重试'
   }
@@ -153,9 +156,6 @@ export function friendlyError(msg, fallback = '操作失败，请重试') {
     /\b50[0234]\b/.test(m)
   ) {
     return '服务暂时不可用，请稍后重试'
-  }
-  if (m.includes('404') || m.includes('not found')) {
-    return '要找的内容不存在，可能已被删除'
   }
   // httpx / aiohttp 一类 "For url ..." 技术尾巴，对用户无意义
   if (m.includes('for url')) return fallback

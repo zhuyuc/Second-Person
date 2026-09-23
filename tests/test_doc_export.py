@@ -1,11 +1,12 @@
-"""文档导出多格式测试（generate_document: docx / md / pptx / xlsx）。
+"""文档导出多格式测试（generate_document: docx / md / pptx / xlsx / pdf）。
 
 覆盖：
 1. 转换器全语法（标题/列表/表格/代码块/引用/行内样式）与文件可重新打开
 2. PPTX 边界：页数上限 / 代码块截断 / 大表格截断 / 多 h1 降级 / 空文档
 3. XLSX 边界：公式注入防护 / sheet 名清洗冲突 / 标题去重 / 空文档
-4. 工具级：四格式生成与落盘、别名归一化、非法格式与空内容拒绝、schema 枚举
-5. 前端无 docx/md 格式硬编码（新格式对 UI 零改动回归防线）
+4. PDF：中文可提取、空文档、与 DOCX 同 fixture
+5. 工具级：五格式生成与落盘、别名归一化、非法格式与空内容拒绝、schema 枚举
+6. 前端无 docx/md 格式硬编码（新格式对 UI 零改动回归防线）
 运行：python tests/test_doc_export.py（退出码 0 = 全部通过）
 """
 import asyncio
@@ -72,10 +73,10 @@ def hello(name):
 
 
 def test_converters() -> None:
-    from tools.doc_export import (md_to_docx_bytes, md_to_pptx_bytes,
-                                  md_to_xlsx_bytes)
+    from tools.doc_export import (md_to_docx_bytes, md_to_pdf_bytes,
+                                  md_to_pptx_bytes, md_to_xlsx_bytes)
     for name, fn in (("docx", md_to_docx_bytes), ("pptx", md_to_pptx_bytes),
-                     ("xlsx", md_to_xlsx_bytes)):
+                     ("xlsx", md_to_xlsx_bytes), ("pdf", md_to_pdf_bytes)):
         try:
             data = fn(FULL_MD, "季度报告")
         except Exception as e:  # noqa: BLE001
@@ -92,6 +93,15 @@ def test_converters() -> None:
                 prs = Presentation(io.BytesIO(data))
                 check("pptx 可打开且分页正确（封面+2页）",
                       len(list(prs.slides)) == 3)
+            elif name == "pdf":
+                from pypdf import PdfReader
+                reader = PdfReader(io.BytesIO(data))
+                check("pdf 可打开且页数>=1", len(reader.pages) >= 1)
+                text = "".join((p.extract_text() or "") for p in reader.pages)
+                check("pdf 中文可提取",
+                      "业绩" in text or "营收" in text or "要点" in text,
+                      text[:80].replace("\n", " "))
+                check("pdf 魔数正确", data[:5] == b"%PDF-")
             else:
                 from openpyxl import load_workbook
                 wb = load_workbook(io.BytesIO(data))
@@ -156,6 +166,26 @@ def test_xlsx_boundaries() -> None:
     _assert_ok()
 
 
+def test_pdf_boundaries() -> None:
+    from tools.doc_export import md_to_pdf_bytes
+    from pypdf import PdfReader
+    empty = md_to_pdf_bytes("", "空文档")
+    r0 = PdfReader(io.BytesIO(empty))
+    check("pdf 空文档可打开", len(r0.pages) >= 1 and empty[:5] == b"%PDF-")
+    wide = ("| " + " | ".join(f"c{i}" for i in range(12)) + " |\n"
+            + "| " + " | ".join("---" for _ in range(12)) + " |\n"
+            + "| " + " | ".join(str(i) for i in range(12)) + " |\n")
+    data = md_to_pdf_bytes(f"## 宽表\n\n{wide}", "宽表")
+    r1 = PdfReader(io.BytesIO(data))
+    check("pdf 宽表截断不报错", len(r1.pages) >= 1)
+    data2 = md_to_pdf_bytes("# 周报\n\n正文内容", "周报")
+    text2 = "".join((p.extract_text() or "")
+                    for p in PdfReader(io.BytesIO(data2)).pages)
+    # title 与 h1 同名时不应重复写两次标题行导致异常；正文仍在
+    check("pdf title 与 h1 去重后仍有正文", "正文" in text2, text2[:60])
+    _assert_ok()
+
+
 async def _tool_level(tmp: Path) -> None:
     from types import SimpleNamespace
     from tools.base import ToolRegistry
@@ -166,10 +196,10 @@ async def _tool_level(tmp: Path) -> None:
                       sandbox=None, data_dir=tmp, config=cfg)
     tool = reg.get("generate_document")
     check("generate_document 已注册", tool is not None)
-    check("schema 枚举四格式",
+    check("schema 枚举五格式",
           tool.spec.parameters["properties"]["format"]["enum"]
-          == ["docx", "md", "pptx", "xlsx"])
-    for fmt in ("docx", "md", "pptx", "xlsx"):
+          == ["docx", "md", "pptx", "xlsx", "pdf"])
+    for fmt in ("docx", "md", "pptx", "xlsx", "pdf"):
         try:
             res = await tool.run(title="冒烟", format=fmt, content=FULL_MD)
             ok = bool(res.get("download_url")) and res.get("size_bytes", 0) > 0
@@ -186,7 +216,7 @@ async def _tool_level(tmp: Path) -> None:
     res = await tool.run(title="别名", format="excel", content="y")
     check("别名 excel→xlsx", res["filename"].endswith(".xlsx"))
     try:
-        await tool.run(title="坏", format="pdf", content="z")
+        await tool.run(title="坏", format="rtf", content="z")
         check("非法格式被拒", False)
     except ValueError as e:
         check("非法格式被拒", "不支持的格式" in str(e))
@@ -218,13 +248,27 @@ def test_frontend_no_hardcode() -> None:
     _assert_ok()
 
 
+def test_download_mime_map() -> None:
+    """下载路由按后缀映射 MIME（含 pdf / pptx / xlsx）。"""
+    src = (ROOT / "app" / "routes" / "misc.py").read_text(encoding="utf-8")
+    check("misc 含 application/pdf", "application/pdf" in src)
+    check("misc 含 pptx MIME", "presentationml.presentation" in src)
+    check("misc 含 xlsx MIME", "spreadsheetml.sheet" in src)
+    # 避免误把非 docx 一律标成 markdown
+    check("misc 不再仅用 endswith docx 二分",
+          'endswith(".docx")' not in src)
+    _assert_ok()
+
+
 def main() -> None:
     tmp = Path(tempfile.mkdtemp(prefix="sp_doc_export_test_"))
     test_converters()
     test_pptx_boundaries()
     test_xlsx_boundaries()
+    test_pdf_boundaries()
     asyncio.run(_tool_level(tmp))
     test_frontend_no_hardcode()
+    test_download_mime_map()
     print(f"\n结果：{len(FAIL)} 项失败")
     if FAIL:
         print("失败项：", "、".join(FAIL))

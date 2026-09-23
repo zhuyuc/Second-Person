@@ -30,6 +30,7 @@ class _Config:
 
 def test_custom_endpoint_uses_the_url_as_written():
     from infrastructure.provider_modality import endpoint_url
+    # 非标准完整路径：保持原样（不智能改写）
     raw = "https://example.com/api/v1/services/aigc/text2image/image-synthesis"
     assert endpoint_url(raw, "custom", "/images/generations") == raw
     assert endpoint_url(raw, "custom", "/chat/completions") == raw
@@ -38,6 +39,22 @@ def test_custom_endpoint_uses_the_url_as_written():
     ) == "https://api.example.com/v1/chat/completions"
     assert "openai_compatible" in protocols_for("text")
     assert "anthropic" in protocols_for("text")
+
+
+def test_custom_endpoint_smart_derives_openai_style_paths():
+    from infrastructure.provider_modality import endpoint_url
+    root = "https://gateway.example.com/v1"
+    assert endpoint_url(root, "custom", "/chat/completions") == (
+        root + "/chat/completions")
+    assert endpoint_url(root, "custom", "/embeddings") == root + "/embeddings"
+    assert endpoint_url(root, "custom", "/images/generations") == (
+        root + "/images/generations")
+    # 填了完整 chat 叶子 → embedding / images 自动剥叶子再拼
+    chat = root + "/chat/completions"
+    assert endpoint_url(chat, "custom", "/chat/completions") == chat
+    assert endpoint_url(chat, "custom", "/embeddings") == root + "/embeddings"
+    assert endpoint_url(chat, "custom", "/images/generations") == (
+        root + "/images/generations")
 
 
 def test_anthropic_messages_url_and_headers():
@@ -60,14 +77,13 @@ def test_anthropic_messages_url_and_headers():
     assert "custom" in protocols_for("text")
     assert "google" not in protocols_for("text")
     assert protocols_for("image") == frozenset({
-        "openai_compatible", "anthropic", "custom", "comfyui"})
+        "openai_compatible", "custom", "comfyui"})
     assert protocols_for("video") == frozenset({
-        "openai_compatible", "anthropic", "custom", "comfyui",
+        "openai_compatible", "custom", "comfyui",
         "kling", "dashscope"})
     assert "comfyui" not in protocols_for("text")
-    assert "google" not in protocols_for("image")
-    assert "google" not in protocols_for("video")
-    assert "anthropic" in protocols_for("image")
+    assert "anthropic" not in protocols_for("image")
+    assert "anthropic" not in protocols_for("video")
     assert "custom" in protocols_for("video")
 
 
@@ -76,11 +92,9 @@ def test_validate_combo_follows_text_protocol_split():
     validate_combo("text", "anthropic")
     validate_combo("text", "custom")
     validate_combo("image", "openai_compatible")
-    validate_combo("image", "anthropic")
     validate_combo("image", "custom")
     validate_combo("image", "comfyui")
     validate_combo("video", "openai_compatible")
-    validate_combo("video", "anthropic")
     validate_combo("video", "custom")
     validate_combo("video", "kling")
     validate_combo("video", "dashscope")
@@ -95,6 +109,22 @@ def test_validate_combo_follows_text_protocol_split():
         validate_combo("image", "google")
     with pytest.raises(ValueError, match="不支持协议"):
         validate_combo("video", "google")
+    with pytest.raises(ValueError, match="不支持协议"):
+        validate_combo("image", "anthropic")
+    with pytest.raises(ValueError, match="不支持协议"):
+        validate_combo("video", "anthropic")
+
+
+def test_validate_slot_provider_blocks_anthropic_non_chat():
+    from infrastructure.provider_modality import validate_slot_provider
+    validate_slot_provider("chat", "anthropic")
+    validate_slot_provider("agent", "anthropic")
+    with pytest.raises(ValueError, match="Anthropic"):
+        validate_slot_provider("embedding", "anthropic")
+    with pytest.raises(ValueError, match="Anthropic"):
+        validate_slot_provider("image_gen", "anthropic")
+    with pytest.raises(ValueError, match="Anthropic"):
+        validate_slot_provider("video_gen", "anthropic")
 
 
 def test_validate_provider_accepts_kling_protocol():

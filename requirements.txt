@@ -26,6 +26,7 @@ lxml>=5.0.0
 Markdown>=3.5
 openpyxl>=3.1.0
 python-pptx>=0.6.23
+reportlab>=4.0.0
 
 # 调度与文件监控
 watchdog>=4.0.0

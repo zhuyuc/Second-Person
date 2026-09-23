@@ -1,23 +1,26 @@
 """Provider 用途模态（text/image/video）与协议组合校验。"""
 from __future__ import annotations
 
+import re
+
 MODALITY_TEXT = "text"
 MODALITY_IMAGE = "image"
 MODALITY_VIDEO = "video"
 MODALITIES = (MODALITY_TEXT, MODALITY_IMAGE, MODALITY_VIDEO)
 
-# 三种模态共用同一套协议名。OpenAI 兼容才补本模态的标准路径；
-# 自定义按填写地址原样请求；Anthropic 走固定 Messages 接口。
+# 文本可含 Anthropic；图/视频云端不含 Anthropic（无对等生图/生视频接口）。
+# OpenAI 兼容自动补标准路径；自定义对常见 /vN 与叶子路径智能派生。
 # 图和视频另有本地 ComfyUI。kling / dashscope 只留给已经保存的旧记录。
 TEXT_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom"})
-CLOUD_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom"})
+MEDIA_CLOUD_PROTOCOLS = frozenset({"openai_compatible", "custom"})
+CLOUD_PROTOCOLS = MEDIA_CLOUD_PROTOCOLS  # 图/视频云端（历史别名）
 OPENAI_WIRE = frozenset({"openai_compatible"})
 LEGACY_VIDEO = frozenset({"kling", "dashscope"})
 
 PROTOCOLS_BY_MODALITY: dict[str, frozenset[str]] = {
     MODALITY_TEXT: TEXT_PROTOCOLS,
-    MODALITY_IMAGE: TEXT_PROTOCOLS | frozenset({"comfyui"}),
-    MODALITY_VIDEO: TEXT_PROTOCOLS | frozenset({"comfyui"}) | LEGACY_VIDEO,
+    MODALITY_IMAGE: MEDIA_CLOUD_PROTOCOLS | frozenset({"comfyui"}),
+    MODALITY_VIDEO: MEDIA_CLOUD_PROTOCOLS | frozenset({"comfyui"}) | LEGACY_VIDEO,
 }
 
 SLOT_MODALITY: dict[str, str] = {
@@ -30,6 +33,17 @@ SLOT_MODALITY: dict[str, str] = {
     "image_gen": MODALITY_IMAGE,
     "video_gen": MODALITY_VIDEO,
 }
+
+# Anthropic 无 embedding / 生图 / 生视频对等接口，禁止绑这些槽位
+ANTHROPIC_DENIED_SLOTS = frozenset({"embedding", "image_gen", "video_gen"})
+
+_CUSTOM_KNOWN_LEAVES = (
+    "/chat/completions",
+    "/embeddings",
+    "/images/generations",
+    "/models",
+)
+_V_ROOT_RE = re.compile(r"/v\d+$", re.IGNORECASE)
 
 
 def normalize_modality(value: str | None, default: str = MODALITY_TEXT) -> str:
@@ -61,6 +75,15 @@ def validate_combo(modality: str, provider_type: str) -> None:
             f"模态 {normalize_modality(modality)} 不支持协议 {ptype or '（空）'}")
 
 
+def validate_slot_provider(task_type: str, provider_type: str) -> None:
+    """槽位 × 协议门禁（比模态组合更细：同为 text，embedding 仍拒 Anthropic）。"""
+    ptype = (provider_type or "").strip().lower()
+    slot = (task_type or "").strip()
+    if ptype == "anthropic" and slot in ANTHROPIC_DENIED_SLOTS:
+        raise ValueError(
+            "Anthropic 仅支持对话类槽位，不能用于 embedding / 文生图 / 文生视频")
+
+
 def slot_modality(slot_key: str) -> str:
     return SLOT_MODALITY.get(slot_key, MODALITY_TEXT)
 
@@ -78,12 +101,40 @@ def is_custom(provider_type: str) -> bool:
     return (provider_type or "").strip().lower() == "custom"
 
 
+def _custom_api_root(base: str) -> str | None:
+    """自定义地址可派生 OpenAI 子路径时返回 API 根；否则 None（保持原样）。
+
+    可派生：
+    - 以 ``/vN`` 结尾（如 ``…/v1``）
+    - 以常见叶子结尾（``/chat/completions`` 等）→ 剥叶子后的根
+    """
+    b = (base or "").rstrip("/")
+    if not b:
+        return None
+    lower = b.lower()
+    for leaf in _CUSTOM_KNOWN_LEAVES:
+        if lower.endswith(leaf):
+            return b[: -len(leaf)].rstrip("/") or None
+    if _V_ROOT_RE.search(b):
+        return b
+    return None
+
+
 def endpoint_url(base_url: str, provider_type: str, suffix: str) -> str:
-    """OpenAI 兼容才补路径。自定义用用户填写的地址，不再改写成 OpenAI 路径。"""
+    """拼出最终请求 URL。
+
+    - OpenAI 兼容：``base + suffix``
+    - 自定义：若像 ``/vN`` 或常见叶子，则智能派生；否则原样使用填写地址
+    """
     base = (base_url or "").rstrip("/")
-    if is_custom(provider_type):
-        return base
     path = suffix if str(suffix).startswith("/") else f"/{suffix}"
+    if is_custom(provider_type):
+        if base.lower().endswith(path.lower()):
+            return base
+        root = _custom_api_root(base)
+        if root:
+            return root + path
+        return base
     return base + path
 
 

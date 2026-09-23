@@ -218,25 +218,32 @@ const TEXT_PROTOCOLS = [
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'custom', label: '自定义' },
 ]
+/** 图/视频云端不含 Anthropic（无对等接口） */
+const MEDIA_CLOUD_PROTOCOLS = [
+  { value: 'openai_compatible', label: 'OpenAI 兼容' },
+  { value: 'custom', label: '自定义' },
+]
 const LOCAL_PROTOCOL = { value: 'comfyui', label: 'ComfyUI（本地）' }
 const LEGACY_PROTOCOL_LABEL = {
   kling: '可灵',
   dashscope: '百炼',
   google: 'Google',
+  anthropic: 'Anthropic',
 }
 const PROTOCOLS_BY_MODALITY = {
   text: TEXT_PROTOCOLS,
-  image: [...TEXT_PROTOCOLS, LOCAL_PROTOCOL],
-  video: [...TEXT_PROTOCOLS, LOCAL_PROTOCOL],
+  image: [...MEDIA_CLOUD_PROTOCOLS, LOCAL_PROTOCOL],
+  video: [...MEDIA_CLOUD_PROTOCOLS, LOCAL_PROTOCOL],
 }
 function protocolsFor(modality, current) {
   const list = PROTOCOLS_BY_MODALITY[modality] || PROTOCOLS_BY_MODALITY.text
   if (
-    (current === 'kling' || current === 'dashscope' || current === 'google')
+    (current === 'kling' || current === 'dashscope' || current === 'google'
+      || current === 'anthropic')
     && !list.some((x) => x.value === current)
   ) {
-    // 旧记录仍可编辑展示；新建不再出现 Google / 可灵 / 百炼
-    if (current === 'google' || modality === 'video') {
+    // 旧记录仍可编辑展示；新建不再出现已下架协议
+    if (current === 'google' || current === 'anthropic' || modality === 'video') {
       return [...list, {
         value: current,
         label: LEGACY_PROTOCOL_LABEL[current] || current,
@@ -247,7 +254,12 @@ function protocolsFor(modality, current) {
 }
 function providersForSlot(slotKey) {
   const m = SLOT_MODALITY[slotKey] || 'text'
-  return providers.value.filter((p) => (p.modality || 'text') === m)
+  return providers.value.filter((p) => {
+    if ((p.modality || 'text') !== m) return false
+    // Anthropic 无 embedding 接口，槽位下拉不展示
+    if (slotKey === 'embedding' && p.provider_type === 'anthropic') return false
+    return true
+  })
 }
 function modalityLabel(m) {
   return { text: '文本', image: '图片', video: '视频' }[m] || m || '文本'
@@ -265,11 +277,27 @@ function providerPriceLabel(p) {
 function videoUrlPlaceholder(data) {
   if (data?.provider_type === 'dashscope') return 'https://dashscope.aliyuncs.com/api/v1'
   if (data?.provider_type === 'kling') return 'https://api-beijing.klingai.com'
+  if (data?.provider_type === 'custom') {
+    if (data?.modality === 'image') return 'https://api.openai.com/v1'
+    if (data?.modality === 'video') return 'https://example.com/v1/videos/generations'
+    return 'https://api.openai.com/v1'
+  }
+  if (data?.provider_type === 'openai_compatible') return 'https://api.openai.com/v1'
+  if (data?.provider_type === 'anthropic') return 'https://ark.cn-beijing.volces.com/api/plan'
   return ''
 }
 function videoUrlHint(data) {
   if (data?.provider_type === 'custom') {
-    return '按填写的地址原样请求，不会自动补路径'
+    if (data?.modality === 'image') {
+      return '推荐填到 /v1；系统会自动补 /images/generations。也可填完整生图地址（非标准路径则原样请求）'
+    }
+    if (data?.modality === 'video') {
+      return '按填写地址原样请求视频接口；非 OpenAI 风格路径不会自动改写'
+    }
+    return '推荐填到 /v1（自动补 chat/completions、embeddings）。若填完整 /chat/completions，embedding 会自动派生'
+  }
+  if (data?.provider_type === 'anthropic') {
+    return '仅用于对话类槽位；不要绑到 embedding / 文生图 / 文生视频'
   }
   if (data?.provider_type === 'dashscope') {
     return '百炼 API Key。地址用 https://dashscope.aliyuncs.com/api/v1'

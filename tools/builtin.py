@@ -6,7 +6,7 @@ shell_exec / web_fetch / calculator / datetime_now / generate_document /
 format_template_save
 - memory_search 只走第 1 层 Hybrid 预筛（不 LLM 精筛、不加载 detail）
 - file_write / shell_exec 直接执行（无确认环节，错了通过重新生成纠正）
-- generate_document 生成 Word/MD 文件供下载（落地 temp/exports，夜间链清理）
+- generate_document 生成 Word/MD/PPT/Excel/PDF 文件供下载（落地 temp/exports，夜间链清理）
 - format_template_save 提取附件文档格式骨架并存为高优先级记忆（场景级格式绑定）
 - 所有工具通过 register_builtins() 注入依赖后注册到 ToolRegistry
 """
@@ -297,10 +297,11 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
 
     async def generate_document(title: str, format: str = "docx",
                                 content: str = "") -> dict:
-        """生成 Word/Markdown/PPT/Excel 文档文件，落地 temp/exports，返回下载链接。"""
+        """生成 Word/Markdown/PPT/Excel/PDF 文档文件，落地 temp/exports，返回下载链接。"""
         from urllib.parse import quote
-        from .doc_export import (md_to_docx_bytes, md_to_pptx_bytes,
-                                 md_to_xlsx_bytes, sanitize_filename)
+        from .doc_export import (md_to_docx_bytes, md_to_pdf_bytes,
+                                 md_to_pptx_bytes, md_to_xlsx_bytes,
+                                 sanitize_filename)
         fmt = (format or "docx").lower().lstrip(".")
         if fmt == "markdown":
             fmt = "md"
@@ -308,8 +309,9 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             fmt = "pptx"
         elif fmt in ("excel", "xls"):
             fmt = "xlsx"
-        if fmt not in ("docx", "md", "pptx", "xlsx"):
-            raise ValueError(f"不支持的格式：{format}（仅 docx/md/pptx/xlsx）")
+        if fmt not in ("docx", "md", "pptx", "xlsx", "pdf"):
+            raise ValueError(
+                f"不支持的格式：{format}（仅 docx/md/pptx/xlsx/pdf）")
         if not (content or "").strip():
             raise ValueError("文档内容为空")
         exports = data_dir / "temp" / "exports"
@@ -326,6 +328,8 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                 p.write_bytes(md_to_pptx_bytes(content, safe))
             elif fmt == "xlsx":
                 p.write_bytes(md_to_xlsx_bytes(content, safe))
+            elif fmt == "pdf":
+                p.write_bytes(md_to_pdf_bytes(content, safe))
             else:
                 p.write_text(content, encoding="utf-8")
             return p.stat().st_size
@@ -877,15 +881,17 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
 
     registry.register_function(ToolSpec(
         "generate_document",
-        "生成文档文件（Word / Markdown / PPT / Excel）供用户下载。当用户要求把内容"
-        " 生成/导出为 word、docx、md、markdown、ppt、pptx、xlsx、excel 文档、报告、"
+        "生成文档文件（Word / Markdown / PPT / Excel / PDF）供用户下载。当用户要求把内容"
+        " 生成/导出为 word、docx、md、markdown、ppt、pptx、xlsx、excel、pdf 文档、报告、"
         " 演示文稿或表格文件时调用；只需提供 title（文档标题）与 format"
-        " （docx/md/pptx/xlsx，默认 docx），content 留空即可，将由本轮回复正文自动填充；"
+        " （docx/md/pptx/xlsx/pdf，默认 docx），content 留空即可，将由本轮回复正文自动填充；"
         " 返回的下载链接必须原样出现在回复中",
         {"type": "object", "properties": {
             "title": {"type": "string", "description": "文档标题，用作文件名"},
-            "format": {"type": "string", "enum": ["docx", "md", "pptx", "xlsx"],
-                       "description": "文件格式：docx=Word 文档（默认）；md=Markdown；pptx=PPT 演示文稿；xlsx=Excel 表格"},
+            "format": {"type": "string",
+                       "enum": ["docx", "md", "pptx", "xlsx", "pdf"],
+                       "description": "文件格式：docx=Word（默认）；md=Markdown；"
+                                      "pptx=PPT；xlsx=Excel；pdf=PDF"},
             "content": {"type": "string", "description": "文档正文（可选，留空则由回复正文自动填充）"}},
          # content 不强制必填：长文档正文由主回复延迟填充（与 file_write 一致），
          # 避免 tool_infer 阶段因填不出长正文而被 validate_params 硬拒

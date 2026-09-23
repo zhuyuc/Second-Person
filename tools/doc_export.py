@@ -1,11 +1,12 @@
 """
-文档导出 —— Markdown → DOCX / MD 字节流生成（零新增依赖）。
+文档导出 —— Markdown → DOCX / PPTX / XLSX / PDF 字节流生成。
 
 - 管线：markdown 库（tables/fenced_code 扩展）→ HTML → BeautifulSoup 遍历
-  → python-docx 渲染，全部为项目既有依赖。
+  → 各格式渲染器（python-docx / python-pptx / openpyxl / reportlab）。
 - 覆盖语法：h1-h6 / 段落 / 加粗 / 斜体 / 删除线 / 行内代码 / 链接 / 图片占位
   / 有序无序嵌套列表 / 围栏代码块（灰底等宽）/ 引用块 / 表格 / 分隔线。
-- CPU 密集（大文档解析+构建 XML），调用方必须经 asyncio.to_thread 执行，
+- PDF 需嵌入 CJK 字体（系统雅黑 / Noto 等，可用环境变量 SECOND_PERSON_PDF_FONT 覆盖）。
+- CPU 密集（大文档解析+构建），调用方必须经 asyncio.to_thread 执行，
   禁止在事件循环上直接调用（对话零阻塞架构铁律）。
 """
 from __future__ import annotations
@@ -771,4 +772,329 @@ def md_to_xlsx_bytes(md_text: str, title: str | None = None) -> bytes:
 
     buf = io.BytesIO()
     wb.save(buf)
+    return buf.getvalue()
+
+
+# ---- PDF（ReportLab）-------------------------------------------------------
+_PDF_FONT_ENV = "SECOND_PERSON_PDF_FONT"
+_PDF_MAX_TABLE_COLS = 8
+# (normal_path, bold_path_or_None, subfontIndex)
+_PDF_FONT_CANDIDATES: list[tuple[str, str | None, int]] = [
+    (r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyhbd.ttc", 0),
+    (r"C:\Windows\Fonts\simhei.ttf", None, 0),
+    (r"C:\Windows\Fonts\simsun.ttc", None, 0),
+    ("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+     "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 0),
+    ("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+     "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc", 0),
+    ("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc", None, 0),
+    ("/System/Library/Fonts/PingFang.ttc", None, 0),
+    ("/System/Library/Fonts/STHeiti Light.ttc", None, 0),
+]
+_PDF_FONT_FAMILY = "SPCJK"
+_pdf_fonts_ready = False
+
+
+def _pdf_escape(text: str) -> str:
+    return (text or "").replace("&", "&amp;").replace(
+        "<", "&lt;").replace(">", "&gt;")
+
+
+def _ensure_pdf_fonts() -> str:
+    """注册 CJK 字体族，返回 Paragraph 可用的 fontName。只跑一次。"""
+    global _pdf_fonts_ready
+    if _pdf_fonts_ready:
+        return _PDF_FONT_FAMILY
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+    except ImportError:
+        raise RuntimeError(
+            "PDF 导出功能不可用：缺少 reportlab 依赖，安装后重试") from None
+
+    from pathlib import Path
+    import os
+
+    candidates: list[tuple[str, str | None, int]] = []
+    env = (os.environ.get(_PDF_FONT_ENV) or "").strip()
+    if env:
+        candidates.append((env, None, 0))
+    bundled = Path(__file__).resolve().parent / "fonts"
+    for name in ("NotoSansSC-Regular.otf", "NotoSansSC-Regular.ttf",
+                 "SourceHanSansSC-Regular.otf"):
+        p = bundled / name
+        if p.is_file():
+            bold = None
+            for bname in ("NotoSansSC-Bold.otf", "NotoSansSC-Bold.ttf",
+                          "SourceHanSansSC-Bold.otf"):
+                bp = bundled / bname
+                if bp.is_file():
+                    bold = str(bp)
+                    break
+            candidates.append((str(p), bold, 0))
+            break
+    candidates.extend(_PDF_FONT_CANDIDATES)
+
+    last_err: Exception | None = None
+    for normal, bold, idx in candidates:
+        if not Path(normal).is_file():
+            continue
+        try:
+            pdfmetrics.registerFont(
+                TTFont(f"{_PDF_FONT_FAMILY}", normal, subfontIndex=idx))
+            bold_name = f"{_PDF_FONT_FAMILY}"
+            if bold and Path(bold).is_file():
+                pdfmetrics.registerFont(
+                    TTFont(f"{_PDF_FONT_FAMILY}-Bold", bold,
+                           subfontIndex=idx))
+                bold_name = f"{_PDF_FONT_FAMILY}-Bold"
+            pdfmetrics.registerFontFamily(
+                _PDF_FONT_FAMILY,
+                normal=_PDF_FONT_FAMILY,
+                bold=bold_name,
+                italic=_PDF_FONT_FAMILY,
+                boldItalic=bold_name)
+            _pdf_fonts_ready = True
+            return _PDF_FONT_FAMILY
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            continue
+    detail = f"：{last_err}" if last_err else ""
+    raise RuntimeError(
+        "PDF 导出需要可嵌入的中文字体。请安装微软雅黑 / Noto Sans CJK，"
+        f"或设置环境变量 {_PDF_FONT_ENV} 指向 TTF/OTF/TTC 路径{detail}"
+    ) from last_err
+
+
+def _pdf_inline(nodes, bold=False, italic=False, strike=False,
+                code=False) -> str:
+    """BeautifulSoup 行内节点 → ReportLab Paragraph 富文本片段。"""
+    parts: list[str] = []
+    for node in nodes:
+        name = getattr(node, "name", None)
+        if name is None:
+            text = _pdf_escape(str(node))
+            if not text:
+                continue
+            if code:
+                text = f'<font face="Courier" size="9">{text}</font>'
+                text = f'<font backColor="#F2F3F5">{text}</font>'
+            if strike:
+                text = f"<strike>{text}</strike>"
+            if bold:
+                text = f"<b>{text}</b>"
+            if italic:
+                text = f"<i>{text}</i>"
+            parts.append(text)
+        elif name in ("strong", "b"):
+            parts.append(_pdf_inline(node.children, True, italic, strike, code))
+        elif name in ("em", "i"):
+            parts.append(_pdf_inline(node.children, bold, True, strike, code))
+        elif name in ("del", "s", "strike"):
+            parts.append(_pdf_inline(node.children, bold, italic, True, code))
+        elif name == "code":
+            parts.append(_pdf_inline(node.children, bold, italic, strike, True))
+        elif name == "a":
+            href = _pdf_escape(node.get("href") or "")
+            label = _pdf_escape(node.get_text() or node.get("href") or "")
+            if href:
+                parts.append(
+                    f'<link href="{href}" color="#{_LINK_COLOR}">'
+                    f"<u>{label}</u></link>")
+            else:
+                parts.append(label)
+        elif name == "img":
+            alt = node.get("alt") or node.get("src") or ""
+            parts.append(f"<i>{_pdf_escape(f'[图片: {alt}]')}</i>")
+        elif name == "br":
+            parts.append("<br/>")
+        else:
+            parts.append(
+                _pdf_inline(node.children, bold, italic, strike, code))
+    return "".join(parts)
+
+
+def _pdf_styles(font: str) -> dict:
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.colors import HexColor
+    return {
+        "body": ParagraphStyle(
+            "sp_body", fontName=font, fontSize=11, leading=16),
+        "h1": ParagraphStyle(
+            "sp_h1", fontName=font, fontSize=18, leading=24,
+            spaceBefore=12, spaceAfter=8),
+        "h2": ParagraphStyle(
+            "sp_h2", fontName=font, fontSize=14, leading=20,
+            spaceBefore=10, spaceAfter=6),
+        "h3": ParagraphStyle(
+            "sp_h3", fontName=font, fontSize=12, leading=17,
+            spaceBefore=8, spaceAfter=4),
+        "h4": ParagraphStyle(
+            "sp_h4", fontName=font, fontSize=11, leading=15,
+            spaceBefore=6, spaceAfter=3),
+        "code": ParagraphStyle(
+            "sp_code", fontName=font, fontSize=9, leading=12,
+            backColor=HexColor(f"#{_CODE_BG}"),
+            leftIndent=6, rightIndent=6, spaceBefore=4, spaceAfter=4),
+        "quote": ParagraphStyle(
+            "sp_quote", fontName=font, fontSize=10, leading=14,
+            textColor=HexColor(f"#{_QUOTE_COLOR}"),
+            leftIndent=12, spaceBefore=4, spaceAfter=4),
+        "cell": ParagraphStyle(
+            "sp_cell", fontName=font, fontSize=9, leading=12),
+    }
+
+
+def md_to_pdf_bytes(md_text: str, title: str | None = None) -> bytes:
+    """Markdown 文本 → PDF 文件字节。CPU 密集，须在工作线程调用。
+
+    reportlab 未安装或找不到中文字体时抛 RuntimeError（中文提示）。
+    """
+    try:
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            Preformatted, HRFlowable, KeepTogether)
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm
+        from reportlab.lib.colors import HexColor, black
+    except ImportError:
+        raise RuntimeError(
+            "PDF 导出功能不可用：缺少 reportlab 依赖，安装后重试") from None
+
+    import markdown
+    from bs4 import BeautifulSoup
+
+    font = _ensure_pdf_fonts()
+    styles = _pdf_styles(font)
+    html = markdown.markdown(
+        md_text or "", extensions=["tables", "fenced_code", "sane_lists"])
+    soup = BeautifulSoup(html, "html.parser")
+
+    story: list = []
+    if title:
+        story.append(Paragraph(_pdf_escape(title), styles["h1"]))
+        story.append(Spacer(1, 4 * mm))
+
+    def _para(text_html: str, style_key: str = "body"):
+        if not (text_html or "").strip():
+            return
+        story.append(Paragraph(text_html, styles[style_key]))
+
+    def _render_list(el, ordered: bool, level: int = 0) -> None:
+        from reportlab.lib.styles import ParagraphStyle as PS
+        for i, li in enumerate(el.find_all("li", recursive=False), 1):
+            nested = []
+            inline = []
+            for child in li.children:
+                if getattr(child, "name", None) in ("ul", "ol"):
+                    nested.append(child)
+                elif getattr(child, "name", None) == "p":
+                    inline.extend(list(child.children))
+                else:
+                    inline.append(child)
+            prefix = f"{i}. " if ordered else "- "
+            body = _pdf_inline(inline)
+            indent = 12 * (level + 1)
+            li_style = PS(
+                f"sp_li_{level}_{i}",
+                parent=styles["body"], leftIndent=indent,
+                firstLineIndent=-10, bulletIndent=indent - 10)
+            story.append(Paragraph(
+                f"{_pdf_escape(prefix)}{body}", li_style))
+            for sub in nested:
+                _render_list(sub, ordered=(sub.name == "ol"), level=level + 1)
+
+    def _render_table(el) -> None:
+        rows_el = el.find_all("tr")
+        if not rows_el:
+            return
+        data = []
+        for ri, tr in enumerate(rows_el):
+            cells = tr.find_all(["th", "td"])
+            if len(cells) > _PDF_MAX_TABLE_COLS:
+                cells = cells[:_PDF_MAX_TABLE_COLS]
+            row = []
+            for cell in cells:
+                txt = _pdf_inline(cell.children) or _pdf_escape(
+                    cell.get_text(" ", strip=True))
+                row.append(Paragraph(txt or " ", styles["cell"]))
+            data.append(row)
+        if not data:
+            return
+        ncols = max(len(r) for r in data)
+        for r in data:
+            while len(r) < ncols:
+                r.append(Paragraph(" ", styles["cell"]))
+        avail = A4[0] - 40 * mm
+        col_w = avail / ncols
+        tbl = Table(data, colWidths=[col_w] * ncols, repeatRows=1)
+        tbl.setStyle(TableStyle([
+            ("FONTNAME", (0, 0), (-1, -1), font),
+            ("FONTSIZE", (0, 0), (-1, -1), 9),
+            ("BACKGROUND", (0, 0), (-1, 0), HexColor("#F2F3F5")),
+            ("TEXTCOLOR", (0, 0), (-1, -1), black),
+            ("GRID", (0, 0), (-1, -1), 0.4, HexColor("#CCCCCC")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]))
+        story.append(KeepTogether([tbl, Spacer(1, 3 * mm)]))
+        if any(len(tr.find_all(["th", "td"])) > _PDF_MAX_TABLE_COLS
+               for tr in rows_el):
+            story.append(Paragraph(
+                _pdf_escape(f"（表格列已截断至 {_PDF_MAX_TABLE_COLS} 列）"),
+                styles["quote"]))
+
+    def _render_block(el, quote: bool = False) -> None:
+        name = getattr(el, "name", None)
+        if name is None:
+            text = str(el).strip()
+            if text:
+                _para(_pdf_escape(text), "quote" if quote else "body")
+            return
+        if name in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            level = min(int(name[1]), 4)
+            key = f"h{level}"
+            text = el.get_text(strip=True)
+            if title and name == "h1" and text == title:
+                return  # 避免与文档标题重复
+            _para(_pdf_escape(text), key)
+        elif name == "p":
+            _para(_pdf_inline(el.children), "quote" if quote else "body")
+        elif name in ("ul", "ol"):
+            _render_list(el, ordered=(name == "ol"))
+        elif name == "pre":
+            code = (el.find("code") or el).get_text()
+            story.append(Preformatted(
+                code.rstrip("\n") or " ", styles["code"]))
+        elif name == "blockquote":
+            for child in el.children:
+                if getattr(child, "name", None):
+                    _render_block(child, quote=True)
+        elif name == "table":
+            _render_table(el)
+        elif name == "hr":
+            story.append(HRFlowable(
+                width="100%", thickness=0.5, color=HexColor("#CCCCCC"),
+                spaceBefore=6, spaceAfter=6))
+        else:
+            text = el.get_text(strip=True)
+            if text:
+                _para(_pdf_escape(text), "quote" if quote else "body")
+
+    for el in soup.children:
+        _render_block(el)
+
+    if not story:
+        story.append(Paragraph(_pdf_escape(title or "（空文档）"), styles["body"]))
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=20 * mm, rightMargin=20 * mm,
+        topMargin=18 * mm, bottomMargin=18 * mm,
+        title=title or "导出文档")
+    doc.build(story)
     return buf.getvalue()

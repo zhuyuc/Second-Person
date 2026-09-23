@@ -29,7 +29,10 @@ function codeBlock(src, language) {
 
 function fileCard(href, text) {
   const ext = (href.split('.').pop() || '').toLowerCase()
-  const icon = ext === 'docx' ? 'ti-file-word' : ext === 'md' ? 'ti-markdown' : 'ti-file-download'
+  const icon = ext === 'docx' ? 'ti-file-word'
+    : ext === 'md' ? 'ti-markdown'
+    : ext === 'pdf' ? 'ti-file'
+    : 'ti-file-download'
   const name = String(text || '文件').replace(/&/g, '&amp;').replace(/</g, '&lt;')
   return `<a class="file-card" href="${href}" download><i class="ti ${icon} file-card-icon"></i><span class="file-card-name">${name}</span><span class="file-card-dl"><i class="ti ti-download"></i> 下载</span></a>`
 }
