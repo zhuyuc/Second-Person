@@ -130,6 +130,11 @@ REFINE_FAST_PATH_GAP_MIN_SCORE = 0.75
 # ---- 待确认记忆频次（收敛自 agent/core.py 硬编码 UX 规则）-----------------
 # 用户消息 < 该字符数时不追加「待确认记忆」块（避免打扰"你好"这种寒暄）
 LOW_CONFIRM_MIN_MSG_CHARS = 6
+# 候选池大小；按与本轮消息相关分排序后取最高
+LOW_CONFIRM_CANDIDATE_POOL = 5
+# Jaccard 相关分门槛（high 可织入；weak 仅闲聊收尾）
+LOW_CONFIRM_RELEVANCE_HIGH = 0.10
+LOW_CONFIRM_RELEVANCE_WEAK = 0.04
 
 # ---- 时效感知（CFG-E 合并 3 个多少天为 memory_horizon_days）------------
 # 用户可拧 memory_horizon_days（默认 90）；下面三个下游派生

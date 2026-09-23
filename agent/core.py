@@ -563,11 +563,9 @@ class AgentCore:
 
     def _should_ask_low_confirm(self, sid: str,
                                 user_message: str | None) -> bool:
-        """Δ9：低置信记忆确认追问的频次门。
+        """兼容旧测试/调用：仅会话名额 + 极短消息门。
 
-        - 同一会话至多问一次（内存 set，重启后重置——DB 层面还有 7 天节流）
-        - 用户消息 < LOW_CONFIRM_MIN_MSG_CHARS 且不含问号 → 不追加
-          （避免"你好"这种寒暄场景被强插确认提示）
+        场景/相关性门控已迁至 memory.low_confirm_policy.try_build_low_confirm_constraint。
         """
         if sid in self._low_confirm_asked_sessions:
             return False
@@ -580,6 +578,47 @@ class AgentCore:
         if len(msg) < min_chars and "?" not in msg and "？" not in msg:
             return False
         return True
+
+    def _try_append_low_confirm(
+        self, *,
+        sid: str,
+        user_message: str | None,
+        pulse: dict | None,
+        active_action: str | None,
+        constraints_parts: list[str],
+    ) -> None:
+        """相关才问；仅成功注入时 mark + 记会话名额。"""
+        if not self.lifecycle:
+            return
+        if not self._should_ask_low_confirm(sid, user_message):
+            return
+        from memory.low_confirm_policy import try_build_low_confirm_constraint
+        from memory import _constants as _mem_const
+        candidates = []
+        try:
+            candidates = self.lifecycle.list_low_confirm_candidates()
+        except Exception:  # noqa: BLE001
+            logger.debug("读取 low_confirm 候选失败", exc_info=True)
+            return
+        min_chars = int(self.config.get(
+            "low_confirm_min_msg_chars", _mem_const.LOW_CONFIRM_MIN_MSG_CHARS))
+        text, candidate = try_build_low_confirm_constraint(
+            sid_already_asked=sid in self._low_confirm_asked_sessions,
+            user_message=user_message,
+            candidates=candidates,
+            pulse=pulse,
+            active_action=active_action,
+            min_msg_chars=min_chars,
+        )
+        if not text or not candidate:
+            return
+        constraints_parts.append(text)
+        try:
+            self.lifecycle.mark_low_confirm_asked(candidate["id"])
+        except Exception:  # noqa: BLE001
+            logger.debug("mark_low_confirm_asked 失败", exc_info=True)
+        self._pending_low_confirm = candidate
+        self._low_confirm_asked_sessions.add(sid)
 
     def get_turn(self, turn_id: str) -> dict | None:
         return self.turn_events.get_turn(turn_id)
@@ -728,27 +767,9 @@ class AgentCore:
             if hint:
                 constraints_parts.append(
                     "以下约束来自当前会话，回答时必须遵守：\n" + hint)
-            if self._should_ask_low_confirm(sid, user_message):
-                candidate = self.lifecycle.next_low_confirm_candidate()
-                if candidate:
-                    self.lifecycle.mark_low_confirm_asked(candidate["id"])
-                    self._pending_low_confirm = candidate
-                    self._low_confirm_asked_sessions.add(sid)
-                    constraints_parts.append(
-                        "本轮回复末尾请自然确认一条早前推断是否属实："
-                        f"{candidate['title']}——{candidate.get('summary') or ''}。"
-                        "无需输出 JSON。"
-                    )
-            try:
-                drafts = self.skills.list_drafts()
-                if drafts:
-                    names = "、".join(item.get("skill_name", "") for item in drafts[:2])
-                    constraints_parts.append(
-                        f"系统从最近工作模式提炼出 {len(drafts)} 个技能模板：{names}。"
-                        "合适时询问用户是否启用。"
-                    )
-            except Exception:  # noqa: BLE001
-                logger.debug("读取技能草稿失败", exc_info=True)
+            # 先情绪（寒暄/主动行为），再低置信确认——便于互斥 comfort_first
+            active_action: str | None = None
+            brief_social = False
             if self.mood and self.config.get("mood_enabled", True):
                 try:
                     from soul.mood_turn_policy import (
@@ -763,7 +784,6 @@ class AgentCore:
                     if brief_social:
                         constraints_parts.append(GREETING_EXPRESSION_CONSTRAINT)
                     elif self.mood_action_dispatcher:
-                        # 寒暄轮不注入主动行为；用户侧用融合展示态 D
                         display_user = self.mood.fuse_display_pulse(pulse)
                         ai_state = self.mood.get_decayed_ai_state()
                         state = {
@@ -780,11 +800,33 @@ class AgentCore:
                                 state, self._build_action_ctx(sid)))
                         if action_prompt:
                             constraints_parts.append(action_prompt)
+                            active_action = action_key
                             self.db.execute(
                                 "UPDATE mood_state SET active_action=? WHERE id=1",
                                 (action_key,))
                 except Exception:  # noqa: BLE001
                     logger.warning("情绪尾部注入失败（静默跳过）", exc_info=True)
+            if not brief_social:
+                try:
+                    self._try_append_low_confirm(
+                        sid=sid,
+                        user_message=user_message,
+                        pulse=pulse,
+                        active_action=active_action,
+                        constraints_parts=constraints_parts,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.debug("低置信确认注入失败（静默）", exc_info=True)
+            try:
+                drafts = self.skills.list_drafts()
+                if drafts:
+                    names = "、".join(item.get("skill_name", "") for item in drafts[:2])
+                    constraints_parts.append(
+                        f"系统从最近工作模式提炼出 {len(drafts)} 个技能模板：{names}。"
+                        "合适时询问用户是否启用。"
+                    )
+            except Exception:  # noqa: BLE001
+                logger.debug("读取技能草稿失败", exc_info=True)
 
         try:
             providers = getattr(self, "providers", None)

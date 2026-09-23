@@ -150,19 +150,29 @@ class LifecycleManager:
             await self._submit_update(doc, "low 确认被否认")
         return False
 
-    def next_low_confirm_candidate(self) -> dict | None:
-        """取一条待对话确认的 low 记忆（超 30 天未确认且 7 天内未问过）。"""
+    def list_low_confirm_candidates(self, limit: int | None = None) -> list[dict]:
+        """待确认 low 记忆小池（超 30 天未确认且 7 天内未问过），供相关分排序。"""
+        from memory import _constants as _mem
+        pool = int(limit if limit is not None else _mem.LOW_CONFIRM_CANDIDATE_POOL)
+        pool = max(1, min(20, pool))
         created_cutoff = (now_cst() - timedelta(days=30)
                           ).isoformat(timespec="seconds")
         asked_cutoff = (now_cst() - timedelta(days=7)
                         ).isoformat(timespec="seconds")
-        row = self.db.query_one(
-            "SELECT id, title, summary FROM memories WHERE confidence='low' "
+        rows = self.db.query_all(
+            "SELECT id, title, summary, domain FROM memories "
+            "WHERE confidence='low' "
             "AND lifecycle IN ('active','stable','stale') "
             "AND (created_at < ? OR created_at IS NULL) "
             "AND (low_confirm_asked_at IS NULL OR low_confirm_asked_at < ?) "
-            "ORDER BY created_at LIMIT 1", (created_cutoff, asked_cutoff))
-        return dict(row) if row else None
+            "ORDER BY created_at LIMIT ?",
+            (created_cutoff, asked_cutoff, pool))
+        return [dict(r) for r in (rows or [])]
+
+    def next_low_confirm_candidate(self) -> dict | None:
+        """兼容旧调用：返回池中最旧一条（无相关分）。新路径请用 list + policy。"""
+        rows = self.list_low_confirm_candidates(limit=1)
+        return rows[0] if rows else None
 
     def mark_low_confirm_asked(self, mid: str) -> None:
         self.db.execute(
