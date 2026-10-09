@@ -252,14 +252,18 @@ export function useChatStream(deps) {
             it.progress_stage = stage
             const log = Array.isArray(it.progress_log) ? it.progress_log.slice() : []
             const last = log[log.length - 1]
-            if (!last || last.label !== label || last.stage !== stage) {
+            // 同 stage 覆盖最后一条（如「已等待 Ns」），阶段切换才追加
+            if (last && (last.stage || '') === stage) {
+              last.label = label
+              last.at = Date.now()
+              it.progress_log = log
+            } else if (!last || last.label !== label || last.stage !== stage) {
               log.push({
                 stage,
                 label,
                 at: Date.now(),
               })
-              // 保留最近若干阶段，避免长任务撑爆时间线
-              it.progress_log = log.slice(-12)
+              it.progress_log = log.slice(-16)
             }
             break
           }
@@ -344,6 +348,49 @@ export function useChatStream(deps) {
     thinkOpen.value = true
   }
 
+  /** 把 live timeline 上的生图/生视频 progress_log 合并进落库/展示用 meta */
+  function mergeMediaProgressIntoMeta(meta, liveItems) {
+    if (!meta || typeof meta !== 'object') return meta
+    const liveTools = (Array.isArray(liveItems) ? liveItems : []).filter(
+      (it) =>
+        it?.kind === 'tool_call' &&
+        (it.name === 'generate_image' || it.name === 'generate_video') &&
+        Array.isArray(it.progress_log) &&
+        it.progress_log.length
+    )
+    if (!liveTools.length) return meta
+    const tl = Array.isArray(meta.timeline) ? meta.timeline.map((x) => ({ ...x })) : []
+    for (const live of liveTools) {
+      let hit = null
+      if (live.call_id) {
+        hit = tl.find(
+          (it) =>
+            it.kind === 'tool_call' &&
+            it.call_id === live.call_id &&
+            it.name === live.name
+        )
+      }
+      if (!hit) {
+        for (let i = tl.length - 1; i >= 0; i--) {
+          const it = tl[i]
+          if (it.kind === 'tool_call' && it.name === live.name) {
+            hit = it
+            break
+          }
+        }
+      }
+      if (!hit) continue
+      if (!Array.isArray(hit.progress_log) || !hit.progress_log.length) {
+        hit.progress_log = live.progress_log.map((p) => ({ ...p }))
+      }
+      if (live.progress && !hit.progress) hit.progress = live.progress
+      if (live.progress_stage && !hit.progress_stage) {
+        hit.progress_stage = live.progress_stage
+      }
+    }
+    return { ...meta, timeline: tl }
+  }
+
   function finishStream(msgId) {
     commitPendingToBody()
     flushStreamText()
@@ -360,6 +407,15 @@ export function useChatStream(deps) {
       sameSession
     ) {
       const body = stripTail(streamText.value, streamVisuals.value)
+      const baseMeta = streamAnalysisMetadata || {
+        schema_version: 'agent-analysis-v1',
+        reasoning_text: reasoningText.value,
+        system_progress: thinkText.value,
+        decision_notices: decisionNotices.value,
+        tool_events: toolEvents.value,
+        reasoning_available: !!reasoningText.value,
+        timeline: [...timeline.value],
+      }
       messages.value.push({
         id: msgId,
         role: 'assistant',
@@ -369,15 +425,7 @@ export function useChatStream(deps) {
         create_time: nowLocalIso(),
         thinking: thinkText.value || '',
         thinkOpen: false,
-        analysis_metadata: streamAnalysisMetadata || {
-          schema_version: 'agent-analysis-v1',
-          reasoning_text: reasoningText.value,
-          system_progress: thinkText.value,
-          decision_notices: decisionNotices.value,
-          tool_events: toolEvents.value,
-          reasoning_available: !!reasoningText.value,
-          timeline: [...timeline.value],
-        },
+        analysis_metadata: mergeMediaProgressIntoMeta(baseMeta, timeline.value),
         visuals: streamVisuals.value.length ? [...streamVisuals.value] : undefined,
       })
     }

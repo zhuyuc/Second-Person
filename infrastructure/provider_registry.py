@@ -95,8 +95,9 @@ TASK_SLOTS: dict[str, TaskSlot] = {
     "mood_fast": TaskSlot(
         key="mood_fast",
         label="情绪快路径模型",
-        desc="回复前对本句用户情绪做极简 JSON 判定（mood/intensity/confidence）。"
-             "推荐配快速 Flash/lite；关思考仅作用于该次调用，不改本槽或其它槽默认。"
+        desc="回复前对本句用户情绪做七情判定（喜怒哀惧爱恶欲 + 强度/置信度）。"
+             "可绑本地 System One（jev-style）或快速 Flash/lite；"
+             "槽位选啥走啥。关思考仅作用于 chat 路径单次调用。"
              "未配置时回退系统 Agent → 对话模型。",
         fallback=("agent", "chat"),
         lightweight=True,
@@ -299,6 +300,8 @@ def ensure_slot_assignments(registry: ProviderRegistry) -> list[str]:
     仅补齐缺失，绝不覆盖用户已有配置；补齐后槽位在设置页可见、可审计、可修改。
     返回本次补齐的槽位清单（无补齐时为空）。"""
     filled = []
+    # System One 优先于 mood_fast 的 agent→chat 回退（本地引擎就绪时）
+    filled.extend(ensure_mood_fast_system_one_assignment(registry))
     for slot in TASK_SLOTS.values():
         if registry.assignment(slot.key):
             continue
@@ -317,6 +320,83 @@ def ensure_slot_assignments(registry: ProviderRegistry) -> list[str]:
 
 _DEFAULT_VIDEO_MODEL_ID = "wan2.1_t2v_1.3B_fp16.safetensors"
 _DEFAULT_COMFYUI_URL = "http://127.0.0.1:8188"
+_DEFAULT_SYSTEM_ONE_URL = "http://127.0.0.1:8765"
+_DEFAULT_SYSTEM_ONE_MODEL = "0.8b"
+
+
+def _system_one_exe_ready() -> bool:
+    """本地 jev-style 是否已 setup（有可执行文件）。"""
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parent.parent
+    if sys.platform.startswith("win"):
+        exe = root / "system_one" / "venv" / "Scripts" / "jev-style.exe"
+    else:
+        exe = root / "system_one" / "venv" / "bin" / "jev-style"
+    return exe.is_file()
+
+
+def ensure_mood_fast_system_one_assignment(
+    registry: ProviderRegistry, *, force_bind: bool = False,
+) -> list[str]:
+    """启动时幂等：创建本地 System One Provider，并在 mood_fast 未绑定时绑定。
+
+    - 未安装 system_one/venv（无 jev-style）时跳过
+    - 已有 system_one Provider 则复用，不重复创建
+    - mood_fast 已有绑定且 force_bind=False：不覆盖（仅保证 Provider 存在）
+    - force_bind=True（setup 脚本）：强制把 mood_fast 指到 System One
+    """
+    if not _system_one_exe_ready():
+        return []
+    if "mood_fast" not in TASK_SLOTS:
+        return []
+
+    providers = registry.list_providers()
+    existing = [
+        p for p in providers
+        if (p.get("provider_type") or "").strip().lower() == "system_one"
+    ]
+    filled: list[str] = []
+    if existing:
+        pid = existing[0]["id"]
+    else:
+        seq = registry.next_provider_seq()
+        pid = f"prov_{seq:03d}"
+        try:
+            registry.add_provider(
+                pid=pid,
+                display_name="jev-style System One（情绪）",
+                provider_type="system_one",
+                base_url=_DEFAULT_SYSTEM_ONE_URL,
+                model_id=_DEFAULT_SYSTEM_ONE_MODEL,
+                api_key="local",
+                input_price=None,
+                output_price=None,
+                context_window=25600,
+                modality="text",
+            )
+            logger.warning(
+                "已自动创建 System One Provider %s（%s @ %s）",
+                pid, _DEFAULT_SYSTEM_ONE_MODEL, _DEFAULT_SYSTEM_ONE_URL)
+            filled.append("mood_fast_provider")
+        except Exception:  # noqa: BLE001
+            logger.warning("自动创建 System One Provider 失败", exc_info=True)
+            return []
+
+    cur = registry.assignment("mood_fast")
+    if cur and not force_bind:
+        return filled
+    if cur == pid:
+        return filled
+    try:
+        registry.set_assignment("mood_fast", pid)
+        logger.warning(
+            "槽位 mood_fast 已自动绑定 System One Provider %s（%s）",
+            pid, _DEFAULT_SYSTEM_ONE_MODEL)
+        filled.append("mood_fast")
+    except Exception:  # noqa: BLE001
+        logger.warning("自动绑定 mood_fast → System One 失败", exc_info=True)
+    return filled
 
 
 def ensure_video_gen_assignment(registry: ProviderRegistry) -> list[str]:

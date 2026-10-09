@@ -28,6 +28,7 @@ from .types import (
     VideoGenRequest,
     VideoGenResult,
 )
+from .volcengine_adapter import VolcengineVideoAdapter
 
 __all__ = [
     "ALLOWED_SIZES",
@@ -38,6 +39,7 @@ __all__ = [
     "MIN_DURATION_SEC",
     "ComfyUIVideoAdapter",
     "KlingVideoAdapter",
+    "VolcengineVideoAdapter",
     "VideoGenRequest",
     "VideoGenResult",
     "aspect_ratio_of",

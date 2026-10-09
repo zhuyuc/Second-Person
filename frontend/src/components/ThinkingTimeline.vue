@@ -179,7 +179,10 @@ function progressStageLabel(stage) {
     refining: '润色',
     refined: '润色完成',
     queued: '排队',
+    submit: '提交',
     sampling: '采样',
+    waiting: '等待',
+    downloading: '下载',
     saving: '保存',
     done: '完成',
   }

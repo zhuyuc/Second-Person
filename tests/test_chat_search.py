@@ -134,6 +134,28 @@ def test_search_empty_and_no_hit(tmp_path: Path):
         db.close()
 
 
+def test_search_short_cjk_falls_back_to_like(tmp_path: Path):
+    """trigram 对 <3 字 MATCH 恒空；短中文「全部」须 LIKE 回退到消息命中。"""
+    store, db = _mk_store(tmp_path)
+    try:
+        sid = store.create_session()
+        store.rename(sid, "寒暄")
+        store.append_message(sid, "user", "你好，今天天气怎么样")
+        store.append_message(sid, "assistant", "你好！今天晴朗适合出门")
+        r = store.search_conversations("你好", scope="all")
+        assert r["total_sessions"] >= 1
+        row = next(s for s in r["sessions"] if s["session_id"] == sid)
+        assert row["hit_count"] >= 1
+        assert row["hits"], "短中文应有消息 snippet，不能只剩标题命中"
+        assert any("<mark>你好</mark>" in (h.get("snippet_html") or "")
+                   for h in row["hits"])
+        r_user = store.search_conversations("你好", scope="user")
+        assert all(h["role"] == "user"
+                   for s in r_user["sessions"] for h in s["hits"])
+    finally:
+        db.close()
+
+
 def test_list_sessions_keyword_regression(tmp_path: Path):
     """回归 list_sessions(keyword=...) 里 self._fts 缺失导致 AttributeError 的 bug。"""
     store, db = _mk_store(tmp_path)

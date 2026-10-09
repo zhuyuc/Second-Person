@@ -11,6 +11,7 @@ from .dashscope_adapter import DashScopeVideoAdapter
 from .google_adapter import GoogleVideoAdapter
 from .openai_adapter import OpenAIVideoAdapter
 from .profiles import video_profile_for
+from .volcengine_adapter import VolcengineVideoAdapter
 
 
 def get_video_adapter(snap, config, data_dir: Path):
@@ -19,7 +20,8 @@ def get_video_adapter(snap, config, data_dir: Path):
     if ptype == "comfyui":
         wf = Path(config.get_raw(
             "video_gen_comfyui_workflow",
-            "./workflows/wan21_t2v_1.3b.json") or "./workflows/wan21_t2v_1.3b.json")
+            "./workflows/wan21_t2v_1_3b_lossless.json"
+        ) or "./workflows/wan21_t2v_1_3b_lossless.json")
         if not wf.is_absolute():
             wf = (Path(data_dir).parent / wf).resolve()
         fps = int(config.get("video_gen_fps", 16) or 16)
@@ -34,6 +36,10 @@ def get_video_adapter(snap, config, data_dir: Path):
             fps=fps,
             prompt_max_chars=int(
                 config.get("video_gen_prompt_max_chars", 1500) or 1500),
+            quality_mode=str(
+                config.get("comfyui_quality_mode", "lossless") or "lossless"),
+            t5_on_cpu=bool(config.get("video_gen_t5_on_cpu", True)),
+            block_swap=int(config.get("video_gen_block_swap", 0) or 0),
         )
     common = dict(
         base_url=snap.base_url or "",
@@ -46,6 +52,8 @@ def get_video_adapter(snap, config, data_dir: Path):
         return KlingVideoAdapter(**common)
     if ptype == "dashscope":
         return DashScopeVideoAdapter(**common)
+    if ptype == "volcengine":
+        return VolcengineVideoAdapter(**common)
     if ptype == "custom":
         return CustomVideoAdapter(**common)
     if ptype == "openai_compatible":
@@ -56,4 +64,4 @@ def get_video_adapter(snap, config, data_dir: Path):
         return AnthropicVideoAdapter(**common)
     raise RuntimeError(
         f"文生视频不支持协议 {ptype or '（空）'}，"
-        "请选择 OpenAI 兼容、自定义或本地 ComfyUI")
+        "请选择可灵 / 百炼 / 火山 / OpenAI 兼容 / 自定义或本地 ComfyUI")

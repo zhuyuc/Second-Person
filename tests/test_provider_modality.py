@@ -77,10 +77,11 @@ def test_anthropic_messages_url_and_headers():
     assert "custom" in protocols_for("text")
     assert "google" not in protocols_for("text")
     assert protocols_for("image") == frozenset({
-        "openai_compatible", "custom", "comfyui"})
+        "openai_compatible", "custom", "comfyui",
+        "kling", "dashscope", "volcengine"})
     assert protocols_for("video") == frozenset({
         "openai_compatible", "custom", "comfyui",
-        "kling", "dashscope"})
+        "kling", "dashscope", "volcengine"})
     assert "comfyui" not in protocols_for("text")
     assert "anthropic" not in protocols_for("image")
     assert "anthropic" not in protocols_for("video")
@@ -94,10 +95,14 @@ def test_validate_combo_follows_text_protocol_split():
     validate_combo("image", "openai_compatible")
     validate_combo("image", "custom")
     validate_combo("image", "comfyui")
+    validate_combo("image", "kling")
+    validate_combo("image", "dashscope")
+    validate_combo("image", "volcengine")
     validate_combo("video", "openai_compatible")
     validate_combo("video", "custom")
     validate_combo("video", "kling")
     validate_combo("video", "dashscope")
+    validate_combo("video", "volcengine")
     validate_combo("video", "comfyui")
     with pytest.raises(ValueError, match="不支持协议"):
         validate_combo("text", "comfyui")
@@ -127,6 +132,19 @@ def test_validate_slot_provider_blocks_anthropic_non_chat():
         validate_slot_provider("video_gen", "anthropic")
 
 
+def test_system_one_protocol_mood_fast_only():
+    from infrastructure.provider_modality import (
+        protocols_for, validate_combo, validate_slot_provider,
+    )
+    assert "system_one" in protocols_for("text")
+    validate_combo("text", "system_one")
+    validate_slot_provider("mood_fast", "system_one")
+    with pytest.raises(ValueError, match="System One"):
+        validate_slot_provider("chat", "system_one")
+    with pytest.raises(ValueError, match="System One"):
+        validate_slot_provider("agent", "system_one")
+
+
 def test_validate_provider_accepts_kling_protocol():
     from app.services.settings_service import SettingsService
     body = {
@@ -147,6 +165,10 @@ def test_infer_modality_comfyui_wan():
     assert infer_modality("comfyui", "sd_xl_base_1.0.safetensors") == "image"
     assert infer_modality("kling", "kling-3.0-turbo") == "video"
     assert infer_modality("dashscope", "wan2.6-t2v") == "video"
+    assert infer_modality("volcengine", "doubao-seedance-1-0-pro-250528") == "video"
+    assert infer_modality("volcengine", "doubao-seedream-5-0-pro") == "image"
+    assert infer_modality("dashscope", "wan2.2-t2i-flash") == "image"
+    assert infer_modality("kling", "kling-v2") == "image"
     assert infer_modality("openai_compatible", "kling-v3-turbo") == "text"
     assert infer_modality("custom", "wan2.6-t2v") == "text"
 
@@ -305,6 +327,44 @@ def test_ensure_does_not_overwrite_cloud_video(tmp_path: Path):
         snap = reg.snapshot_for("video_gen")
         assert snap.model_id == "kling-v3-turbo"
         assert snap.provider_type == "kling"
+    finally:
+        db.close()
+
+
+def test_ensure_mood_fast_system_one(tmp_path: Path, monkeypatch):
+    from connectors.credential_store import CredentialStore
+    from infrastructure import provider_registry as preg
+
+    monkeypatch.setattr(preg, "_system_one_exe_ready", lambda: True)
+    db = Database(tmp_path / "s1.db")
+    db.run_migrations(ROOT / "migrations")
+    try:
+        creds = CredentialStore(db, tmp_path)
+        reg = preg.ProviderRegistry(db, creds)
+        assert reg.assignment("mood_fast") is None
+        filled = preg.ensure_slot_assignments(reg)
+        assert "mood_fast" in filled
+        pid = reg.assignment("mood_fast")
+        snap = reg.snapshot(pid)
+        assert snap is not None
+        assert snap.provider_type == "system_one"
+        assert snap.model_id == "0.8b"
+        assert "8765" in snap.base_url
+        # 不覆盖手改
+        filled2 = preg.ensure_slot_assignments(reg)
+        assert "mood_fast" not in filled2
+        assert reg.assignment("mood_fast") == pid
+        # force_bind 可改绑
+        other = reg.add_provider(
+            pid="prov_flash", display_name="flash",
+            provider_type="openai_compatible",
+            base_url="https://api.example.com/v1",
+            model_id="flash", api_key="k",
+            input_price=0, output_price=0, context_window=8,
+            modality="text")
+        reg.set_assignment("mood_fast", other)
+        preg.ensure_mood_fast_system_one_assignment(reg, force_bind=True)
+        assert reg.assignment("mood_fast") == pid
     finally:
         db.close()
 

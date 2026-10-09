@@ -6,6 +6,7 @@ import logging
 from infrastructure.json_repair import repair_json
 from infrastructure.prompt_loader import PROMPTS
 from soul.mood_peace import detect_peace_event, normalize_peace_event
+from soul.mood_taxonomy import clamp01, normalize_mood
 
 logger = logging.getLogger("second_person.mood_judge")
 
@@ -18,13 +19,13 @@ _DEFAULT_RES = {
 def _normalize_res(raw: dict | None) -> dict:
     if not isinstance(raw, dict):
         return dict(_DEFAULT_RES)
-    mood = str(raw.get("mood") or "neutral").strip() or "neutral"
+    mood = normalize_mood(raw.get("mood"))
     try:
-        intensity = max(0.0, min(1.0, float(raw.get("intensity") or 0.0)))
+        intensity = clamp01(float(raw.get("intensity") or 0.0))
     except (TypeError, ValueError):
         intensity = 0.0
     try:
-        confidence = max(0.0, min(1.0, float(raw.get("confidence") or 0.0)))
+        confidence = clamp01(float(raw.get("confidence") or 0.0))
     except (TypeError, ValueError):
         confidence = 0.0
     attribution = str(raw.get("attribution") or "none").strip() or "none"

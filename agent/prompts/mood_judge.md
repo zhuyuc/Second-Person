@@ -23,8 +23,8 @@
 ```
 
 字段说明：
-- mood：英文情绪标签（如 neutral, warm, frustrated, curious, proud, anxious 等；无显著情绪用 neutral）
-- intensity：0.0–1.0，情绪强度
+- mood：仅允许英文七情 + 平静：neutral, joy, anger, sorrow, fear, love, disgust, desire（对应 平静/喜/怒/哀/惧/爱/恶/欲）
+- intensity：0.0–1.0，情绪强度（低≈0.15、中≈0.35、高≈0.75）
 - confidence：0.0–1.0，你对该判定的置信度
 - attribution：none / self / other / shared（情绪归因；不确定用 none）
 - note：一句中文理由（可空）

@@ -157,6 +157,55 @@ class TurnRuntime:
             else:
                 timeline.append({"kind": "narration", "text": text})
 
+        def _tl_find_running_tool(name: str, call_id: str = "") -> dict | None:
+            if call_id:
+                idx = tool_call_index.get(call_id)
+                if idx is not None:
+                    candidate = timeline[idx]
+                    if (candidate.get("kind") == "tool_call"
+                            and candidate.get("name") == name
+                            and candidate.get("status") == "running"):
+                        return candidate
+            for existing in reversed(timeline):
+                if (existing.get("kind") == "tool_call"
+                        and (existing.get("call_id") == call_id or not call_id)
+                        and existing.get("name") == name
+                        and existing.get("status") == "running"):
+                    return existing
+            return None
+
+        def _tl_upsert_media_progress(evt: dict) -> None:
+            """image_gen / video_gen 的 step_progress → 挂到对应 running 工具行。
+
+            供深度思考面板回看：阶段日志写入 timeline，随 analysis_metadata 落库。
+            同 stage 只更新最后一条 label（避免「已等待 Ns」刷屏占满日志）。
+            """
+            phase = (evt.get("phase") or "").strip()
+            tool_name = {
+                "image_gen": "generate_image",
+                "video_gen": "generate_video",
+            }.get(phase)
+            if not tool_name:
+                return
+            label = str(evt.get("label") or "").strip()
+            if not label:
+                return
+            stage = str(evt.get("stage") or "").strip()
+            item = _tl_find_running_tool(tool_name)
+            if item is None:
+                return
+            item["progress"] = label[:240]
+            if stage:
+                item["progress_stage"] = stage[:64]
+            log = list(item.get("progress_log") or [])
+            last = log[-1] if log else None
+            if last and (last.get("stage") or "") == stage:
+                last["label"] = label[:240]
+            else:
+                log.append({"stage": stage, "label": label[:240]})
+                log = log[-16:]
+            item["progress_log"] = log
+
         def _tl_upsert_tool(evt: dict) -> None:
             """tool_executing → push；tool_result → 就地更新同 call_id 项。"""
             call_id = evt.get("call_id") or evt.get("id") or ""
@@ -177,24 +226,7 @@ class TurnRuntime:
                        or "")
             if preview:
                 preview = preview[:400]
-            item = None
-            if call_id:
-                idx = tool_call_index.get(call_id)
-                if idx is not None:
-                    candidate = timeline[idx]
-                    if (candidate.get("kind") == "tool_call"
-                            and candidate.get("name") == name
-                            and candidate.get("status") == "running"):
-                        item = candidate
-            if item is None:
-                # 无 call_id 或索引未命中：反向扫描兜底
-                for existing in reversed(timeline):
-                    if (existing.get("kind") == "tool_call"
-                            and (existing.get("call_id") == call_id or not call_id)
-                            and existing.get("name") == name
-                            and existing.get("status") == "running"):
-                        item = existing
-                        break
+            item = _tl_find_running_tool(name, call_id)
             if item is not None:
                 item["status"] = "ok" if evt.get("ok") else "fail"
                 if preview:
@@ -315,6 +347,9 @@ class TurnRuntime:
                 tool_events.append({"event": event, **data})
                 # v7 timeline：工具事件在这里入 timeline，保序（跟 reasoning 交错）
                 _tl_upsert_tool({"event": event, **data})
+            elif event == "step_progress":
+                # 生图/生视频阶段进度写入 timeline，随消息落库供深度思考回看
+                _tl_upsert_media_progress(data)
             elif event == "decision_notice":
                 decision_notices.append(dict(data))
                 decision_span = tracer.span_start("agent.decision", input={

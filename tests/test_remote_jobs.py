@@ -306,3 +306,53 @@ async def test_kling_cancel_tries_remote_endpoints(monkeypatch):
     assert n >= 1
     assert any("cancel" in u or "task-99" in u for _, u in hits)
     runtime.clear(live.job_id)
+
+
+@pytest.mark.asyncio
+async def test_wait_comfy_keeps_polling_while_queued(monkeypatch):
+    """队列中仍在跑时，超过 soft_timeout 也不得结案 failed。"""
+    from infrastructure.remote_jobs.fetch import wait_comfy_history_outputs
+
+    loops = {"n": 0}
+
+    class _Resp:
+        def __init__(self, status_code=200, payload=None):
+            self.status_code = status_code
+            self._payload = payload or {}
+
+        def json(self):
+            return self._payload
+
+    class _Client:
+        async def get(self, url):
+            if "/history/" in url:
+                loops["n"] += 1
+                if loops["n"] < 5:
+                    return _Resp(200, {})
+                return _Resp(200, {
+                    "pid-slow": {
+                        "status": {"completed": True},
+                        "outputs": {"9": {"images": [{"filename": "a.png"}]}},
+                    },
+                })
+            if "/queue" in url:
+                if loops["n"] < 5:
+                    return _Resp(200, {
+                        "queue_running": [[0, "pid-slow", {}]],
+                        "queue_pending": [],
+                    })
+                return _Resp(200, {"queue_running": [], "queue_pending": []})
+            return _Resp(404)
+
+    async def _fast_sleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(
+        "infrastructure.remote_jobs.fetch.sleep_or_cancel", _fast_sleep)
+    # soft_timeout 很短；若错误实现会立刻抛超时
+    out = await wait_comfy_history_outputs(
+        _Client(), "http://127.0.0.1:8188", "pid-slow",
+        soft_timeout_sec=0.01, poll_interval=0.0,
+    )
+    assert out["9"]["images"][0]["filename"] == "a.png"
+    assert loops["n"] >= 5

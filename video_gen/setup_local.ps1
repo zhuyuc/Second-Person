@@ -51,4 +51,5 @@ foreach ($f in $Files) {
 Write-Host ""
 Write-Host "Models ready. Start ComfyUI, bind video_gen slot,"
 Write-Host "model_id=wan2.1_t2v_1.3B_fp16.safetensors"
-Write-Host "workflow: workflows/wan21_t2v_1_3b.json"
+Write-Host "workflow: workflows/wan21_t2v_1_3b_lossless.json"
+Write-Host "可选无损加速: powershell -File image_gen\setup_lossless_accel.ps1"

@@ -140,11 +140,8 @@ class AppContainer:
             self.workshop.reclaim_stale_doing()
         except Exception:  # noqa: BLE001
             logger.warning("workshop reclaim_stale_doing failed", exc_info=True)
-        try:
-            from infrastructure.remote_jobs.resume import schedule_resume_running_jobs
-            schedule_resume_running_jobs(self)
-        except Exception:  # noqa: BLE001
-            logger.warning("remote_jobs resume schedule failed", exc_info=True)
+        # remote_jobs 续跟必须等 lifespan 里有 running loop 再 schedule
+        # （_build 阶段 create_task 会失败并留下未 await 的 coroutine）
         from app.attachment_store import AttachmentStore
         # Placeholder; re-bound after image_extract_fn is ready.
         self.attachments = AttachmentStore(d)
@@ -572,6 +569,14 @@ class AppContainer:
         startup_status.set("core", "ready")
         timer.mark("core_ready")
         logger.info("AppContainer 核心就绪（外围服务后台加载）")
+
+        try:
+            from infrastructure.remote_jobs.resume import schedule_resume_running_jobs
+            n = schedule_resume_running_jobs(self)
+            if n:
+                logger.info("lifespan scheduled %s remote_jobs resume", n)
+        except Exception:  # noqa: BLE001
+            logger.warning("remote_jobs resume schedule failed", exc_info=True)
 
         # ---- 外围：不挡 Application startup complete ----
         async def _peripheral_boot() -> None:

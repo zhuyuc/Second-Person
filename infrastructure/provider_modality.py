@@ -8,19 +8,30 @@ MODALITY_IMAGE = "image"
 MODALITY_VIDEO = "video"
 MODALITIES = (MODALITY_TEXT, MODALITY_IMAGE, MODALITY_VIDEO)
 
-# 文本可含 Anthropic；图/视频云端不含 Anthropic（无对等生图/生视频接口）。
+# 文本可含 Anthropic；图/视频云端另有可灵 / 百炼 / 火山官方协议。
 # OpenAI 兼容自动补标准路径；自定义对常见 /vN 与叶子路径智能派生。
-# 图和视频另有本地 ComfyUI。kling / dashscope 只留给已经保存的旧记录。
-TEXT_PROTOCOLS = frozenset({"openai_compatible", "anthropic", "custom"})
+# 图和视频另有本地 ComfyUI。
+TEXT_PROTOCOLS = frozenset({
+    "openai_compatible", "anthropic", "custom", "system_one",
+})
 MEDIA_CLOUD_PROTOCOLS = frozenset({"openai_compatible", "custom"})
-CLOUD_PROTOCOLS = MEDIA_CLOUD_PROTOCOLS  # 图/视频云端（历史别名）
+CLOUD_PROTOCOLS = MEDIA_CLOUD_PROTOCOLS  # 图/视频通用云端（历史别名）
 OPENAI_WIRE = frozenset({"openai_compatible"})
-LEGACY_VIDEO = frozenset({"kling", "dashscope"})
+MEDIA_VENDOR_PROTOCOLS = frozenset({"kling", "dashscope", "volcengine"})
+# 兼容旧名
+VIDEO_VENDOR_PROTOCOLS = MEDIA_VENDOR_PROTOCOLS
+LEGACY_VIDEO = MEDIA_VENDOR_PROTOCOLS
+# System One 仅用于情绪快路径等决策槽
+SYSTEM_ONE_ALLOWED_SLOTS = frozenset({"mood_fast"})
 
 PROTOCOLS_BY_MODALITY: dict[str, frozenset[str]] = {
     MODALITY_TEXT: TEXT_PROTOCOLS,
-    MODALITY_IMAGE: MEDIA_CLOUD_PROTOCOLS | frozenset({"comfyui"}),
-    MODALITY_VIDEO: MEDIA_CLOUD_PROTOCOLS | frozenset({"comfyui"}) | LEGACY_VIDEO,
+    MODALITY_IMAGE: (
+        MEDIA_CLOUD_PROTOCOLS | frozenset({"comfyui"}) | MEDIA_VENDOR_PROTOCOLS
+    ),
+    MODALITY_VIDEO: (
+        MEDIA_CLOUD_PROTOCOLS | frozenset({"comfyui"}) | MEDIA_VENDOR_PROTOCOLS
+    ),
 }
 
 SLOT_MODALITY: dict[str, str] = {
@@ -55,10 +66,23 @@ def infer_modality(provider_type: str, model_id: str = "") -> str:
     ptype = (provider_type or "").strip().lower()
     mid = (model_id or "").lower()
     if ptype == "comfyui":
-        if "wan" in mid:
+        if "wan" in mid and ("t2v" in mid or "i2v" in mid or "video" in mid):
             return MODALITY_VIDEO
         return MODALITY_IMAGE
-    if ptype in ("kling", "dashscope"):
+    if ptype in ("kling", "dashscope", "volcengine"):
+        # 同协议可挂图或视频：靠模型名区分；区分不出时默认视频（兼容旧配置）
+        if any(k in mid for k in (
+            "seedream", "wanx", "t2i", "-image", "image-", "flux",
+        )):
+            return MODALITY_IMAGE
+        if any(k in mid for k in (
+            "seedance", "t2v", "i2v", "text2video", "image2video",
+        )):
+            return MODALITY_VIDEO
+        # 可灵旧图片模型名 kling-v1 / kling-v2（无 turbo）偏图
+        if ptype == "kling" and mid.startswith("kling-v") and "turbo" not in mid:
+            if "omni" not in mid:  # omni 可图可视频，默认不改
+                return MODALITY_IMAGE
         return MODALITY_VIDEO
     return MODALITY_TEXT
 
@@ -82,6 +106,9 @@ def validate_slot_provider(task_type: str, provider_type: str) -> None:
     if ptype == "anthropic" and slot in ANTHROPIC_DENIED_SLOTS:
         raise ValueError(
             "Anthropic 仅支持对话类槽位，不能用于 embedding / 文生图 / 文生视频")
+    if ptype == "system_one" and slot not in SYSTEM_ONE_ALLOWED_SLOTS:
+        raise ValueError(
+            "System One 仅可绑定「情绪快路径」槽位，不能用于对话 / embedding / 生图视频")
 
 
 def slot_modality(slot_key: str) -> str:

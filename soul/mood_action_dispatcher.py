@@ -5,13 +5,16 @@
 - 定位：纯规则匹配器，不发起 LLM 调用
 - 输入：mood_state（当前情绪状态）+ ctx（对话上下文指标）
 - 输出：(action_key, action_prompt) 元组，无匹配时返回 (None, None)
+- 情绪标签：七情（喜怒哀惧爱恶欲）+ 平静
 """
 from __future__ import annotations
+
+from soul.mood_taxonomy import normalize_mood
 
 ACTION_RULES = [
     {
         "scope": "ai",
-        "moods": ["indignant", "hurt", "frustrated"],
+        "moods": ["anger"],
         "min_intensity": 0.5,
         "attribution": "other",
         "extra_key": "task_repeat_count",
@@ -20,14 +23,14 @@ ACTION_RULES = [
     },
     {
         "scope": "ai",
-        "moods": ["anxious", "cautious"],
+        "moods": ["fear"],
         "min_intensity": 0.5,
         "attribution": "self",
         "action": "request_clarify",
     },
     {
         "scope": "ai",
-        "moods": ["tired"],
+        "moods": ["sorrow"],
         "min_intensity": 0.6,
         "extra_key": "consecutive_turns",
         "extra_min": 15,
@@ -35,7 +38,7 @@ ACTION_RULES = [
     },
     {
         "scope": "ai",
-        "moods": ["proud", "pleased", "excited"],
+        "moods": ["joy"],
         "min_intensity": 0.6,
         "extra_key": "just_completed_task",
         "extra_min": 1,
@@ -43,14 +46,15 @@ ACTION_RULES = [
     },
     {
         "scope": "user",
-        "moods": ["sad", "melancholy", "anxious", "frustrated"],
+        "moods": ["sorrow", "fear", "anger"],
         "min_intensity": 0.6,
         "action": "comfort_first",
     },
     {
         "scope": "ai",
-        "moods": ["ashamed", "self_critical"],
+        "moods": ["sorrow"],
         "min_intensity": 0.5,
+        "attribution": "self",
         "action": "acknowledge_mistake",
     },
 ]
@@ -104,7 +108,7 @@ class MoodActionDispatcher:
             return None, None
         for rule in ACTION_RULES:
             scope = rule["scope"]
-            mood = state.get(f"{scope}_mood", "neutral")
+            mood = normalize_mood(state.get(f"{scope}_mood", "neutral"))
             intensity = state.get(f"{scope}_intensity", 0.0)
             attribution = state.get(f"{scope}_attribution", "none")
             if mood not in rule["moods"]:

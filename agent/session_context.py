@@ -20,7 +20,7 @@ from pathlib import Path
 from memory.md_file import dump_frontmatter_doc, split_frontmatter
 from memory.naming import session_id as make_session_id
 from agent.context_signals import detect_fake_claim, detect_proposal_sentence
-from infrastructure.fts import fts_escape
+from infrastructure.fts import fts_escape, fts_trigram_too_short, like_escape
 from infrastructure.prompt_loader import PROMPTS
 from infrastructure.timeutil import now_cst
 
@@ -912,19 +912,48 @@ class SessionStore:
                 (like_pat, limit)):
                 title_hits[r["session_id"]] = _highlight_plain(r["title"], q)
 
-        # --- 消息命中（FTS + 可选 role 过滤）--------------------------------
+        # --- 消息命中（FTS；trigram 过短时 LIKE 回退）------------------------
+        # tokenize=trigram 时 MATCH 串 < 3 个 unicode 字符永远不命中
+        # （「你好」等短中文只能走 LIKE，否则「全部」只剩标题命中）。
         msg_hits: dict[str, list[dict]] = {}
         msg_counts: dict[str, int] = {}
         if scope in ("all", "user", "assistant"):
             match_expr = fts_escape(q)
-            if match_expr:
-                role_sql = ""
-                params: list = [match_expr]
-                if scope in ("user", "assistant"):
-                    role_sql = " AND c.role = ?"
-                    params.append(scope)
-                # 单会话 snippet 数由后续聚合裁剪；总条数按 limit*snippets 保守拉取
-                params.append(limit * max(snippets_per_session, 1) * 4)
+            role_sql = ""
+            role_params: list = []
+            if scope in ("user", "assistant"):
+                role_sql = " AND c.role = ?"
+                role_params.append(scope)
+            pull = limit * max(snippets_per_session, 1) * 4
+            rows = []
+            if match_expr and fts_trigram_too_short(q):
+                like_pat = "%" + like_escape(q) + "%"
+                rows = self.db.query_all(
+                    f"""
+                    SELECT c.session_id, c.id, c.role, c.create_time, c.content
+                    FROM conversations c
+                    JOIN sessions s ON s.session_id = c.session_id
+                    WHERE c.content LIKE ? ESCAPE '\\'
+                      AND c.message_type = 'normal'
+                      AND (s.channel IS NULL OR s.channel NOT IN ('aside', 'workshop'))
+                      {role_sql}
+                    ORDER BY c.id DESC
+                    LIMIT ?
+                    """,
+                    tuple([like_pat] + role_params + [pull]))
+                for r in rows:
+                    sid = r["session_id"]
+                    msg_counts[sid] = msg_counts.get(sid, 0) + 1
+                    bucket = msg_hits.setdefault(sid, [])
+                    if len(bucket) < snippets_per_session:
+                        bucket.append({
+                            "message_id": r["id"],
+                            "role": r["role"],
+                            "snippet_html": _snippet_around(r["content"] or "", q),
+                            "created_at": r["create_time"],
+                        })
+            elif match_expr:
+                params = [match_expr] + role_params + [pull]
                 rows = self.db.query_all(
                     f"""
                     SELECT c.session_id, c.id, c.role, c.create_time,
@@ -936,7 +965,8 @@ class SessionStore:
                     JOIN sessions s ON s.session_id = c.session_id
                     WHERE conversations_fts MATCH ?
                       AND c.message_type = 'normal'
-                      AND (s.channel IS NULL OR s.channel NOT IN ('aside', 'workshop')){role_sql}
+                      AND (s.channel IS NULL OR s.channel NOT IN ('aside', 'workshop'))
+                      {role_sql}
                     ORDER BY score
                     LIMIT ?
                     """,
@@ -978,6 +1008,24 @@ class SessionStore:
                 "hit_count": msg_counts.get(sid, 0),
             })
         return {"query": q, "total_sessions": len(sessions), "sessions": sessions}
+
+
+def _snippet_around(text: str, query: str, radius: int = 36) -> str:
+    """短查询 LIKE 回退用：截取命中邻域并高亮。"""
+    text = text or ""
+    q = (query or "").strip()
+    if not text:
+        return ""
+    idx = text.find(q) if q else -1
+    if idx < 0 and q:
+        idx = text.lower().find(q.lower())
+    if idx < 0:
+        frag = text[: radius * 2]
+        return _highlight_plain(frag + ("…" if len(text) > len(frag) else ""), q)
+    start = max(0, idx - radius)
+    end = min(len(text), idx + max(len(q), 1) + radius)
+    frag = ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+    return _highlight_plain(frag, q)
 
 
 def _highlight_plain(text: str, query: str) -> str:

@@ -29,7 +29,7 @@ def test_scene_blocks_identity_and_greeting():
 def test_scene_blocks_high_negative_pulse():
     assert scene_blocks_low_confirm(
         "继续刚才的事",
-        pulse={"mood": "angry", "intensity": 0.8, "confidence": 0.9},
+        pulse={"mood": "anger", "intensity": 0.8, "confidence": 0.9},
     )
     assert scene_blocks_low_confirm(
         "继续",

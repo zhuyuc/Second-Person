@@ -12,9 +12,17 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from infrastructure.comfyui_accel import (
+    apply_lossless_workflow_patches,
+    assert_lossless_generation,
+    normalize_quality_mode,
+)
 from infrastructure.image_gen import active_jobs
 from infrastructure.remote_jobs import JobCancelled, get_store, runtime
-from infrastructure.remote_jobs.fetch import http_get_bytes_resilient, sleep_or_cancel
+from infrastructure.remote_jobs.fetch import (
+    http_get_bytes_resilient,
+    wait_comfy_history_outputs,
+)
 
 from .types import (
     ALLOWED_SIZES,
@@ -93,6 +101,9 @@ class ComfyUIVideoAdapter:
         default_duration_sec: int = DEFAULT_DURATION_SEC,
         fps: int = DEFAULT_FPS,
         prompt_max_chars: int = 1500,
+        quality_mode: str = "lossless",
+        t5_on_cpu: bool = True,
+        block_swap: int = 0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.workflow_path = Path(workflow_path)
@@ -103,6 +114,9 @@ class ComfyUIVideoAdapter:
         self.default_duration_sec = default_duration_sec
         self.fps = fps
         self.prompt_max_chars = prompt_max_chars
+        self.quality_mode = normalize_quality_mode(quality_mode)
+        self.t5_on_cpu = bool(t5_on_cpu)
+        self.block_swap = max(0, int(block_swap or 0))
 
     def _load_workflow(self) -> dict:
         if not self.workflow_path.exists():
@@ -174,6 +188,13 @@ class ComfyUIVideoAdapter:
         if len(clip_nodes) >= 2:
             clip_nodes[1][1].setdefault("inputs", {})["text"] = negative
 
+        if self.quality_mode == "lossless":
+            apply_lossless_workflow_patches(
+                wf, t5_on_cpu=self.t5_on_cpu, block_swap=self.block_swap)
+        elif self.t5_on_cpu or self.block_swap:
+            apply_lossless_workflow_patches(
+                wf, t5_on_cpu=self.t5_on_cpu, block_swap=self.block_swap)
+
         return wf
 
     @staticmethod
@@ -219,6 +240,8 @@ class ComfyUIVideoAdapter:
                 "请改用云端可灵，或去掉参考图仅用文字出片"
             )
         template = self._load_workflow()
+        assert_lossless_generation(
+            template, model_id=model_name, quality_mode=self.quality_mode)
         workflow = self._apply_workflow(template, req, model_name)
 
         # 轮询用短超时；读结果走可重试获取，避免大文件/慢盘把整单判死
@@ -257,57 +280,21 @@ class ComfyUIVideoAdapter:
                     await on_progress(
                         "sampling",
                         "本地 Wan 文生视频采样中，常见需要几分钟，请稍候…")
-                outputs = None
-                last_progress_at = 0.0
-                deadline = t0 + max(5.0, float(self.timeout_sec or 180.0))
-                while True:
-                    if time.perf_counter() >= deadline:
-                        raise RuntimeError(
-                            f"ComfyUI 生视频超时（>{int(self.timeout_sec)}s），"
-                            "请检查本地服务或工作流")
-                    runtime.raise_if_cancelled(
-                        job_id=job_id, session_id=session_id)
-                    try:
-                        hist = await client.get(
-                            f"{self.base_url}/history/{prompt_id}")
-                    except httpx.TimeoutException:
-                        if on_progress:
-                            await on_progress(
-                                "sampling", "查询本地队列较慢，继续等待…")
-                        await sleep_or_cancel(
-                            2.0, job_id=job_id, session_id=session_id)
-                        continue
-                    except httpx.TransportError:
-                        if on_progress:
-                            await on_progress(
-                                "sampling", "本地服务暂时无响应，继续重试…")
-                        await sleep_or_cancel(
-                            2.0, job_id=job_id, session_id=session_id)
-                        continue
-                    if hist.status_code == 200:
-                        data = hist.json() or {}
-                        entry = data.get(prompt_id) or {}
-                        status = entry.get("status") or {}
-                        for m in status.get("messages") or []:
-                            if isinstance(m, list) and m and m[0] == "execution_error":
-                                raise RuntimeError(f"ComfyUI 执行失败: {m}")
-                        if entry.get("outputs"):
-                            outputs = entry["outputs"]
-                            break
-                    now = time.perf_counter()
-                    if on_progress and now - last_progress_at >= 8.0:
-                        elapsed = int(now - t0)
-                        await on_progress(
-                            "sampling",
-                            f"本地生视频进行中（已等待 {elapsed}s）…")
-                        last_progress_at = now
+
+                def _touch() -> None:
                     if store is not None:
                         try:
                             store.touch(job_id)
                         except Exception:  # noqa: BLE001
                             pass
-                    await sleep_or_cancel(
-                        1.2, job_id=job_id, session_id=session_id)
+
+                outputs = await wait_comfy_history_outputs(
+                    client, self.base_url, prompt_id,
+                    job_id=job_id, session_id=session_id,
+                    on_progress=on_progress, stage="sampling",
+                    label="本地生视频",
+                    soft_timeout_sec=float(self.timeout_sec or 600.0),
+                    poll_interval=1.2, on_tick=_touch)
 
                 media_meta = self._extract_media_meta(outputs or {})
                 if not media_meta:

@@ -453,6 +453,13 @@ class Retriever:
             summary="正在生成检索向量并扫描记忆库",
         ))
 
+        # 8GB 同卡：检索前让出 Comfy/情绪显存，避免 Embedding 被挤到 1–3s/次
+        try:
+            from infrastructure.lazy_services import release_gpu_for_embedding
+            await asyncio.to_thread(release_gpu_for_embedding)
+        except Exception:  # noqa: BLE001
+            logger.debug("release_gpu_for_embedding 跳过", exc_info=True)
+
         # 1) embed 线索 + FTS 并行
         q_part = query[:self.EMBED_QUERY_MAX_CHARS]
         budget = self.EMBED_QUERY_MAX_CHARS - len(q_part) - 1

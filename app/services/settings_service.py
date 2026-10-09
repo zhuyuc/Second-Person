@@ -40,12 +40,12 @@ class SettingsService:
             infer_modality, normalize_modality, validate_combo)
         ptype = (body.get("provider_type") or "").strip()
         required = [("base_url", "Base URL"), ("model_id", "名称")]
-        if ptype != "comfyui":
+        if ptype not in ("comfyui", "system_one"):
             required.append(("api_key", "API Key"))
         for field, label in required:
             if not (body.get(field) or "").strip():
                 raise ValueError(f"请先填写{label}")
-        if ptype == "comfyui" and not (body.get("api_key") or "").strip():
+        if ptype in ("comfyui", "system_one") and not (body.get("api_key") or "").strip():
             body["api_key"] = "local"
         modality = normalize_modality(
             body.get("modality") or infer_modality(ptype, body.get("model_id") or ""))
@@ -66,6 +66,9 @@ class SettingsService:
             if ptype == "comfyui":
                 from infrastructure.image_gen import probe_comfyui
                 return await probe_comfyui(snap.base_url)
+            if ptype == "system_one":
+                from infrastructure.system_one import probe_system_one
+                return await probe_system_one(snap.base_url)
             if modality == "video":
                 from infrastructure.video_gen.factory import get_video_adapter
                 adapter = get_video_adapter(
@@ -93,9 +96,9 @@ class SettingsService:
         if not body.get("model_id"):
             return {"ok": False, "error": "请填写模型 ID"}
         ptype = body.get("provider_type") or "openai_compatible"
-        if ptype == "comfyui" and not (body.get("api_key") or "").strip():
+        if ptype in ("comfyui", "system_one") and not (body.get("api_key") or "").strip():
             body["api_key"] = "local"
-        elif ptype != "comfyui" and not (body.get("api_key") or "").strip():
+        elif ptype not in ("comfyui", "system_one") and not (body.get("api_key") or "").strip():
             return {"ok": False, "error": "请填写 API Key"}
         modality = normalize_modality(
             body.get("modality") or infer_modality(ptype, body.get("model_id") or ""))

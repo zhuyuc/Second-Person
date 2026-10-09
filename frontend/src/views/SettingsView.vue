@@ -217,38 +217,40 @@ const TEXT_PROTOCOLS = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
   { value: 'anthropic', label: 'Anthropic' },
   { value: 'custom', label: '自定义' },
+  { value: 'system_one', label: 'System One（本地 Jev）' },
 ]
-/** 图/视频云端不含 Anthropic（无对等接口） */
+/** 图云端不含 Anthropic（无对等接口） */
 const MEDIA_CLOUD_PROTOCOLS = [
   { value: 'openai_compatible', label: 'OpenAI 兼容' },
   { value: 'custom', label: '自定义' },
 ]
+/** 图/视频官方厂商协议 */
+const MEDIA_VENDOR_PROTOCOLS = [
+  { value: 'kling', label: '可灵' },
+  { value: 'dashscope', label: '百炼' },
+  { value: 'volcengine', label: '火山' },
+]
 const LOCAL_PROTOCOL = { value: 'comfyui', label: 'ComfyUI（本地）' }
 const LEGACY_PROTOCOL_LABEL = {
-  kling: '可灵',
-  dashscope: '百炼',
   google: 'Google',
   anthropic: 'Anthropic',
 }
 const PROTOCOLS_BY_MODALITY = {
   text: TEXT_PROTOCOLS,
-  image: [...MEDIA_CLOUD_PROTOCOLS, LOCAL_PROTOCOL],
-  video: [...MEDIA_CLOUD_PROTOCOLS, LOCAL_PROTOCOL],
+  image: [...MEDIA_VENDOR_PROTOCOLS, ...MEDIA_CLOUD_PROTOCOLS, LOCAL_PROTOCOL],
+  video: [...MEDIA_VENDOR_PROTOCOLS, ...MEDIA_CLOUD_PROTOCOLS, LOCAL_PROTOCOL],
 }
 function protocolsFor(modality, current) {
   const list = PROTOCOLS_BY_MODALITY[modality] || PROTOCOLS_BY_MODALITY.text
   if (
-    (current === 'kling' || current === 'dashscope' || current === 'google'
-      || current === 'anthropic')
+    (current === 'google' || current === 'anthropic')
     && !list.some((x) => x.value === current)
   ) {
     // 旧记录仍可编辑展示；新建不再出现已下架协议
-    if (current === 'google' || current === 'anthropic' || modality === 'video') {
-      return [...list, {
-        value: current,
-        label: LEGACY_PROTOCOL_LABEL[current] || current,
-      }]
-    }
+    return [...list, {
+      value: current,
+      label: LEGACY_PROTOCOL_LABEL[current] || current,
+    }]
   }
   return list
 }
@@ -258,6 +260,8 @@ function providersForSlot(slotKey) {
     if ((p.modality || 'text') !== m) return false
     // Anthropic 无 embedding 接口，槽位下拉不展示
     if (slotKey === 'embedding' && p.provider_type === 'anthropic') return false
+    // System One 仅情绪快路径
+    if (p.provider_type === 'system_one' && slotKey !== 'mood_fast') return false
     return true
   })
 }
@@ -277,6 +281,7 @@ function providerPriceLabel(p) {
 function videoUrlPlaceholder(data) {
   if (data?.provider_type === 'dashscope') return 'https://dashscope.aliyuncs.com/api/v1'
   if (data?.provider_type === 'kling') return 'https://api-beijing.klingai.com'
+  if (data?.provider_type === 'volcengine') return 'https://ark.cn-beijing.volces.com/api/v3'
   if (data?.provider_type === 'custom') {
     if (data?.modality === 'image') return 'https://api.openai.com/v1'
     if (data?.modality === 'video') return 'https://example.com/v1/videos/generations'
@@ -284,9 +289,13 @@ function videoUrlPlaceholder(data) {
   }
   if (data?.provider_type === 'openai_compatible') return 'https://api.openai.com/v1'
   if (data?.provider_type === 'anthropic') return 'https://ark.cn-beijing.volces.com/api/plan'
+  if (data?.provider_type === 'system_one') return 'http://127.0.0.1:8765'
   return ''
 }
 function videoUrlHint(data) {
+  if (data?.provider_type === 'system_one') {
+    return '本地 jev-style：先运行 system_one/setup_local.ps1；地址默认 http://127.0.0.1:8765；模型填 0.8b 或 2b；API Key 可留空。仅可绑情绪快路径槽。'
+  }
   if (data?.provider_type === 'custom') {
     if (data?.modality === 'image') {
       return '推荐填到 /v1；系统会自动补 /images/generations。也可填完整生图地址（非标准路径则原样请求）'
@@ -300,10 +309,19 @@ function videoUrlHint(data) {
     return '仅用于对话类槽位；不要绑到 embedding / 文生图 / 文生视频'
   }
   if (data?.provider_type === 'dashscope') {
-    return '百炼 API Key。地址用 https://dashscope.aliyuncs.com/api/v1'
+    return data?.modality === 'image'
+      ? '百炼 API Key。地址用 https://dashscope.aliyuncs.com/api/v1；模型如 wan2.2-t2i-flash'
+      : '百炼 API Key。地址用 https://dashscope.aliyuncs.com/api/v1'
   }
   if (data?.provider_type === 'kling') {
-    return '可灵官方域名 https://api-beijing.klingai.com；新版填控制台 API Key'
+    return data?.modality === 'image'
+      ? '可灵官方域名 https://api-beijing.klingai.com；图片模型如 kling-v2 / kling-v3'
+      : '可灵官方域名 https://api-beijing.klingai.com；新版填控制台 API Key'
+  }
+  if (data?.provider_type === 'volcengine') {
+    return data?.modality === 'image'
+      ? '火山方舟 Seedream：地址用 https://ark.cn-beijing.volces.com/api/v3（不要填 /api/plan）'
+      : '火山方舟 Seedance：地址用 https://ark.cn-beijing.volces.com/api/v3（不要填 /api/plan）'
   }
   return ''
 }
@@ -312,17 +330,35 @@ function videoKeyLabel(data) {
   if (data?.provider_type === 'kling') {
     return 'API Key（可灵控制台密钥；旧版 kling-v* 可填 AccessKey:SecretKey）'
   }
+  if (data?.provider_type === 'volcengine') return 'API Key（火山方舟）'
+  if (data?.provider_type === 'system_one' || data?.provider_type === 'comfyui') {
+    return 'API Key（本地可留空）'
+  }
   return 'API Key'
 }
 function videoModelPlaceholder(data) {
-  if (data?.provider_type === 'dashscope') return 'wan2.6-t2v'
-  if (data?.provider_type === 'kling') return 'kling-3.0-turbo'
+  if (data?.provider_type === 'dashscope') {
+    return data?.modality === 'image' ? 'wan2.2-t2i-flash' : 'wan2.6-t2v'
+  }
+  if (data?.provider_type === 'kling') {
+    return data?.modality === 'image' ? 'kling-v2' : 'kling-3.0-turbo'
+  }
+  if (data?.provider_type === 'volcengine') {
+    return data?.modality === 'image'
+      ? 'doubao-seedream-4-0-250828'
+      : 'doubao-seedance-1-0-pro-250528'
+  }
+  if (data?.provider_type === 'system_one') return '0.8b'
   return ''
 }
 function applyModalityDefaults(data) {
   const allowed = protocolsFor(data.modality, data.provider_type).map((x) => x.value)
   if (!allowed.includes(data.provider_type)) {
     data.provider_type = allowed[0]
+  }
+  if (data.provider_type === 'system_one') {
+    if (!data.base_url) data.base_url = 'http://127.0.0.1:8765'
+    if (!data.model_id) data.model_id = '0.8b'
   }
 }
 function openAddProvider() {
@@ -1015,16 +1051,16 @@ onActivated(() => selectTab(tab.value))
     </div>
     <div class="section-title mt">已添加的模型</div>
     <div v-for="p in providers" :key="p.id" class="cw">
-      <div class="row">
-        <div class="fg fg-gap-8">
+      <div class="row provider-row">
+        <div class="fg fg-gap-8 provider-main">
           <span class="dot dot-succ"></span>
-          <div>
+          <div class="provider-meta">
             <b>{{ p.model_id }}</b>
             <span class="muted provider-modality-tag">{{ modalityLabel(p.modality) }}</span>
-            <div class="muted">{{ p.base_url }}</div>
+            <div class="muted provider-url" :title="p.base_url">{{ p.base_url }}</div>
           </div>
         </div>
-        <div class="fg fg-gap-12">
+        <div class="fg fg-gap-12 provider-actions">
           <span class="muted">{{ providerPriceLabel(p) }}</span>
           <button
             class="btn-sm"
@@ -2134,5 +2170,32 @@ onActivated(() => selectTab(tab.value))
   margin-left: 8px;
   font-size: var(--fs-sm);
   font-weight: 400;
+}
+
+.row.provider-row {
+  flex-wrap: nowrap;
+  gap: var(--sp-3);
+}
+
+.provider-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.provider-meta {
+  min-width: 0;
+}
+
+.provider-url {
+  width: 320px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-actions {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
 }
 </style>

@@ -35,20 +35,22 @@ powershell -ExecutionPolicy Bypass -File D:\project\Second-Person\video_gen\setu
 | `wan_2.1_vae.safetensors` | `vae/` |
 | `umt5_xxl_fp8_e4m3fn_scaled.safetensors` | `text_encoders/` |
 
-也可改用 GGUF 量化版，并把设置页 `model_id` / 工作流 UNET 节点改为对应文件名。
+**默认主路径为 fp16（无损质量模式）**，工作流：`workflows/wan21_t2v_1_3b_lossless.json`（UMT5→CPU）。  
+GGUF 等量化权重在 `comfyui_quality_mode=lossless`（默认）下会被 Adapter 拒绝；若确需有损加速，需改质量模式并自备工作流（见无损优化方案文档）。
 
 来源可参考 ComfyUI 官方 Wan 文档与 Hugging Face `Comfy-Org/Wan_2.1_ComfyUI_repackaged`。
 
 ## 启动
 
-与文生图相同：
+与文生图相同（推荐无损启动脚本）：
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File D:\project\Second-Person\image_gen\setup_lossless_accel.ps1
 cd D:\project\Second-Person\image_gen\comfyui
-.\run_nvidia_gpu.bat
+.\run_nvidia_gpu_lossless.bat
 ```
 
-建议空闲显存；生视频前关闭向日葵 / ToDesk。浏览器打开 http://127.0.0.1:8188 ，导入 `workflows/wan21_t2v_1_3b.json` 手动跑通一条 480p ~3s。
+建议空闲显存；生视频前关闭向日葵 / ToDesk。浏览器打开 http://127.0.0.1:8188 ，导入 `workflows/wan21_t2v_1_3b_lossless.json` 手动跑通一条 480p ~3s。
 
 ## Second Person 配置
 
@@ -60,9 +62,11 @@ cd D:\project\Second-Person\image_gen\comfyui
 
 1. 设置页 → Provider 类型选 **ComfyUI（本地文生图/视频）**
 2. Base URL：`http://127.0.0.1:8188`
-3. 模型 ID：Wan 权重文件名（如 `wan2.1_t2v_1.3B_fp16.safetensors`）
+3. 模型 ID：Wan **fp16** 权重文件名（如 `wan2.1_t2v_1.3B_fp16.safetensors`）
 4. 任务-模型分配 →「文生视频模型（本地 ComfyUI）」绑到该 Provider（可与文生图共用同一地址、不同 model_id）
 5. 对话中说「生成一段橘猫在窗台晒太阳的短视频」触发 `generate_video`
+
+配置默认工作流键：`video_gen_comfyui_workflow` → `./workflows/wan21_t2v_1_3b_lossless.json`（setup 脚本会写入）。
 
 ## 注意
 

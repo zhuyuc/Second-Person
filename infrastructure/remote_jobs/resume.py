@@ -51,6 +51,11 @@ def schedule_resume_running_jobs(container) -> int:
                 _resume_dashscope_poll(container, row),
                 name=f"remote_job_dashscope_{jid[:12]}")
             n += 1
+        elif kind == "volcengine_video" and (row.get("remote_id") or "").strip():
+            track_task(
+                _resume_volcengine_poll(container, row),
+                name=f"remote_job_volcengine_{jid[:12]}")
+            n += 1
         elif kind in ("comfy_video", "comfy_image") and (row.get("remote_id") or "").strip():
             track_task(
                 _resume_comfy(container, row, meta),
@@ -255,6 +260,83 @@ async def _resume_dashscope_poll(container, row: dict) -> None:
             store.settle(jid, status="cancelled", error_message="已停止生成")
     except Exception as exc:  # noqa: BLE001
         logger.warning("resume dashscope failed job=%s: %s", jid, exc, exc_info=True)
+    finally:
+        runtime.clear(live.job_id)
+
+
+async def _resume_volcengine_poll(container, row: dict) -> None:
+    """崩溃后续查火山方舟任务；成功则下载落盘。"""
+    import httpx
+    from infrastructure.video_gen.vendor import volcengine_api_root
+    from infrastructure.video_gen.volcengine_adapter import (
+        volcengine_error_text, volcengine_headers, volcengine_status,
+        volcengine_video_url,
+    )
+
+    store = get_store()
+    jid = row["id"]
+    session_id = row.get("session_id") or ""
+    task_id = (row.get("remote_id") or "").strip()
+    base_url = (row.get("base_url") or "").rstrip("/")
+    snap = None
+    try:
+        snap = container.providers.snapshot_for("video_gen")
+    except Exception:  # noqa: BLE001
+        snap = None
+    if not snap or not task_id or not base_url:
+        logger.warning("resume volcengine skip job=%s missing snap/task", jid)
+        return
+    headers = volcengine_headers(getattr(snap, "api_key", "") or "")
+    api_root = volcengine_api_root(base_url)
+    live = runtime.register(
+        kind="volcengine_video", backend="volcengine",
+        session_id=session_id, base_url=base_url,
+        remote_id=task_id, job_id=jid)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=15.0)) as client:
+            while True:
+                runtime.raise_if_cancelled(job_id=jid, session_id=session_id)
+                info = await http_get_json_resilient(
+                    client,
+                    f"{api_root}/contents/generations/tasks/{task_id}",
+                    headers=headers, job_id=jid, session_id=session_id)
+                if not isinstance(info, dict):
+                    info = {}
+                status = volcengine_status(info)
+                if status == "succeeded":
+                    video_url, _dur = volcengine_video_url(info)
+                    if not video_url:
+                        raise RuntimeError("火山完成但无视频地址")
+                    if store:
+                        store.merge_meta(jid, {
+                            "phase": "download", "result_url": video_url})
+                    data = await fetch_url_bytes(
+                        video_url, job_id=jid, session_id=session_id)
+                    out = Path(container.data_dir) / "chat_videos"
+                    out.mkdir(parents=True, exist_ok=True)
+                    fname = f"genv_{uuid.uuid4().hex[:12]}.mp4"
+                    (out / fname).write_bytes(data)
+                    if store:
+                        store.settle(jid, status="succeeded", result_ref=fname)
+                    await _maybe_finish_workshop(
+                        container, row, fname, "volcengine_video")
+                    return
+                if status in ("failed", "cancelled", "canceled", "expired"):
+                    if store:
+                        store.settle(
+                            jid, status="failed",
+                            error_message=volcengine_error_text(
+                                info, "火山任务失败"))
+                    return
+                if store:
+                    store.touch(jid)
+                from infrastructure.remote_jobs.fetch import sleep_or_cancel
+                await sleep_or_cancel(2.0, job_id=jid, session_id=session_id)
+    except JobCancelled:
+        if store:
+            store.settle(jid, status="cancelled", error_message="已停止生成")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("resume volcengine failed job=%s: %s", jid, exc, exc_info=True)
     finally:
         runtime.clear(live.job_id)
 

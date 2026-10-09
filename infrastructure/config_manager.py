@@ -80,11 +80,11 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "default": "flash", "effect": "next_turn", "group": "conversation",
      "order": 19,
      "label": "情绪快路径通道",
-     "desc": "flash=走「情绪快路径模型」槽做极简 JSON（超时降级词典）；lexicon=仅词典规则。"},
+     "desc": "flash=走「情绪快路径模型」槽（槽位绑 System One 则调 /v1/systemone，否则 chat JSON；超时降级词典）；lexicon=仅词典规则。"},
     {"key": "mood_fast_path_timeout_ms", "type": "int", "min": 100, "max": 5000,
-     "default": 800, "effect": "next_turn", "group": "conversation", "order": 20,
+     "default": 1500, "effect": "next_turn", "group": "conversation", "order": 20,
      "label": "情绪快路径超时（ms）",
-     "desc": "Flash 硬超时；超时后降级词典，不阻塞超过该上限。"},
+     "desc": "硬超时（chat / System One 共用）；超时后降级词典，不阻塞超过该上限。"},
     {"key": "mood_fast_path_min_confidence", "type": "float", "min": 0.0, "max": 1.0,
      "default": 0.55, "effect": "next_turn", "group": "conversation", "order": 21,
      "label": "情绪脉冲最低置信度",
@@ -228,6 +228,36 @@ PARAM_SCHEMA: list[dict[str, Any]] = [
      "effect": "immediate", "group": "other", "order": 39,
      "label": "文生视频与文生图同轮互斥",
      "desc": "仅当文生视频绑定本地 ComfyUI 时生效，避免 8GB 显存叠加；云端不同轮按会话串行。"},
+    # -- 本地 ComfyUI 无损性能（不改采样质量） --
+    {"key": "comfyui_quality_mode", "type": "enum",
+     "options": ["lossless", "lossy"],
+     "default": "lossless", "effect": "immediate", "group": "other", "order": 40,
+     "label": "本地 ComfyUI 质量模式",
+     "desc": "lossless=禁止量化/跳步缓存，仅允许 Attention 与显存调度；"
+             "lossy=允许有损加速（会降低输出质量，需自行换工作流）。"},
+    {"key": "comfyui_use_sage_attention", "type": "bool", "default": True,
+     "effect": "immediate", "group": "other", "order": 41,
+     "label": "ComfyUI SageAttention",
+     "desc": "启动时附加 --use-sage-attention（需已安装 sageattention；"
+             "失败时 ComfyUI 会回退默认 Attention）。改后需重启 ComfyUI。"},
+    {"key": "comfyui_lowvram", "type": "bool", "default": True,
+     "effect": "immediate", "group": "other", "order": 42,
+     "label": "ComfyUI lowvram",
+     "desc": "启动时附加 --lowvram，按需装载模块以降低峰值显存，不改变采样结果。"
+             "改后需重启 ComfyUI。"},
+    {"key": "comfyui_reserve_vram_gb", "type": "float", "min": 0.0, "max": 8.0,
+     "default": 0.0, "effect": "immediate", "group": "other", "order": 43,
+     "label": "ComfyUI 预留显存（GB）",
+     "desc": "大于 0 时附加 --reserve-vram；0 表示不预留。改后需重启 ComfyUI。"},
+    {"key": "video_gen_t5_on_cpu", "type": "bool", "default": True,
+     "effect": "immediate", "group": "other", "order": 44,
+     "label": "文生视频文本编码器卸 CPU",
+     "desc": "仅本地 Wan：将 UMT5/CLIP 放到 CPU，降低峰值显存，不改变采样数学。"},
+    {"key": "video_gen_block_swap", "type": "int", "min": 0, "max": 48,
+     "default": 0, "effect": "immediate", "group": "other", "order": 45,
+     "label": "文生视频 BlockSwap 块数",
+     "desc": "仅当工作流含 WanVideoBlockSwap 等节点时生效；从 0 标定到刚好不 OOM。"
+             "默认 0，峰值显存主要靠 lowvram + T5→CPU。"},
 ]
 
 _SCHEMA_BY_KEY = {p["key"]: p for p in PARAM_SCHEMA}

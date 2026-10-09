@@ -45,6 +45,17 @@ EMBEDDING_VENV_PY = (BASE_DIR / "embedding" / "venv" / "Scripts" / "python.exe"
                      if sys.platform.startswith("win")
                      else BASE_DIR / "embedding" / "venv" / "bin" / "python")
 
+# ---- 本地 System One（jev-style，情绪快路径；权重在 system_one/models） ----
+SYSTEM_ONE_PORT = 8765
+SYSTEM_ONE_HEALTH = f"http://127.0.0.1:{SYSTEM_ONE_PORT}/v1/models"
+SYSTEM_ONE_EXE = (
+    BASE_DIR / "system_one" / "venv" / "Scripts" / "jev-style.exe"
+    if sys.platform.startswith("win")
+    else BASE_DIR / "system_one" / "venv" / "bin" / "jev-style"
+)
+SYSTEM_ONE_ENV = BASE_DIR / "system_one" / "hf.env"
+SYSTEM_ONE_PID_FILE = Path.home() / ".second-person" / "system_one.pid"
+
 
 def _find_port(preferred: int) -> int:
     candidates = [preferred] + list(range(8001, 8011))
@@ -184,6 +195,8 @@ class ServiceSupervisor:
             self._spawned.append((name, proc))
             if spec.name == "embedding":
                 _write_embedding_pid(proc.pid)
+            if spec.name == "system_one":
+                _write_system_one_pid(proc.pid)
             if not spec.ready or not spec.wait:
                 if proc.poll() is None and not spec.wait:
                     print(f"[services] {name} 已后台启动（不阻塞等就绪）")
@@ -291,6 +304,8 @@ class ServiceSupervisor:
             self._kill_tree(proc)
             if name == "embedding":
                 _clear_embedding_pid()
+            if name == "system_one":
+                _clear_system_one_pid()
 
 
 def _write_embedding_pid(pid: int) -> None:
@@ -309,16 +324,32 @@ def _clear_embedding_pid() -> None:
         pass
 
 
-def _stop_embedding_persist() -> None:
-    """停止常驻 Embedding（--stop-all / stop --all）。"""
+def _write_system_one_pid(pid: int) -> None:
+    try:
+        SYSTEM_ONE_PID_FILE.parent.mkdir(parents=True, exist_ok=True)
+        SYSTEM_ONE_PID_FILE.write_text(str(pid), encoding="utf-8")
+    except (PermissionError, OSError):
+        pass
+
+
+def _clear_system_one_pid() -> None:
+    try:
+        if SYSTEM_ONE_PID_FILE.exists():
+            SYSTEM_ONE_PID_FILE.unlink()
+    except OSError:
+        pass
+
+
+def _stop_persist_by_pid(name: str, pid_file: Path, port: int) -> None:
+    """停止常驻子服务（embedding / system_one）。"""
     pid = None
-    if EMBEDDING_PID_FILE.exists():
+    if pid_file.exists():
         try:
-            pid = int(EMBEDDING_PID_FILE.read_text().strip())
+            pid = int(pid_file.read_text().strip())
         except (ValueError, OSError):
             pid = None
     if pid and _pid_alive(pid):
-        print(f"[services] 停止常驻 embedding pid={pid} ...")
+        print(f"[services] 停止常驻 {name} pid={pid} ...")
         try:
             if sys.platform.startswith("win"):
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -327,17 +358,30 @@ def _stop_embedding_persist() -> None:
                 import signal
                 os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, OSError) as e:
-            print(f"[services] 停止 embedding 失败：{e}")
-    elif _port_open(EMBEDDING_PORT):
-        # 无 PID 文件但端口占用：尽力按端口查找（Windows 用 netstat 太重，仅告警）
-        print(f"[services] embedding 端口 {EMBEDDING_PORT} 仍在监听，"
+            print(f"[services] 停止 {name} 失败：{e}")
+    elif _port_open(port):
+        print(f"[services] {name} 端口 {port} 仍在监听，"
               "但无 PID 文件；请手动结束对应进程")
-    _clear_embedding_pid()
+    try:
+        if pid_file.exists():
+            pid_file.unlink()
+    except OSError:
+        pass
+
+
+def _stop_embedding_persist() -> None:
+    """停止常驻 Embedding（--stop-all / stop --all）。"""
+    _stop_persist_by_pid("embedding", EMBEDDING_PID_FILE, EMBEDDING_PORT)
+
+
+def _stop_system_one_persist() -> None:
+    """停止常驻 System One（--stop-all / stop --all）。"""
+    _stop_persist_by_pid("system_one", SYSTEM_ONE_PID_FILE, SYSTEM_ONE_PORT)
 
 
 def _build_service_specs(include_embedding: bool,
                          include_external: bool) -> list[ServiceSpec]:
-    """组装待编排的服务：内置 Embedding（命令由 venv 计算）+ config.yaml 声明的外部服务。"""
+    """组装待编排的服务：内置 Embedding / System One + config.yaml 外部服务。"""
     specs: list[ServiceSpec] = []
     if include_embedding and EMBEDDING_SERVE.exists() and EMBEDDING_VENV_PY.exists():
         specs.append(ServiceSpec(
@@ -352,6 +396,26 @@ def _build_service_specs(include_embedding: bool,
             optional=True,
             persist=True,
             lazy=False))
+    # System One：与主程序一起后台拉起（wait=false 不堵；persist 跨普通 stop）。
+    # 生图/检索前仍由 release_gpu_* 临时停服让出显存，用完后下次情绪调用再 ensure。
+    if SYSTEM_ONE_EXE.exists():
+        import shutil
+        _s1_device = "cuda" if shutil.which("nvidia-smi") else "cpu"
+        _s1_cmd = [str(SYSTEM_ONE_EXE), "serve",
+                   "--backend", "torch",
+                   "--port", str(SYSTEM_ONE_PORT),
+                   "--release", "0.8b",
+                   "--device", _s1_device]
+        specs.append(ServiceSpec(
+            name="system_one",
+            command=_s1_cmd,
+            ready={"type": "http", "url": SYSTEM_ONE_HEALTH},
+            ready_timeout=180,
+            wait=False,
+            optional=True,
+            persist=True,
+            lazy=False,
+            env_file=str(SYSTEM_ONE_ENV) if SYSTEM_ONE_ENV.exists() else None))
     if include_external:
         try:
             from infrastructure.config_manager import ConfigManager
@@ -359,10 +423,24 @@ def _build_service_specs(include_embedding: bool,
             for name, s in (cfg.get_raw("services", {}) or {}).items():
                 if not isinstance(s, dict):
                     continue
+                # 已由内置分支拉起的同名服务跳过，避免双开
+                if name == "system_one" and SYSTEM_ONE_EXE.exists():
+                    continue
                 # ComfyUI 可在 config 中设 lazy:true 改为按需拉起；默认与主程序一起启动
                 default_lazy = False
+                command = s.get("command")
+                if name == "comfyui":
+                    try:
+                        from infrastructure.comfyui_accel.quality import (
+                            launch_extras_from_config,
+                            merge_launch_args,
+                        )
+                        command = merge_launch_args(
+                            command, launch_extras_from_config(cfg))
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[services] ComfyUI 启动参数注入跳过：{exc}")
                 specs.append(ServiceSpec(
-                    name=name, command=s.get("command"), cwd=s.get("cwd"),
+                    name=name, command=command, cwd=s.get("cwd"),
                     enabled=s.get("enabled", True), optional=s.get("optional", True),
                     depends_on=s.get("depends_on", []) or [],
                     ready=s.get("ready", {}) or {},
@@ -487,6 +565,7 @@ def _cmd_stop(*, stop_all_services: bool = False) -> None:
         print("未找到运行中的实例（无 PID 文件）")
         if stop_all_services:
             _stop_embedding_persist()
+            _stop_system_one_persist()
         return
     try:
         if sys.platform.startswith("win"):
@@ -495,14 +574,14 @@ def _cmd_stop(*, stop_all_services: bool = False) -> None:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                                capture_output=True, check=False)
             else:
-                # 只杀主进程，保留 persist embedding / 外部已托管服务
+                # 只杀主进程，保留 persist embedding / system_one / 外部已托管服务
                 subprocess.run(["taskkill", "/F", "/PID", str(pid)],
                                capture_output=True, check=False)
         else:
             import signal
             os.kill(pid, signal.SIGTERM)
         print(f"已发送停止信号给 pid={pid}"
-              + ("（全量）" if stop_all_services else "（保留常驻 Embedding）"))
+              + ("（全量）" if stop_all_services else "（保留常驻 Embedding/System One）"))
     except (ProcessLookupError, OSError) as e:
         print(f"停止失败或进程已退出：{e}")
     finally:
@@ -510,6 +589,7 @@ def _cmd_stop(*, stop_all_services: bool = False) -> None:
             PID_FILE.unlink()
         if stop_all_services:
             _stop_embedding_persist()
+            _stop_system_one_persist()
 
 
 def _cmd_install_service(port: int) -> None:

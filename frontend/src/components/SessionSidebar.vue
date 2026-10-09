@@ -23,15 +23,17 @@ const navs = [
   { path: '/settings', icon: 'ti-settings', label: '设置' },
 ]
 
-// 搜索面板开关：打开时用 SessionSearchPanel 顶替历史会话区
+// 搜索浮层：产品名旁图标 / ⌘K 打开，居中弹层（不顶替侧栏会话列表）
 const searchOpen = ref(false)
 function closeSearch() {
   searchOpen.value = false
 }
-// 侧栏"搜索对话"点一次开、再点一次关（用户容易点开却找不到出口）
 function toggleSearch() {
   searchOpen.value = !searchOpen.value
-  if (searchOpen.value) expandSection('sess')
+}
+function openSearch(e) {
+  e?.stopPropagation?.()
+  searchOpen.value = true
 }
 
 // 全局快捷键：
@@ -407,10 +409,22 @@ async function loadMoreSessions() {
 
 <template>
   <div class="side-panel">
-    <!-- 产品名（点击回首页） -->
-    <div class="side-brand" title="回首页" @click="goHome">
-      <div class="brand-logo"><i class="ti ti-brain"></i></div>
-      <span class="brand-name">Second Person</span>
+    <!-- 产品名 + 搜索图标（点击名回首页；搜索仅图标） -->
+    <div class="side-brand">
+      <div class="side-brand-main" title="回首页" @click="goHome">
+        <div class="brand-logo"><i class="ti ti-brain"></i></div>
+        <span class="brand-name">Second Person</span>
+      </div>
+      <button
+        type="button"
+        class="side-brand-search"
+        :class="{ active: searchOpen }"
+        title="搜索对话 (Ctrl/⌘+K)"
+        aria-label="搜索对话"
+        @click="openSearch"
+      >
+        <i class="ti ti-search"></i>
+      </button>
       <span
         class="dot"
         :style="{ background: lightColor, width: '8px', height: '8px' }"
@@ -418,22 +432,14 @@ async function loadMoreSessions() {
       ></span>
     </div>
 
-    <!-- 顶部动作：新建对话 / 搜索对话（弱化为 nav 条目风格，与记忆/设置同级） -->
+    <!-- 顶部动作：新建对话 -->
     <div class="side-nav side-nav-top">
       <div class="side-nav-item" @click="goHome">
         <i class="ti ti-plus"></i><span>新建对话</span>
       </div>
-      <div
-        class="side-nav-item"
-        :class="{ active: searchOpen }"
-        :title="searchOpen ? '再点一次收起搜索' : '打开搜索 (Ctrl/⌘+K)'"
-        @click="toggleSearch"
-      >
-        <i class="ti" :class="searchOpen ? 'ti-x' : 'ti-search'"></i>
-        <span>{{ searchOpen ? '关闭搜索' : '搜索对话' }}</span>
-        <span class="side-nav-kbd" title="Ctrl/⌘+K">⌘K</span>
-      </div>
     </div>
+
+    <SessionSearchPanel v-if="searchOpen" @close="closeSearch" />
 
     <!-- 记忆 / 设置 -->
     <div class="side-nav">
@@ -450,7 +456,6 @@ async function loadMoreSessions() {
 
     <!-- 工作区（v5 新增） -->
     <div
-      v-if="!searchOpen"
       class="side-workspace"
       :class="{ 'ws-grow': sectionCollapsed.sess && !sectionCollapsed.ws }"
     >
@@ -563,21 +568,16 @@ async function loadMoreSessions() {
       ></div>
     </div>
 
-    <!-- 会话区（置顶 / 渠道 / 最近，或搜索面板） -->
+    <!-- 会话区（置顶 / 渠道 / 最近） -->
     <div class="side-sessions" :class="{ 'sess-min': sectionCollapsed.sess }">
-      <div v-if="!searchOpen" class="sess-hd" @click="toggleSection('sess')">
+      <div class="sess-hd" @click="toggleSection('sess')">
         <i class="ti" :class="sectionCollapsed.sess ? 'ti-chevron-right' : 'ti-chevron-down'"></i>
         <span>会话区</span>
         <i class="ti ti-plus sess-add" title="新建会话" @click.stop="goHome"></i>
       </div>
 
-      <!-- 搜索面板：打开时替换历史会话区 -->
-      <div v-if="searchOpen" v-show="!sectionCollapsed.sess" class="side-sess">
-        <SessionSearchPanel @close="closeSearch" />
-      </div>
-
       <!-- 历史会话（置顶 / 渠道 / 最近） -->
-      <div v-else v-show="!sectionCollapsed.sess" class="side-sess">
+      <div v-show="!sectionCollapsed.sess" class="side-sess">
         <div v-if="!sess.list.length" class="empty" style="padding: 32px 8px">
           <i class="ti ti-messages"></i>还没有会话<br />发送第一条消息开始吧
         </div>

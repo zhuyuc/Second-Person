@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from memory.retriever_gates import is_ack_only
+from soul.mood_taxonomy import SELF_NEGATIVE_MOODS
 
 # 极短寒暄 / 招呼（ACK 之外）
 _BRIEF_GREETING = [
@@ -17,10 +18,6 @@ _THREAD_CONTINUATION = [
     r"道歉", r"抱歉", r"为什么错", r"怎么又", r"还是不行",
     r"\.(?:html?|py|md|js|ts|tsx|vue|css|json)\b",
 ]
-
-SELF_NEGATIVE_MOODS = frozenset({
-    "apologetic", "ashamed", "self_critical", "guilty", "remorseful",
-})
 
 GREETING_EXPRESSION_CONSTRAINT = (
     "【本轮表达约束：极短寒暄】\n"
@@ -54,7 +51,8 @@ def user_continues_prior_thread(message: str | None) -> bool:
 def should_soften_self_negative(*, ai_mood: str, ai_attribution: str,
                                 user_message: str | None) -> bool:
     """自我/未标明归因的歉意自责：用户未承接时，本轮注入侧弱化。"""
-    mood = (ai_mood or "").strip().lower()
+    from soul.mood_taxonomy import normalize_mood
+    mood = normalize_mood(ai_mood)
     if mood not in SELF_NEGATIVE_MOODS:
         return False
     attr = (ai_attribution or "").strip().lower()

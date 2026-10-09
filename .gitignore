@@ -16,6 +16,11 @@ dist/
 /embedding/models/
 /embedding/venv/
 
+# 本地 System One / jev-style（隔离 venv + 权重缓存；同 embedding 布局）
+/system_one/venv/
+/system_one/models/
+/system_one/hf.env
+
 # 本地文生图引擎与 SDXL 权重（ComfyUI 便携包 + checkpoints，体积大不入库）
 /image_gen/comfyui/
 /image_gen/_downloads/
@@ -39,6 +44,7 @@ dist/
 .qoder/
 .claude/
 .cursor/
+.playwright-cli/
 
 # 运行产物
 *.pid

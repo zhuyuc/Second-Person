@@ -77,7 +77,7 @@ def test_build_state_softens_apologetic_on_greeting(tmp_path: Path):
     text = mood.build_state_context(user_message="你好")
     assert text
     assert "轻微暗示" in text or "低" in text
-    assert "歉意" not in text  # 弱化为 baseline，不展示歉意标签
+    assert "哀" not in text  # 弱化为 baseline，不展示七情「哀」标签
     assert "对自己表现的评估" not in text
 
 
@@ -86,7 +86,8 @@ def test_build_state_keeps_apologetic_when_user_continues(tmp_path: Path):
     _seed_mood(db)
     mood = MoodManager(db, _Cfg())
     text = mood.build_state_context(user_message="上次没做好，继续改那个文件")
-    assert "歉意" in text
+    # apologetic → 七情 sorrow → 中文「哀」
+    assert "哀" in text
     assert "对自己表现的评估" in text
 
 

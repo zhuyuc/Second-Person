@@ -30,17 +30,47 @@ image_gen/comfyui/ComfyUI/models/checkpoints/sd_xl_base_1.0.safetensors
 https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/sd_xl_base_1.0.safetensors  
 国内可用 hf-mirror / ModelScope 同源文件。
 
+## 无损性能优化（推荐）
+
+不改变 SDXL / Wan 输出质量：仅启用 SageAttention + `--lowvram`，视频工作流将 UMT5 卸到 CPU。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\project\Second-Person\image_gen\setup_lossless_accel.ps1
+```
+
+然后**重启** ComfyUI，优先用：
+
+```powershell
+cd D:\project\Second-Person\image_gen\comfyui
+.\run_nvidia_gpu_lossless.bat
+```
+
+验收（默认 mock，不需 GPU）：
+
+```powershell
+python D:\project\Second-Person\scripts\verify_local_gen_quality.py
+```
+
+说明见 [`docs/本地生图生视频-无损性能优化方案.md`](../docs/本地生图生视频-无损性能优化方案.md)。  
+有损手段（GGUF / MagCache / Lightning）在 `comfyui_quality_mode=lossless` 下会被拒绝。
+
 ## 启动
 
 ```powershell
 cd D:\project\Second-Person\image_gen\comfyui
+.\run_nvidia_gpu_lossless.bat
+```
+
+或原版（无加速参数）：
+
+```powershell
 .\run_nvidia_gpu.bat
 ```
 
 或（无 pause，适合后台）：
 
 ```powershell
-.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --listen 127.0.0.1 --port 8188
+.\python_embeded\python.exe -s ComfyUI\main.py --windows-standalone-build --listen 127.0.0.1 --port 8188 --lowvram --use-sage-attention
 ```
 
 浏览器打开 http://127.0.0.1:8188 ，用 `1024x1024`、每次 1 张验收。

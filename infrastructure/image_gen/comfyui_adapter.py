@@ -13,8 +13,15 @@ from typing import Awaitable, Callable
 import httpx
 
 from . import active_jobs
+from infrastructure.comfyui_accel import (
+    assert_lossless_generation,
+    normalize_quality_mode,
+)
 from infrastructure.remote_jobs import JobCancelled, get_store, runtime
-from infrastructure.remote_jobs.fetch import http_get_bytes_resilient, sleep_or_cancel
+from infrastructure.remote_jobs.fetch import (
+    http_get_bytes_resilient,
+    wait_comfy_history_outputs,
+)
 from .types import ALLOWED_SIZES, ImageGenRequest, ImageGenResult
 
 logger = logging.getLogger("second_person.image_gen.comfyui")
@@ -61,6 +68,7 @@ class ComfyUIAdapter:
         default_steps: int = 24,
         default_size: str = "1024x1024",
         prompt_max_chars: int = 1500,
+        quality_mode: str = "lossless",
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.workflow_path = Path(workflow_path)
@@ -69,6 +77,7 @@ class ComfyUIAdapter:
         self.default_steps = default_steps
         self.default_size = default_size
         self.prompt_max_chars = prompt_max_chars
+        self.quality_mode = normalize_quality_mode(quality_mode)
 
     def _load_workflow(self) -> dict:
         if not self.workflow_path.exists():
@@ -124,6 +133,8 @@ class ComfyUIAdapter:
         ckpt = (model_id or req.model_id or "sd_xl_base_1.0.safetensors").strip()
         client_id = uuid.uuid4().hex
         template = self._load_workflow()
+        assert_lossless_generation(
+            template, model_id=ckpt, quality_mode=self.quality_mode)
         workflow = self._apply_workflow(template, req, ckpt)
 
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=15.0)) as client:
@@ -159,50 +170,22 @@ class ComfyUIAdapter:
                 if on_progress:
                     await on_progress(
                         "sampling", "本地 SDXL 采样中，可能需要十几秒到几十秒…")
-                outputs = None
-                last_progress_at = 0.0
-                deadline = t0 + max(5.0, float(self.timeout_sec or 180.0))
-                while True:
-                    if time.perf_counter() >= deadline:
-                        raise RuntimeError(
-                            f"ComfyUI 生图超时（>{int(self.timeout_sec)}s），"
-                            "请检查本地服务或工作流")
-                    runtime.raise_if_cancelled(
-                        job_id=job_id, session_id=session_id)
-                    try:
-                        hist = await client.get(
-                            f"{self.base_url}/history/{prompt_id}")
-                    except (httpx.TimeoutException, httpx.TransportError):
-                        if on_progress:
-                            await on_progress(
-                                "sampling", "查询本地队列较慢，继续等待…")
-                        await sleep_or_cancel(
-                            2.0, job_id=job_id, session_id=session_id)
-                        continue
-                    if hist.status_code == 200:
-                        data = hist.json() or {}
-                        entry = data.get(prompt_id) or {}
-                        status = entry.get("status") or {}
-                        for m in status.get("messages") or []:
-                            if isinstance(m, list) and m and m[0] == "execution_error":
-                                raise RuntimeError(f"ComfyUI 执行失败: {m}")
-                        if entry.get("outputs"):
-                            outputs = entry["outputs"]
-                            break
-                    now = time.perf_counter()
-                    if on_progress and now - last_progress_at >= 8.0:
-                        elapsed = int(now - t0)
-                        await on_progress(
-                            "sampling",
-                            f"本地生图进行中（已等待 {elapsed}s）…")
-                        last_progress_at = now
+
+                def _touch() -> None:
                     if store is not None:
                         try:
                             store.touch(job_id)
                         except Exception:  # noqa: BLE001
                             pass
-                    await sleep_or_cancel(
-                        0.8, job_id=job_id, session_id=session_id)
+
+                # 跟到远端终态：队列中仍在跑时不得因墙钟判超时（见 remote_jobs.fetch 契约）
+                outputs = await wait_comfy_history_outputs(
+                    client, self.base_url, prompt_id,
+                    job_id=job_id, session_id=session_id,
+                    on_progress=on_progress, stage="sampling",
+                    label="本地生图",
+                    soft_timeout_sec=float(self.timeout_sec or 180.0),
+                    poll_interval=0.8, on_tick=_touch)
 
                 image_meta = None
                 for _nid, node_out in (outputs or {}).items():

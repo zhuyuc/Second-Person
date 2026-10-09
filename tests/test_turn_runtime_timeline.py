@@ -376,3 +376,107 @@ def test_timeline_web_search_carries_citations(tmp_path: Path):
             db.close()
 
     _run(scenario())
+
+
+def test_timeline_image_gen_progress_log_persisted(tmp_path: Path):
+    """generate_image 的 step_progress 应写入 timeline.progress_log 并落库。"""
+    class _ImageGenExecutor:
+        async def execute_tool(self, name, params, **kw):
+            emit = kw.get("emit")
+            if emit:
+                await emit("step_progress", {
+                    "turn_id": "", "step": 0, "phase": "image_gen",
+                    "stage": "prepare", "label": "准备本地生图…",
+                })
+                await emit("step_progress", {
+                    "turn_id": "", "step": 0, "phase": "image_gen",
+                    "stage": "refining", "label": "正在润色提示词…",
+                })
+                await emit("step_progress", {
+                    "turn_id": "", "step": 0, "phase": "image_gen",
+                    "stage": "sampling", "label": "本地生图进行中（已等待 8s）…",
+                })
+                await emit("step_progress", {
+                    "turn_id": "", "step": 0, "phase": "image_gen",
+                    "stage": "sampling", "label": "本地生图进行中（已等待 16s）…",
+                })
+                await emit("step_progress", {
+                    "turn_id": "", "step": 0, "phase": "image_gen",
+                    "stage": "saving", "label": "正在保存生成图…",
+                })
+            return {
+                "ok": True,
+                "result": {
+                    "type": "generated_image",
+                    "summary": "已本地生成 1 张图",
+                    "filenames": ["gen_abc.png"],
+                },
+            }
+
+    class _ImageLLM:
+        def __init__(self):
+            self.n = 0
+
+        async def stream_chat(self, _snap, _msgs, **_kw):
+            self.n += 1
+            if self.n == 1:
+                yield "reasoning", "用户要画一张图。"
+                yield "done", {"content": "", "tool_calls": [
+                    {"id": "img1", "type": "function",
+                     "function": {
+                         "name": "generate_image",
+                         "arguments": '{"prompt":"田间小路"}',
+                     }},
+                ], "usage": {"input_tokens": 5, "output_tokens": 0}}
+            else:
+                yield "content", "画好了。"
+                yield "done", {"content": "画好了。", "tool_calls": [],
+                                "usage": {"input_tokens": 10, "output_tokens": 2}}
+
+    async def scenario():
+        db = _db(tmp_path)
+        try:
+            registry = ToolRegistry()
+            registry.register_function(ToolSpec(
+                "generate_image", "", {"type": "object", "properties": {
+                    "prompt": {"type": "string"}}, "required": ["prompt"]}),
+                lambda **_: None)
+            sessions = _Sessions()
+
+            async def context_loader(**_kw):
+                return {"snap": _Provider(), "history": [],
+                        "history_ids": [], "memory_count": 0}
+
+            async def emit(_name, _data):
+                return None
+
+            runtime = TurnRuntime(
+                db=db, config=_Config(agent_max_steps=3),
+                sessions=sessions, registry=registry,
+                executor=_ImageGenExecutor(), llm=_ImageLLM(),
+                providers=_Providers(),
+                system_prompt=lambda *_a: "sys",
+                context_loader=context_loader)
+            await runtime.run(session_id="s", message="画一张田间小路",
+                              reasoning_effort="high", emit=emit)
+            tl = sessions.messages[-1]["analysis_metadata"]["timeline"]
+            tools = [x for x in tl if x.get("kind") == "tool_call"
+                     and x.get("name") == "generate_image"]
+            assert len(tools) == 1
+            item = tools[0]
+            assert item["status"] == "ok"
+            log = item.get("progress_log") or []
+            stages = [p.get("stage") for p in log]
+            assert "prepare" in stages
+            assert "refining" in stages
+            assert "sampling" in stages
+            assert "saving" in stages
+            # 同 stage 应合并，sampling 只保留最后一条等待文案
+            sampling = [p for p in log if p.get("stage") == "sampling"]
+            assert len(sampling) == 1
+            assert "16s" in (sampling[0].get("label") or "")
+            assert item.get("progress")
+        finally:
+            db.close()
+
+    _run(scenario())
