@@ -638,6 +638,9 @@ def main():
                                  "install-service"],
                         help="服务命令（默认 start）")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--host", default="0.0.0.0",
+                        help="监听地址：0.0.0.0=本机+局域网均可访问（默认）；"
+                             "127.0.0.1=仅本机")
     parser.add_argument("--data-dir", type=Path,
                         help="运行数据目录，默认项目下 data/")
     parser.add_argument("--rebuild-index", action="store_true")
@@ -743,13 +746,16 @@ def main():
 
         threading.Thread(target=_open_browser_when_ready, daemon=True).start()
 
-    print(f"Second Person 启动于 http://localhost:{port}")
+    if args.host in ("0.0.0.0", "::"):
+        print(f"Second Person 启动于 http://localhost:{port}（局域网可通过本机 IP 访问）")
+    else:
+        print(f"Second Person 启动于 http://{args.host}:{port}")
     try:
         timer.dump(DATA_DIR / "logs" / "startup-timing.json")
     except Exception:  # noqa: BLE001
         pass
     try:
-        uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+        uvicorn.run(app, host=args.host, port=port, log_level="info")
     finally:
         # 默认保留 persist Embedding，加速下次启动
         supervisor.stop_all(stop_persist=False)
