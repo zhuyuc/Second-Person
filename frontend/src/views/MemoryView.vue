@@ -1533,7 +1533,7 @@ onActivated(() => selectTab(tab.value))
         </div>
       </div>
     </div>
-    <div class="action-footer">
+    <template #footer>
       <!-- 从 Lint 建议打开时：支持在详情内直接采纳/忽略该建议 -->
       <button @click="detail = null">关闭</button>
       <template v-if="detailSug">
@@ -1563,7 +1563,7 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-danger" @click="del(detail.id)">
         {{ detail.degraded || detail.frontmatter?.lifecycle === 'missing' ? '删除索引' : '删除' }}
       </button>
-    </div>
+    </template>
   </BaseModal>
   <BaseModal
     v-if="importPreview"
@@ -1595,14 +1595,14 @@ onActivated(() => selectTab(tab.value))
         本文档未提炼出可入库的内容
       </div>
     </div>
-    <div class="action-footer">
+    <template #footer>
       <button class="dang" :disabled="previewSubmitting" @click="submitImportPreview(true)">
         全部丢弃
       </button>
       <button class="btn-primary" :disabled="previewSubmitting" @click="submitImportPreview(false)">
         写入勾选的 {{ previewCheckedCount() }} 条
       </button>
-    </div>
+    </template>
   </BaseModal>
   <BaseModal v-if="diffData" title="版本对比" @close="diffData = null">
     <div class="label">旧版</div>
@@ -1688,9 +1688,9 @@ onActivated(() => selectTab(tab.value))
         </div>
       </div>
     </div>
-    <div class="action-footer">
+    <template #footer>
       <button @click="docDetail = null">关闭</button>
-    </div>
+    </template>
   </BaseModal>
   <BaseModal v-if="localDirFiles" title="目录文件" @close="localDirFiles = null">
     <h3 class="modal-subtitle">{{ localDirFiles.dir.path }}</h3>
@@ -1714,41 +1714,11 @@ onActivated(() => selectTab(tab.value))
         还没有文件记录<br />接入后扫描即可生成
       </div>
     </div>
-    <div class="action-footer">
+    <template #footer>
       <button @click="localDirFiles = null">关闭</button>
-    </div>
+    </template>
   </BaseModal>
   <BaseModal v-if="dupCompare" title="疑似重复对比" size="xl" @close="dupCompare = null">
-    <div class="action-footer mb-3 footer-mt0">
-      <button
-        class="btn-xs"
-        :disabled="busy('dup')"
-        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_a'))"
-      >
-        保留 A
-      </button>
-      <button
-        class="btn-xs"
-        :disabled="busy('dup')"
-        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_b'))"
-      >
-        保留 B
-      </button>
-      <button
-        class="btn-xs btn-primary"
-        :disabled="busy('dup')"
-        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_both'))"
-      >
-        都保留
-      </button>
-      <button
-        class="btn-xs btn-danger"
-        :disabled="busy('dup')"
-        @click="run('dup', () => resolveDup(dupCompare.sug, 'delete_both'))"
-      >
-        全部删除
-      </button>
-    </div>
     <div class="g2 compare-grid">
       <div v-for="(m, k) in [dupCompare.a, dupCompare.b]" :key="k" class="cw compare-col">
         <div class="row mb-2">
@@ -1786,41 +1756,39 @@ onActivated(() => selectTab(tab.value))
         <div v-else class="muted compare-empty">记忆不存在</div>
       </div>
     </div>
-    <div class="action-footer">
-      <button @click="dupCompare = null">关闭</button>
-    </div>
-  </BaseModal>
-  <BaseModal v-if="conflictCompare" title="矛盾记忆对比" size="xl" @close="conflictCompare = null">
-    <div class="action-footer mb-3 footer-mt0">
+    <template #footer>
       <button
         class="btn-xs"
-        :disabled="busy('conf')"
-        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_a'))"
+        :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_a'))"
       >
         保留 A
       </button>
       <button
         class="btn-xs"
-        :disabled="busy('conf')"
-        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_b'))"
+        :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_b'))"
       >
         保留 B
       </button>
       <button
         class="btn-xs btn-primary"
-        :disabled="busy('conf')"
-        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_both'))"
+        :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'keep_both'))"
       >
         都保留
       </button>
       <button
         class="btn-xs btn-danger"
-        :disabled="busy('conf')"
-        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'delete_both'))"
+        :disabled="busy('dup')"
+        @click="run('dup', () => resolveDup(dupCompare.sug, 'delete_both'))"
       >
         全部删除
       </button>
-    </div>
+      <button @click="dupCompare = null">关闭</button>
+    </template>
+  </BaseModal>
+  <BaseModal v-if="conflictCompare" title="矛盾记忆对比" size="xl" @close="conflictCompare = null">
     <div v-if="conflictCompare.detectedAt" class="muted mb-3">
       检测于 {{ conflictCompare.detectedAt }}
     </div>
@@ -1918,9 +1886,37 @@ onActivated(() => selectTab(tab.value))
         </div>
       </div>
     </template>
-    <div class="action-footer">
+    <template #footer>
+      <button
+        class="btn-xs"
+        :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_a'))"
+      >
+        保留 A
+      </button>
+      <button
+        class="btn-xs"
+        :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_b'))"
+      >
+        保留 B
+      </button>
+      <button
+        class="btn-xs btn-primary"
+        :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'keep_both'))"
+      >
+        都保留
+      </button>
+      <button
+        class="btn-xs btn-danger"
+        :disabled="busy('conf')"
+        @click="run('conf', () => resolveConflict(conflictCompare.conflict_id, 'delete_both'))"
+      >
+        全部删除
+      </button>
       <button @click="conflictCompare = null">关闭</button>
-    </div>
+    </template>
   </BaseModal>
   <BaseModal v-if="dimDetail" @close="dimDetail = null">
     <template #header>

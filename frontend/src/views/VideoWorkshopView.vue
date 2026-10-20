@@ -7,6 +7,7 @@ import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { useBusy } from '@/composables/useBusy'
 import { formatTimeFull, friendlyError } from '@/utils/format'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import BaseModal from '@/components/BaseModal.vue'
 import FilePickerPanel from '@/components/FilePickerPanel.vue'
 
@@ -720,12 +721,9 @@ async function copyModelPrompt() {
     toast.push('warning', '还没有可复制的内容')
     return
   }
-  try {
-    await navigator.clipboard.writeText(t)
-    toast.push('success', '已复制出片内容')
-  } catch {
-    toast.push('error', '复制失败')
-  }
+  const ok = await copyTextToClipboard(t)
+  if (ok) toast.push('success', '已复制出片内容')
+  else toast.push('error', '复制失败')
 }
 
 function onPromptKeydown(e) {
@@ -2371,7 +2369,8 @@ watch(
 }
 .prompt-view-head {
   display: flex;
-  align-items: flex-start;
+  flex-wrap: nowrap;
+  align-items: center;
   justify-content: space-between;
   gap: var(--ws-sp-4);
   margin-bottom: var(--ws-sp-3);
@@ -2779,6 +2778,7 @@ input[type='range']::-webkit-slider-thumb {
 }
 .ws-new-head {
   display: flex;
+  flex-wrap: nowrap;
   justify-content: space-between;
   align-items: center;
   gap: var(--ws-sp-3);
@@ -2786,6 +2786,15 @@ input[type='range']::-webkit-slider-thumb {
   font-size: var(--ws-fs-ui);
   font-weight: 700;
   letter-spacing: 0.01em;
+}
+.ws-new-head > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-new-head > button {
+  flex: 0 0 auto;
 }
 .ws-new-hint {
   font-size: var(--ws-fs-caption);

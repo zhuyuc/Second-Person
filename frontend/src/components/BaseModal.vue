@@ -91,28 +91,28 @@ onBeforeUnmount(() => {
     >
       <div
         v-if="title || $slots.header"
-        class="row"
-        style="margin-bottom: 14px; align-items: center"
+        class="modal-hd"
       >
-        <span class="mt" style="margin: 0">
+        <h2 class="modal-hd-title">
           <slot name="header">{{ title }}</slot>
-        </span>
+        </h2>
         <button
           v-if="showClose"
           type="button"
-          class="icon-btn"
+          class="icon-btn modal-hd-close"
           aria-label="关闭弹窗"
           title="关闭（Esc）"
           @click="close"
         >
-          <i class="ti ti-x"></i>
+          <i class="ti ti-x" aria-hidden="true"></i>
         </button>
       </div>
-      <slot />
+      <div class="modal-bd">
+        <slot />
+      </div>
       <div
         v-if="$slots.footer"
-        class="fg"
-        style="justify-content: flex-end; gap: 8px; margin-top: 16px"
+        class="modal-ft"
       >
         <slot name="footer" />
       </div>

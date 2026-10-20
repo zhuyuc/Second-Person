@@ -94,18 +94,6 @@ async function confirmSoul() {
         <label class="label">名称</label>
         <input v-model="chat.model_id" placeholder="deepseek-chat" class="w-full" />
       </div>
-      <div class="fg fg-end fg-gap-8">
-        <button :disabled="testing" @click="testChat">
-          <i v-if="testing" class="ti ti-loader-2"></i> 测试连接
-        </button>
-        <button
-          class="btn-primary"
-          :disabled="!chatOk || busy('saveChat')"
-          @click="run('saveChat', saveChatProvider)"
-        >
-          <i v-if="busy('saveChat')" class="ti ti-loader-2"></i> 下一步
-        </button>
-      </div>
     </div>
 
     <div v-else-if="step === 2">
@@ -120,15 +108,29 @@ async function confirmSoul() {
         v-model="soul.soul_style"
         class="soul-textarea-sm"
       ></textarea>
-      <div class="fg fg-end fg-gap-8 mt-16">
+    </div>
+
+    <template #footer>
+      <template v-if="step === 1">
+        <button :disabled="testing" @click="testChat">
+          <i v-if="testing" class="ti ti-loader-2"></i> 测试连接
+        </button>
         <button
           class="btn-primary"
-          :disabled="busy('confSoul')"
-          @click="run('confSoul', confirmSoul)"
+          :disabled="!chatOk || busy('saveChat')"
+          @click="run('saveChat', saveChatProvider)"
         >
-          <i v-if="busy('confSoul')" class="ti ti-loader-2"></i> 确认并开始使用
+          <i v-if="busy('saveChat')" class="ti ti-loader-2"></i> 下一步
         </button>
-      </div>
-    </div>
+      </template>
+      <button
+        v-else
+        class="btn-primary"
+        :disabled="busy('confSoul')"
+        @click="run('confSoul', confirmSoul)"
+      >
+        <i v-if="busy('confSoul')" class="ti ti-loader-2"></i> 确认并开始使用
+      </button>
+    </template>
   </BaseModal>
 </template>

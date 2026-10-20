@@ -175,5 +175,16 @@ class TurnToolRunner:
         if ok and name in _VISUAL_TOOLS \
                 and isinstance(result, dict) and result.get("type"):
             await emit("tool_visual", {"type": result["type"], "data": result})
+        # 记事本写回 → 发射 note_updated，前端流式应用到编辑器
+        if ok and name == "notes_apply_edit" and isinstance(result, dict) \
+                and result.get("ok") and result.get("id"):
+            await emit("note_updated", {
+                "note_id": result["id"],
+                "title": result.get("title") or "",
+                "body_md": result.get("body_md") or "",
+                "updated_at": result.get("updated_at") or "",
+                "op": result.get("op") or "",
+                "turn_id": turn_id,
+            })
         return {"tool": name, "ok": ok, "result": result if ok else None,
                 "error": None if ok else content}

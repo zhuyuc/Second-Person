@@ -13,6 +13,7 @@ import { marked } from '@/utils/chatMarkedRenderer'
 import { useMessageSelection } from '@/composables/useMessageSelection'
 import { applyMermaidTheme } from '@/utils/mermaidTheme'
 import { svgToPngBlob } from '@/utils/svgExport'
+import { copyBlobToClipboard, copyTextToClipboard } from '@/utils/clipboard'
 import { formatRelative, formatTimeFull, fmtSize, nowLocalIso, friendlyError } from '@/utils/format'
 import { confidenceLabel, lifecycleLabel } from '@/utils/enumLabel'
 import { sanitizeHtml } from '@/utils/sanitize'
@@ -754,12 +755,9 @@ function clearAttachments(opts = {}) {
 async function copySelection() {
   const t = selection.text.value
   if (!t) return
-  try {
-    await navigator.clipboard.writeText(t)
-    toast.push('success', '已复制')
-  } catch {
-    toast.push('warning', '复制失败，请手动 Ctrl+C')
-  }
+  const ok = await copyTextToClipboard(t)
+  if (ok) toast.push('success', '已复制')
+  else toast.push('warning', '复制失败，请手动 Ctrl+C')
   selection.hide()
 }
 // QuoteComposer 弹窗暂存的引用原文与元信息；visible 控制弹窗开合
@@ -1913,9 +1911,10 @@ async function regenerate(msg) {
   await reloadMessages(currentSid.value)
 }
 
-function copyText(msg) {
-  navigator.clipboard.writeText(msg.content)
-  toast.push('success', '已复制')
+async function copyText(msg) {
+  const ok = await copyTextToClipboard(msg.content)
+  if (ok) toast.push('success', '已复制')
+  else toast.push('warning', '复制失败，请手动 Ctrl+C')
 }
 
 // 引用记忆点击查看详情（轻量弹窗，复用 /memory/detail）
@@ -2298,7 +2297,7 @@ async function initGeolocation() {
 // Mermaid 操作按钮 + HTML 预览事件委派（v-html 内无法用 Vue 事件，走原生委派）
 const htmlPreview = ref(null) // 存储 HTML 源码，非 null 时展示预览抽屉
 const htmlFullscreen = ref(false)
-function handleMermaidActions(e) {
+async function handleMermaidActions(e) {
   const btn = e.target.closest(
     '.mermaid-zoom-out, .mermaid-zoom-in, .mermaid-reset, .mermaid-copy-src, .mermaid-copy-img, .html-preview-btn, .html-download-btn, .html-copy-btn, .code-copy-btn'
   )
@@ -2322,8 +2321,9 @@ function handleMermaidActions(e) {
     .replace(/&quot;/g, '"')
     .replace(/&lt;/g, '<')
   if (btn.classList.contains('mermaid-copy-src')) {
-    navigator.clipboard.writeText(src)
-    toast.push('success', '源码已复制')
+    const ok = await copyTextToClipboard(src)
+    if (ok) toast.push('success', '源码已复制')
+    else toast.push('warning', '复制失败，请手动 Ctrl+C')
   } else if (btn.classList.contains('mermaid-copy-img')) {
     copyMermaidAsImage(wrap)
   } else if (btn.classList.contains('html-preview-btn')) {
@@ -2337,8 +2337,9 @@ function handleMermaidActions(e) {
     URL.revokeObjectURL(a.href)
     toast.push('success', '已下载')
   } else if (btn.classList.contains('html-copy-btn') || btn.classList.contains('code-copy-btn')) {
-    navigator.clipboard.writeText(src)
-    toast.push('success', '代码已复制')
+    const ok = await copyTextToClipboard(src)
+    if (ok) toast.push('success', '代码已复制')
+    else toast.push('warning', '复制失败，请手动 Ctrl+C')
   }
 }
 async function copyMermaidAsImage(wrap) {
@@ -2350,8 +2351,10 @@ async function copyMermaidAsImage(wrap) {
   try {
     // 共享导出工具：自动剥离 foreignObject 避免 tainted canvas（详见 utils/svgExport.js）
     const blob = await svgToPngBlob(svg, 2)
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-    toast.push('success', '图片已复制到剪贴板')
+    const result = await copyBlobToClipboard(blob, { filename: 'mermaid.png' })
+    if (result === 'copied') toast.push('success', '图片已复制到剪贴板')
+    else if (result === 'downloaded') toast.push('success', '当前环境不支持复制图片，已自动下载')
+    else toast.push('error', '复制图片失败，请手动右键保存')
   } catch {
     toast.push('error', '复制图片失败，请手动右键保存')
   }

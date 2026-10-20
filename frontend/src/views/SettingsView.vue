@@ -1741,7 +1741,7 @@ onActivated(() => selectTab(tab.value))
       }}</label>
       <input v-model.number="newProvider.output_price" />
     </div>
-    <div class="fg modal-actions">
+    <template #footer>
       <button @click="showAddProvider = false">取消</button>
       <button :disabled="busy('testAdd')" @click="run('testAdd', () => testConn(newProvider))">
         <i v-if="busy('testAdd')" class="ti ti-loader-2"></i> 测试连接
@@ -1749,7 +1749,7 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-primary" :disabled="busy('addP')" @click="run('addP', addProvider)">
         <i v-if="busy('addP')" class="ti ti-loader-2"></i> 保存
       </button>
-    </div>
+    </template>
   </BaseModal>
   <!-- Embedding 切换预估弹窗 -->
   <BaseModal v-if="embEstimate" title="Embedding 模型切换" @close="embEstimate = null">
@@ -1764,7 +1764,7 @@ onActivated(() => selectTab(tab.value))
         <div class="val">{{ embEstimate.estimated_minutes }} 分钟</div>
       </div>
     </div>
-    <div class="fg modal-actions">
+    <template #footer>
       <button @click="embEstimate = null">取消</button>
       <button
         class="btn-primary"
@@ -1773,7 +1773,7 @@ onActivated(() => selectTab(tab.value))
       >
         <i v-if="busy('migrate')" class="ti ti-loader-2"></i> 确认切换
       </button>
-    </div>
+    </template>
   </BaseModal>
 
   <!-- 定时任务日志弹窗 -->
@@ -1797,7 +1797,9 @@ onActivated(() => selectTab(tab.value))
       </div>
       <span class="badge" :class="taskBadge(l.result)">{{ taskLabel(l.result) }}</span>
     </div>
-    <div class="fg modal-actions-plain mt-4"><button @click="taskLogs = null">关闭</button></div>
+    <template #footer>
+      <button @click="taskLogs = null">关闭</button>
+    </template>
   </BaseModal>
 
   <!-- 添加连接器弹窗 -->
@@ -1830,7 +1832,7 @@ onActivated(() => selectTab(tab.value))
         <label class="label">端点地址</label><input v-model="newConn.url" />
       </div>
     </template>
-    <div class="fg modal-actions">
+    <template #footer>
       <button @click="showAddConn = false">取消</button>
       <button :disabled="busy('testConn')" @click="run('testConn', testConnector)">
         <i v-if="busy('testConn')" class="ti ti-loader-2"></i> 测试连接
@@ -1838,7 +1840,7 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-primary" :disabled="busy('addConn')" @click="run('addConn', addConnector)">
         <i v-if="busy('addConn')" class="ti ti-loader-2"></i> 保存
       </button>
-    </div>
+    </template>
   </BaseModal>
 
   <!-- 编辑连接器弹窗：与添加表单同构；占位密钥不改动时后端保留原值 -->
@@ -1875,7 +1877,7 @@ onActivated(() => selectTab(tab.value))
     <div v-if="editConnMasked" class="muted mb-12">
       环境变量中的 •••••• 为占位密钥，保持不动即沿用原值；填入新值则覆盖。
     </div>
-    <div class="fg modal-actions">
+    <template #footer>
       <button @click="showEditConn = false">取消</button>
       <button
         :disabled="busy('testEditConn') || editConnMasked"
@@ -1890,7 +1892,7 @@ onActivated(() => selectTab(tab.value))
       >
         <i v-if="busy('saveEditConn')" class="ti ti-loader-2"></i> 保存
       </button>
-    </div>
+    </template>
   </BaseModal>
 
   <!-- 连接器工具清单弹窗：数据取自列表接口的 tools 缓存，点击工具行展开参数明细 -->
@@ -1963,7 +1965,7 @@ onActivated(() => selectTab(tab.value))
       <label class="label">回调地址（需外网可达）</label><input v-model="newChannel.callback_url" />
     </div>
     <div class="muted mb-12">启用后会自动禁用当前已启用的 IM 平台。</div>
-    <div class="fg fg-end fg-gap-8">
+    <template #footer>
       <button @click="showChannelCfg = false">取消</button>
       <button :disabled="busy('testCh')" @click="run('testCh', testChannel)">
         <i v-if="busy('testCh')" class="ti ti-loader-2"></i> 测试连接
@@ -1971,7 +1973,7 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-primary" :disabled="busy('addCh')" @click="run('addCh', addChannel)">
         <i v-if="busy('addCh')" class="ti ti-loader-2"></i> 启用
       </button>
-    </div>
+    </template>
   </BaseModal>
 
   <!-- 微信扫码绑定弹窗（关闭需同步停轮询） -->
@@ -1999,13 +2001,11 @@ onActivated(() => selectTab(tab.value))
       <div class="muted mt-2">
         {{ wxScan.status === 'confirmed' ? '绑定成功' : '等待扫码确认…' }}
       </div>
-      <div class="fg fg-gap-8 fg-center mt-4">
-        <button @click="refreshWeixinQrcode">重新获取</button>
-        <button @click="stopWxPoll(); showWeixinScan = false">
-          关闭
-        </button>
-      </div>
     </div>
+    <template #footer>
+      <button @click="refreshWeixinQrcode">重新获取</button>
+      <button @click="stopWxPoll(); showWeixinScan = false">关闭</button>
+    </template>
   </BaseModal>
 
   <!-- 编辑接入渠道弹窗 -->
@@ -2045,7 +2045,7 @@ onActivated(() => selectTab(tab.value))
       <label class="label">回调地址（需外网可达）</label
       ><input v-model="editChannel.callback_url" />
     </div>
-    <div class="fg fg-end fg-gap-8">
+    <template #footer>
       <button @click="showChannelEdit = false">取消</button>
       <button :disabled="busy('testChE')" @click="run('testChE', testEditChannel)">
         <i v-if="busy('testChE')" class="ti ti-loader-2"></i> 测试连接
@@ -2057,7 +2057,7 @@ onActivated(() => selectTab(tab.value))
       >
         <i v-if="busy('saveChE')" class="ti ti-loader-2"></i> 保存
       </button>
-    </div>
+    </template>
   </BaseModal>
 
   <!-- 编辑 Provider 弹窗 -->
@@ -2121,7 +2121,7 @@ onActivated(() => selectTab(tab.value))
     <div v-if="editData.modality === 'text'" class="form-group settings-cw-mt">
       <label class="label">上下文窗口</label><input v-model.number="editData.context_window" />
     </div>
-    <div class="fg modal-actions">
+    <template #footer>
       <button @click="showEdit = false">取消</button>
       <button :disabled="busy('testEdit')" @click="run('testEdit', () => testConn(editData))">
         <i v-if="busy('testEdit')" class="ti ti-loader-2"></i> 测试连接
@@ -2129,7 +2129,7 @@ onActivated(() => selectTab(tab.value))
       <button class="btn-primary" :disabled="busy('saveEdit')" @click="run('saveEdit', saveEdit)">
         <i v-if="busy('saveEdit')" class="ti ti-loader-2"></i> 保存
       </button>
-    </div>
+    </template>
   </BaseModal>
 </template>
 

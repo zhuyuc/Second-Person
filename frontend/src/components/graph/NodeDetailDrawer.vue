@@ -65,26 +65,22 @@ onBeforeUnmount(() => {
       tabindex="-1"
     >
       <div class="kg-drawer-head">
-        <div class="fg" style="gap: 8px; min-width: 0">
-          <span
-            class="mt"
-            style="margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis"
-            >{{ entity.name }}</span
-          >
+        <div class="kg-drawer-head-main">
+          <h2 class="kg-drawer-title">{{ entity.name }}</h2>
           <span class="badge badge-a">{{ entity.type || 'entity' }}</span>
         </div>
         <button
           ref="closeBtnRef"
-          class="kg-drawer-x"
+          class="icon-btn kg-drawer-x"
           type="button"
           aria-label="关闭节点详情"
           title="关闭（Esc）"
           @click="emit('close')"
         >
-          <i class="ti ti-x"></i>
+          <i class="ti ti-x" aria-hidden="true"></i>
         </button>
       </div>
-      <div class="muted" style="margin-bottom: 12px">共 {{ entity.memory_count }} 条关联记忆</div>
+      <div class="kg-drawer-meta muted">共 {{ entity.memory_count }} 条关联记忆</div>
       <div class="kg-drawer-body">
         <div
           v-for="m in memories"
@@ -130,21 +126,48 @@ onBeforeUnmount(() => {
 
 .kg-drawer-head {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 6px;
+  gap: var(--sp-2);
+  min-height: 28px;
+  margin: 0 0 6px;
+  flex-shrink: 0;
+}
+
+.kg-drawer-head-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.kg-drawer-title {
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 28px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .kg-drawer-x {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: var(--icon-sm);
-  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.kg-drawer-meta {
+  margin: 0 0 12px;
+  flex-shrink: 0;
 }
 
 .kg-drawer-body {
   flex: 1;
+  min-height: 0;
   overflow: auto;
 }
 

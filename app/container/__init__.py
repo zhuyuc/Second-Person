@@ -211,6 +211,10 @@ class AppContainer:
         self.profile_review_scanner = ProfileReviewScanner(
             self.db, self.conflict_scanner, self.config, self.notifier)
 
+        # ---- 记事本 ----
+        from app.services.notes_service import NotesService
+        self.notes = NotesService(d)
+
         # ---- 工具系统 ----
         self.registry = ToolRegistry()
         self.sandbox = Sandbox(d / "workspace",
@@ -218,7 +222,7 @@ class AppContainer:
         register_builtins(self.registry, palace=self.palace, retriever=self.retriever,
                           file_writer=self.fw, sandbox=self.sandbox, data_dir=d,
                           config=self.config, llm=self.llm, providers=self.providers,
-                          memory_gate=self.memory_gate)
+                          memory_gate=self.memory_gate, notes=self.notes)
         # ---- M3：fs 工具族 + 沙箱四档 -------------------------------------
         from agent.working_set import FileCardStore
         self.fs_observations = FsObservationStore(self.db)

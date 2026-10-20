@@ -129,4 +129,28 @@ describe('SideChatDrawer openAside quote injection', () => {
     await nextTick()
     expect(wrapper.find('.aside-drawer.open').exists()).toBe(false)
   })
+
+  it('opens aside on /notes bound by noteId', async () => {
+    routePath = '/notes'
+    window.__spActiveNoteId = 'note_abc'
+    wrapper = mount(SideChatDrawer, { attachTo: document.body })
+    await wrapper.vm.openAside({
+      text: '选中的段落',
+      comment: '请改写',
+      noteId: 'note_abc',
+    })
+    await nextTick()
+    expect(wrapper.find('.aside-drawer.open').exists()).toBe(true)
+
+    resolveChatView()
+    await flushPromises()
+    await nextTick()
+    await nextTick()
+
+    expect(injectQuote).toHaveBeenCalledTimes(1)
+    const arg = injectQuote.mock.calls[0][0]
+    expect(arg.text).toBe('选中的段落')
+    expect(arg.comment).toContain('note_id=note_abc')
+    expect(arg.comment).toContain('请改写')
+  })
 })

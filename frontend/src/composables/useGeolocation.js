@@ -1,10 +1,18 @@
 // 浏览器地理位置：Geolocation API 取经纬度 → 逆地理编码为城市名
-// 免费无 Key；localhost 属安全上下文可用。位置缓存 sessionStorage，避免每轮重复弹窗/请求。
+// 免费无 Key；仅安全上下文可用（https / localhost）。http://局域网IP 会失败，须静默降级。
+// 位置缓存 sessionStorage，避免每轮重复弹窗/请求。
 // 逆地理编码双源回退：BigDataCloud（国内可达）→ Nominatim → 裸坐标兑底
 const CACHE_KEY = 'sp_geo_location'
 const CACHE_COORD_KEY = 'sp_geo_coord'
 // 位置变化小于此距离（km）视为未移动，直接复用缓存
 const MOVE_THRESHOLD_KM = 1
+
+function isGeoAllowed() {
+  if (typeof navigator === 'undefined' || !navigator.geolocation) return false
+  // 非安全上下文（典型：http://192.168.x.x）Geolocation 会被浏览器直接拒绝
+  if (typeof window !== 'undefined' && window.isSecureContext === false) return false
+  return true
+}
 
 function haversine(lat1, lon1, lat2, lon2) {
   const R = 6371
@@ -18,8 +26,8 @@ function haversine(lat1, lon1, lat2, lon2) {
 
 function getCoords() {
   return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
-      reject(new Error('浏览器不支持定位'))
+    if (!isGeoAllowed()) {
+      reject(new Error('当前环境不支持定位（需 https 或 localhost）'))
       return
     }
     navigator.geolocation.getCurrentPosition(
@@ -73,25 +81,31 @@ async function reverseGeocode(lat, lon) {
 }
 
 // 获取当前位置（带缓存）。force=true 时忽略缓存重新定位。
+// 不支持时返回 null（不抛错），对话流程可继续。
 export async function resolveLocation(force = false) {
   if (!force) {
     const cached = sessionStorage.getItem(CACHE_KEY)
     if (cached) return cached
   }
-  const { lat, lon } = await getCoords()
-  // 坐标未明显移动 → 复用旧标签，省一次逆地理编码请求
-  const prevCoord = sessionStorage.getItem(CACHE_COORD_KEY)
-  const prevLabel = sessionStorage.getItem(CACHE_KEY)
-  if (!force && prevCoord && prevLabel) {
-    const [plat, plon] = prevCoord.split(',').map(Number)
-    if (haversine(lat, lon, plat, plon) < MOVE_THRESHOLD_KM) return prevLabel
+  if (!isGeoAllowed()) return null
+  try {
+    const { lat, lon } = await getCoords()
+    // 坐标未明显移动 → 复用旧标签，省一次逆地理编码请求
+    const prevCoord = sessionStorage.getItem(CACHE_COORD_KEY)
+    const prevLabel = sessionStorage.getItem(CACHE_KEY)
+    if (!force && prevCoord && prevLabel) {
+      const [plat, plon] = prevCoord.split(',').map(Number)
+      if (haversine(lat, lon, plat, plon) < MOVE_THRESHOLD_KM) return prevLabel
+    }
+    const label = await reverseGeocode(lat, lon)
+    if (label) {
+      sessionStorage.setItem(CACHE_KEY, label)
+      sessionStorage.setItem(CACHE_COORD_KEY, `${lat},${lon}`)
+    }
+    return label
+  } catch {
+    return null
   }
-  const label = await reverseGeocode(lat, lon)
-  if (label) {
-    sessionStorage.setItem(CACHE_KEY, label)
-    sessionStorage.setItem(CACHE_COORD_KEY, `${lat},${lon}`)
-  }
-  return label
 }
 
 // 读缓存（不触发定位），供发送消息时同步取用

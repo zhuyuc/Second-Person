@@ -994,15 +994,18 @@ class TurnRuntime:
                 policy = resolver.policy.resolve(session_id)
                 sandbox_mode = policy.mode
             row = self.db.query_one(
-                "SELECT sandbox_mode, project_id FROM sessions WHERE session_id=?",
+                "SELECT sandbox_mode, project_id, channel FROM sessions WHERE session_id=?",
                 (session_id,))
             if row:
                 if not resolver and row["sandbox_mode"]:
                     from tools.fs.policy import normalize_mode
                     sandbox_mode = normalize_mode(row["sandbox_mode"])
                 project_id = row["project_id"] if "project_id" in row.keys() else None
+                channel = row["channel"] if "channel" in row.keys() else None
+            else:
+                channel = None
         except Exception:  # noqa: BLE001
-            pass
+            channel = None
         inject_mode = str(self.config.get("mcp_tools_inject_mode", "project_only")
                           or "project_only")
         if inject_mode == "always":
@@ -1012,7 +1015,8 @@ class TurnRuntime:
         else:
             include_connectors = bool(project_id)
         return SessionCtx(sandbox_mode=sandbox_mode,
-                          include_connector_tools=include_connectors)
+                          include_connector_tools=include_connectors,
+                          channel=channel)
 
     async def _run_tool_calls(self, turn_id: str, step: int, tool_calls: list[dict],
                               emit, repeat_guard: RepeatToolGuard) -> list[dict]:

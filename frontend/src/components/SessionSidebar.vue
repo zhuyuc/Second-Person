@@ -19,6 +19,7 @@ const toast = useToast()
 
 const navs = [
   { path: '/workshop', icon: 'ti-photo', label: '视频工坊' },
+  { path: '/notes', icon: 'ti-notebook', label: '记事本' },
   { path: '/memory', icon: 'ti-brain', label: '记忆' },
   { path: '/settings', icon: 'ti-settings', label: '设置' },
 ]

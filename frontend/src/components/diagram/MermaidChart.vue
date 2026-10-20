@@ -9,6 +9,7 @@ import { usePanZoom } from '@/composables/usePanZoom'
 import { loadMermaid, applyMermaidTheme } from '@/utils/mermaidLoader'
 import { sanitizeSvg } from '@/utils/sanitize'
 import { svgToPngBlob } from '@/utils/svgExport'
+import { copyBlobToClipboard, copyTextToClipboard } from '@/utils/clipboard'
 
 const toast = useToast()
 
@@ -121,9 +122,10 @@ function toggleSource() {
   showSrc.value = !showSrc.value
 }
 
-function copySrc() {
-  navigator.clipboard.writeText(props.code)
-  toast.push('success', '源码已复制')
+async function copySrc() {
+  const ok = await copyTextToClipboard(props.code)
+  if (ok) toast.push('success', '源码已复制')
+  else toast.push('warning', '复制失败，请手动 Ctrl+C')
 }
 
 // 公共函数：SVG → PNG Blob（含背景色填充，自动剥离 foreignObject 防 tainted canvas）
@@ -137,8 +139,10 @@ async function copyImage() {
   }
   try {
     const blob = await svgToPngBlob(svg)
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-    toast.push('success', '图片已复制')
+    const result = await copyBlobToClipboard(blob, { filename: 'mermaid.png' })
+    if (result === 'copied') toast.push('success', '图片已复制')
+    else if (result === 'downloaded') toast.push('success', '当前环境不支持复制图片，已自动下载')
+    else toast.push('error', '复制图片失败，请改为下载或右键保存')
   } catch {
     toast.push('error', '复制图片失败，请改为下载或右键保存')
   }

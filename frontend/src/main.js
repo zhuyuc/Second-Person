@@ -12,6 +12,7 @@ const router = createRouter({
     { path: '/', redirect: '/chat' },
     { path: '/chat', component: () => import('./views/ChatView.vue') },
     { path: '/workshop/:id?', name: 'workshop', component: () => import('./views/VideoWorkshopView.vue') },
+    { path: '/notes', component: () => import('./views/NotesView.vue') },
     { path: '/memory', component: () => import('./views/MemoryView.vue') },
     { path: '/settings', component: () => import('./views/SettingsView.vue') },
   ],

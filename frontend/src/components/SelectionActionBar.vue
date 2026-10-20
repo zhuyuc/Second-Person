@@ -9,11 +9,13 @@ const props = defineProps({
   rect: { type: Object, default: null },
   // 是否显示「侧边会话」按钮。侧边会话内部的选区不再套娃，故其实例传 false。
   showAside: { type: Boolean, default: true },
+  // 记事本页只要复制+侧边会话，不显示「引用」。
+  showQuote: { type: Boolean, default: true },
 })
 const emit = defineEmits(['copy', 'quote', 'aside'])
 
 // 估算的 toolbar 尺寸（真实尺寸由 CSS 决定；这里用于避免超出视窗）
-const TOOLBAR_WIDTH = props.showAside ? 252 : 168
+const TOOLBAR_WIDTH = (props.showAside ? 84 : 0) + (props.showQuote ? 84 : 0) + 84
 const TOOLBAR_HEIGHT = 36
 const GAP = 8
 const EDGE = 8
@@ -42,15 +44,17 @@ const pos = computed(() => {
       <button type="button" class="sab-btn" title="复制选中文字" @click="emit('copy')">
         <i class="ti ti-copy"></i><span>复制</span>
       </button>
-      <span class="sab-sep"></span>
-      <button
-        type="button"
-        class="sab-btn"
-        title="把选中文字作为引用添加到输入框"
-        @click="emit('quote')"
-      >
-        <i class="ti ti-quote"></i><span>引用</span>
-      </button>
+      <template v-if="showQuote">
+        <span class="sab-sep"></span>
+        <button
+          type="button"
+          class="sab-btn"
+          title="把选中文字作为引用添加到输入框"
+          @click="emit('quote')"
+        >
+          <i class="ti ti-quote"></i><span>引用</span>
+        </button>
+      </template>
       <template v-if="showAside">
         <span class="sab-sep"></span>
         <button

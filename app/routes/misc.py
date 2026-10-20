@@ -1,11 +1,20 @@
 """引导 / 文档导入 / 健康检查 / 一次性任务状态接口（开发文档 §三点五/§四/§五/§2.14）。"""
 from __future__ import annotations
 
+import asyncio
+import time
+
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 from app.contracts import read_json_object
 from infrastructure.timeutil import now_cst
 
 router = APIRouter()
+
+# /api/health 会被侧栏每 30s + 每次 F5 调用；完整 PRAGMA integrity_check
+# 是同步重操作，若直接跑在事件循环上会堵死静态资源与其它 API。
+# 轻量探活用 SELECT 1；完整性检查异步缓存，最多 5 分钟跑一次。
+_INTEGRITY_TTL_SEC = 300.0
+_integrity_cache: dict = {"ok": True, "checked_at": 0.0, "running": False}
 
 
 def _c():
@@ -366,10 +375,45 @@ def _consistency_ok(c) -> bool:
         return True
 
 
+async def _db_alive(c) -> bool:
+    """热路径探活：一次轻量查询即可，不跑完整 integrity_check。"""
+    try:
+        await c.db.query_one_async("SELECT 1")
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _integrity_ok_cached(c) -> bool:
+    """完整 PRAGMA integrity_check：丢线程 + TTL 缓存，避免堵事件循环。"""
+    now = time.monotonic()
+    age = now - float(_integrity_cache.get("checked_at") or 0)
+    if age < _INTEGRITY_TTL_SEC and _integrity_cache.get("checked_at"):
+        return bool(_integrity_cache.get("ok", True))
+    if _integrity_cache.get("running"):
+        # 上一次还在跑：先返回缓存（或乐观 True），不叠加重检查
+        return bool(_integrity_cache.get("ok", True))
+    _integrity_cache["running"] = True
+    try:
+        ok = await asyncio.to_thread(c.db.integrity_check)
+        _integrity_cache["ok"] = bool(ok)
+        _integrity_cache["checked_at"] = time.monotonic()
+        return bool(ok)
+    except Exception:  # noqa: BLE001
+        return bool(_integrity_cache.get("ok", True))
+    finally:
+        _integrity_cache["running"] = False
+
+
 @router.get("/health")
 async def health():
     c = _c()
-    db_ok = c.db.integrity_check()
+    # 探活与完整性拆开：探活失败 → unhealthy；完整性失败 → degraded
+    alive, integrity_ok, consistent = await asyncio.gather(
+        _db_alive(c),
+        _integrity_ok_cached(c),
+        asyncio.to_thread(_consistency_ok, c),
+    )
     # Provider / Embedding 可用性
     chat_snap = c.providers.snapshot_for("chat")
     if chat_snap is None:
@@ -381,25 +425,26 @@ async def health():
     embedding_state = "ok" if emb_snap is not None else "unconfigured"
     # FTS5 真实可用性：查询抛异常（索引损坏/表缺失）才判 error，空表属正常
     try:
-        c.db.query_one("SELECT count(*) c FROM memories_fts")
+        await c.db.query_one_async("SELECT count(*) c FROM memories_fts")
         fts_state = "ok"
     except Exception:  # noqa: BLE001
         fts_state = "error"
     checks = {
-        "database": "ok" if db_ok else "error",
+        "database": "ok" if (alive and integrity_ok) else (
+            "error" if not alive else "warning"),
         "vector_cache": "ok" if c.vs.loaded else "loading",
         "fts5": fts_state,
         "event_bus": "ok" if getattr(c.bus, "_loop", None) else "degraded",
         "scheduler": "ok" if getattr(getattr(c, "scheduler", None),
                                      "_running", True) else "degraded",
         "file_writer": "ok" if _fw_ok(c) else "degraded",
-        "md_sqlite_consistency": "ok" if _consistency_ok(c) else "warning",
+        "md_sqlite_consistency": "ok" if consistent else "warning",
         "llm_provider": provider_state, "embedding": embedding_state,
     }
     from infrastructure.startup_status import status as startup_status
     stages = startup_status.snapshot()
-    # 三级判定：数据库坏/对话模型不可用 → unhealthy；有降级项 → degraded
-    if not db_ok or provider_state == "unavailable":
+    # 三级判定：数据库不可达/对话模型不可用 → unhealthy；有降级项 → degraded
+    if not alive or provider_state == "unavailable":
         status = "unhealthy"
     elif all(v == "ok" for v in checks.values()):
         status = "healthy"

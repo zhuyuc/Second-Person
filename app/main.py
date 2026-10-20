@@ -47,13 +47,24 @@ def create_app(data_dir: str | Path) -> FastAPI:
 
     app = FastAPI(title="Second Person", version="1.0.0", lifespan=lifespan)
 
+    # 本机 + 局域网开发/访问（http://192.168.x.x:port 等）；同端口静态托管本身不受 CORS，
+    # 但 Vite 跨机/跨端口调试、嵌入页会走预检。凭据模式不能用 *，用私网正则兜底。
     cors_origins = [
         "http://localhost:8000", "http://127.0.0.1:8000",
         "http://localhost:5173", "http://127.0.0.1:5173",
     ]
+    cors_origin_regex = (
+        r"https?://("
+        r"localhost|127\.0\.0\.1|\[::1\]|"
+        r"10(\.\d{1,3}){3}|"
+        r"192\.168(\.\d{1,3}){2}|"
+        r"172\.(1[6-9]|2\d|3[0-1])(\.\d{1,3}){2}"
+        r")(:\d+)?$"
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
+        allow_origin_regex=cors_origin_regex,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -118,9 +129,10 @@ def create_app(data_dir: str | Path) -> FastAPI:
             "trace_id": tid, "details": None})
 
     # 路由注册
-    from .routes import chat, memory, settings, soul, misc, projects, workshop
-    for mod in (chat, memory, settings, soul, misc, projects, workshop):
+    from .routes import chat, memory, settings, soul, misc, projects, workshop, notes
+    for mod in (chat, memory, settings, soul, misc, projects, workshop, notes):
         app.include_router(mod.router, prefix="/api")
+    (Path(data_dir) / "notes").mkdir(parents=True, exist_ok=True)
 
     # 对话图片（用户消息携带的图片持久化目录，历史消息回看）
     img_dir = Path(data_dir) / "chat_images"

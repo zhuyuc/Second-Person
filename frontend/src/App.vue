@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/stores/toast'
 import { useConfirm } from '@/stores/confirm'
 import { chatApi } from '@/api/chat'
+import { copyTextToClipboard } from '@/utils/clipboard'
 import SideChatDrawer from '@/components/SideChatDrawer.vue'
 
 const router = useRouter()
@@ -52,6 +53,7 @@ function prefetchRoutes() {
     import('./views/MemoryView.vue')
     import('./views/SettingsView.vue')
     import('./views/VideoWorkshopView.vue')
+    import('./views/NotesView.vue')
   }
   if (typeof window.requestIdleCallback === 'function') {
     window.requestIdleCallback(load, { timeout: 3000 })
@@ -83,14 +85,16 @@ function onOnboarded() {
   router.push('/chat')
 }
 function copyTraceId(tid) {
-  navigator.clipboard.writeText(tid).catch(() => {})
+  copyTextToClipboard(tid).catch(() => {})
 }
 
 // 划词「侧边会话」：主视图 ChatView emit('open-aside') → 交给右侧抽屉开/续侧边会话
 const asideDrawer = ref(null)
 function onOpenAside(quote) {
-  // 工坊/记忆/设置页不接收侧边会话（keep-alive 残留事件也不开）
-  if (route.path !== '/chat' && !route.path.startsWith('/chat/')) return
+  // 对话页与记事本页可开侧边会话；工坊/记忆/设置不接收
+  const onChat = route.path === '/chat' || route.path.startsWith('/chat/')
+  const onNotes = route.path === '/notes' || route.path.startsWith('/notes/')
+  if (!onChat && !onNotes) return
   asideDrawer.value?.openAside(quote)
 }
 </script>

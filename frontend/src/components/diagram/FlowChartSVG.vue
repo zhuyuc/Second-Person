@@ -6,6 +6,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useToast } from '@/stores/toast'
 import { usePanZoom } from '@/composables/usePanZoom'
+import { copyTextToClipboard } from '@/utils/clipboard'
 
 const toast = useToast()
 
@@ -394,14 +395,15 @@ function getSvgString() {
   return new XMLSerializer().serializeToString(clone)
 }
 
-function copySvg() {
+async function copySvg() {
   const s = getSvgString()
   if (!s) {
     toast.push('error', '当前图表还不能导出，请等渲染完成后再试')
     return
   }
-  navigator.clipboard.writeText(s)
-  toast.push('success', 'SVG 源码已复制')
+  const ok = await copyTextToClipboard(s)
+  if (ok) toast.push('success', 'SVG 源码已复制')
+  else toast.push('warning', '复制失败，请手动 Ctrl+C')
 }
 
 function downloadSvg() {

@@ -892,6 +892,69 @@ code {
   animation: pop 0.2s ease;
 }
 
+/* BaseModal：标题/页脚固定，仅 .modal-bd 滚动，避免操作按钮被长内容顶走 */
+.modal:has(> .modal-bd) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 标题栏：禁止复用 .row/.mt（.mt 自带 margin-bottom，.row 会 wrap，都会导致标题与 X 不对齐） */
+.modal-hd {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  min-height: 28px;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.modal-hd-title {
+  margin: 0;
+  padding: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 28px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.modal-hd-close {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.modal-bd {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.modal-ft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 16px 0 0;
+  padding: 0;
+}
+
+.modal-ft > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
 /* 弹窗尺寸档位（唯一标准：新增弹窗必须用 .modal-sm/md/lg/xl，禁止内联 max-width） */
 .modal-sm {
   max-width: 400px;

@@ -64,7 +64,7 @@ def datetime_now(tz: str = "Asia/Shanghai") -> str:
 
 def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
                       sandbox: Sandbox, data_dir, config,
-                      llm=None, providers=None, memory_gate=None) -> None:
+                      llm=None, providers=None, memory_gate=None, notes=None) -> None:
     data_dir = Path(data_dir)
 
     # ---- memory_save（主动记忆，created_by=user_explicit，跳过归属判定） ----
@@ -908,3 +908,100 @@ def register_builtins(registry: ToolRegistry, *, palace, retriever, file_writer,
             "attachment_text": {"type": "string",
                                 "description": "附件正文（系统自动注入，无需手动填写）"}},
          "required": ["scenario"]}), format_template_save)
+
+    if notes is not None:
+        async def notes_list(limit: int = 30) -> dict:
+            items = notes.list_notes()[: max(1, min(int(limit or 30), 100))]
+            return {"ok": True, "list": items}
+
+        async def notes_get(note_id: str, max_chars: int = 12000) -> dict:
+            try:
+                n = notes.get(note_id)
+            except FileNotFoundError as e:
+                return {"ok": False, "error": str(e)}
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            body = n.get("body_md") or ""
+            truncated = False
+            if max_chars and len(body) > int(max_chars):
+                body = body[: int(max_chars)] + "\n\n…(已截断)"
+                truncated = True
+            return {
+                "ok": True,
+                "id": n["id"],
+                "title": n["title"],
+                "folder_id": n.get("folder_id"),
+                "body_md": body,
+                "updated_at": n.get("updated_at"),
+                "truncated": truncated,
+            }
+
+        async def notes_apply_edit(
+            note_id: str,
+            op: str,
+            content_md: str = "",
+            selected_text: str | None = None,
+            insert_after: str | None = None,
+        ) -> dict:
+            try:
+                n = notes.apply_edit(
+                    note_id,
+                    op=op,
+                    content_md=content_md or "",
+                    selected_text=selected_text,
+                    insert_after=insert_after,
+                    create_backup=True,
+                )
+            except FileNotFoundError as e:
+                return {"ok": False, "error": str(e)}
+            except ValueError as e:
+                return {"ok": False, "error": str(e)}
+            return {
+                "ok": True,
+                "type": "note_updated",
+                "id": n["id"],
+                "title": n["title"],
+                "body_md": n["body_md"],
+                "updated_at": n.get("updated_at"),
+                "op": op,
+                "revision_created": n.get("revision_created", True),
+                "inserted_at": n.get("inserted_at"),
+            }
+
+        registry.register_function(ToolSpec(
+            "notes_list",
+            "列出记事本文档（仅记事本侧边会话可用）。返回 id/标题/更新时间。",
+            {"type": "object", "properties": {
+                "limit": {"type": "integer"}},
+             "required": []}), notes_list)
+
+        registry.register_function(ToolSpec(
+            "notes_get",
+            "读取一篇记事本的 Markdown 正文（仅记事本侧边会话可用）。写回前请先读取。",
+            {"type": "object", "properties": {
+                "note_id": {"type": "string"},
+                "max_chars": {"type": "integer"}},
+             "required": ["note_id"]}), notes_get)
+
+        registry.register_function(ToolSpec(
+            "notes_apply_edit",
+            "直接修改记事本文档（仅记事本侧边会话可用）。"
+            "写前自动备份，用户可恢复。"
+            "op=replace_selection：替换 selected_text 指向的选区（划词改写首选）；"
+            "op=insert_at_cursor：插到用户当前光标处（前端已同步锚点；"
+            "也可传 insert_after=光标前文本 精确定位；找不到锚点才退回文末）；"
+            "op=append：追加到文末；"
+            "op=replace_document：整篇替换（仅用户明确要求重写时用）。"
+            "content_md 为 Markdown（下划线用 <u>；图片保持原引用）。",
+            {"type": "object", "properties": {
+                "note_id": {"type": "string"},
+                "op": {"type": "string",
+                       "enum": ["replace_selection", "insert_at_cursor",
+                                "append", "replace_document"]},
+                "content_md": {"type": "string"},
+                "selected_text": {"type": "string"},
+                "insert_after": {"type": "string",
+                                 "description": "insert_at_cursor 可选："
+                                 "插入到该文本之后（覆盖前端光标锚点）"}},
+             "required": ["note_id", "op", "content_md"]},
+            parallel_safe=False), notes_apply_edit)

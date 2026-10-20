@@ -67,9 +67,32 @@
 
 候选状态和长期记忆写入状态分离；客户端不得把 `pending` 或 `approved` 展示为已保存记忆。
 
+## 记事本
+
+权威数据为 `data/notes/*.md` + `_tree.json` + 图片 assets；SQLite 非必需。
+
+| 路由 | 方法 | 说明 |
+| --- | --- | --- |
+| `/api/notes/tree` | GET | 文件夹树 + 文档摘要 |
+| `/api/notes/search` | GET | 笔记库搜索 `?q=&limit=`（标题+正文，返回 hits/snippet） |
+| `/api/notes` | GET / POST | 扁平列表 / 创建文档 |
+| `/api/notes/{id}` | GET / PATCH / DELETE | 详情 / 更新 / 物理删除 |
+| `/api/notes/folders` | POST | 创建文件夹 |
+| `/api/notes/folders/{id}` | PATCH / DELETE | 更新或删除（非空文件夹确认后级联物理删除） |
+| `/api/notes/{id}/apply_edit` | POST | AI/人工写回原语（`insert_at_cursor` 用光标锚点） |
+| `/api/notes/{id}/cursor` | POST | 同步编辑器光标锚点 `{before,after}` |
+| `/api/notes/{id}/revisions` | GET | 修订列表 `?limit=10&include_body=`（默认最近 10 份；空正文备份不返回） |
+| `/api/notes/{id}/revisions` | POST | 打检查点 `{source}`（空/重复正文会 skip） |
+| `/api/notes/{id}/revisions/{rev_id}` | GET | 单份备份详情（含 `body_md`） |
+| `/api/notes/{id}/revisions/restore` | POST | 恢复指定备份 `{rev_id}` |
+| `/api/notes/{id}/assets` | POST | 上传插图 |
+| `/api/notes/{id}/assets/{filename}` | GET | 读取插图 |
+
+Agent 工具 `notes_list` / `notes_get` / `notes_apply_edit` **仅**在 `channel=aside` 会话注入；主对话不可见。写回成功时 SSE 另发 `note_updated`。
+
 ## SSE 事件
 
-契约版本：`2026-08-24`。每个事件使用：
+契约版本：`2026-10-18`。每个事件使用：
 
 ```text
 event: <event_name>
@@ -96,6 +119,7 @@ data: <JSON object>
 | `turn_completed` | `message_id` | 本轮持久化完成，附安全 `analysis_metadata` |
 | `step_metrics` | `turn_id`, `step` | 多步骤任务在步骤边界更新用量和会话指标 |
 | `context_compacted` | `turn_id`, `step`, `trigger`, `shadowed_count` | 会话历史压缩完成；可选 `released_tokens_est` |
+| `note_updated` | `note_id`, `body_md` | 记事本 AI 写回后的正文；可选 `title` / `updated_at` / `op` |
 | `error` | `code`, `message` | 本轮异常或取消 |
 
 `turn_completed` 和 `error` 是生成终态。前端必须兼容未知的附加字段；后端新增事件时，先更新 `SSE_EVENT_SPECS`、本文件和前端处理逻辑。

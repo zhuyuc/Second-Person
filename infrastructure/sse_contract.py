@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-SSE_CONTRACT_VERSION = "2026-08-24"
+SSE_CONTRACT_VERSION = "2026-10-18"
 
 
 class SSEContractError(ValueError):
@@ -50,6 +50,10 @@ SSE_EVENT_SPECS: dict[str, SSEEventSpec] = {
     "context_compacted": SSEEventSpec(
         "会话历史压缩完成（早期消息已收起）",
         frozenset({"turn_id", "step", "trigger", "shadowed_count"}),
+    ),
+    "note_updated": SSEEventSpec(
+        "记事本被 AI 工具写回后的正文快照（供编辑器流式应用）",
+        frozenset({"note_id", "body_md"}),
     ),
 }
 

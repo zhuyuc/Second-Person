@@ -27,6 +27,7 @@ class SessionCtx:
     """
     sandbox_mode: str = "workspace-write"  # read-only / workspace-write / danger-full-access
     include_connector_tools: bool = False
+    channel: str | None = None  # aside / workshop / IM / None(web main)
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,8 @@ class ToolPromptBuilder:
     _WRITE_DENY = frozenset({"fs_write", "fs_edit"})
     # shell_exec——只在 danger-full-access 档位暴露（执行层还有二次 gate）
     _SHELL_DENY = frozenset({"shell_exec"})
+    # 记事本写回——仅 channel=aside 暴露（主对话不可改笔记）
+    _NOTES_DENY = frozenset({"notes_list", "notes_get", "notes_apply_edit"})
 
     def schemas(self, session_ctx: SessionCtx) -> list[dict]:
         """Expose the catalog gated by stable session-level policy only.
@@ -125,4 +128,6 @@ class ToolPromptBuilder:
                 spec.name for spec in self.registry.all_specs()
                 if getattr(spec, "connector_id", None)
             }
+        if session_ctx.channel != "aside":
+            denied |= self._NOTES_DENY
         return self.registry.openai_schemas_excluding(denied)

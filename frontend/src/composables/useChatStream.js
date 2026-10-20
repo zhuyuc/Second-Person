@@ -304,6 +304,12 @@ export function useChatStream(deps) {
       }
       onMaybeScroll?.()
       onScrollThink?.()
+    } else if (ev === 'note_updated') {
+      try {
+        window.dispatchEvent(new CustomEvent('sp-note-updated', { detail: data }))
+      } catch {
+        /* ignore */
+      }
     } else if (ev === 'decision_notice') {
       decisionNotices.value.push(data)
       onMaybeScroll?.()

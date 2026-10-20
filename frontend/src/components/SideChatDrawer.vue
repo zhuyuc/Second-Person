@@ -19,15 +19,21 @@ const ChatView = defineAsyncComponent(loadAsideChatView)
 const route = useRoute()
 const sessStore = useSessions()
 const activeMainSid = computed(() => sessStore.currentSid)
-// 抽屉挂在 App 常驻；离开 /chat（工坊/记忆/设置）必须藏起，否则会盖住其它页，
-// 且全选复制时把「侧边会话」标题一并写进剪贴板。
 const onChatRoute = computed(() => route.path === '/chat' || route.path.startsWith('/chat/'))
+const onNotesRoute = computed(() => route.path === '/notes' || route.path.startsWith('/notes/'))
+// 记事本侧边绑定键：note:<id>；对话侧边仍用主会话 id
+const activeNotesBindKey = computed(() => {
+  if (!onNotesRoute.value) return null
+  const nid = window.__spActiveNoteId
+  return nid ? `note:${nid}` : null
+})
+const activeBindKey = computed(() =>
+  onNotesRoute.value ? activeNotesBindKey.value : activeMainSid.value,
+)
 
-// entries: [{ mainSid, projectId, sessionId(aside sid, 首条发送后回填) }]
+// entries: [{ mainSid(bindKey), projectId, sessionId, noteId? }]
 const entries = ref([])
-// mainSid -> ChatView 实例（用于 injectQuote）
 const asideRefs = new Map()
-// 异步 ChatView 尚未挂载时暂存待注入引用队列；挂载后由 setAsideRef 消费
 const pendingQuotes = new Map()
 function applyQuote(inst, quote) {
   if (!inst || !quote?.text) return
@@ -57,9 +63,14 @@ function setAsideRef(mainSid, el) {
 }
 
 const activeEntry = computed(
-  () => entries.value.find((e) => e.mainSid === activeMainSid.value) || null
+  () => entries.value.find((e) => e.mainSid === activeBindKey.value) || null
 )
-const visible = computed(() => onChatRoute.value && !!activeEntry.value)
+const visible = computed(
+  () =>
+    !!activeEntry.value &&
+    ((onChatRoute.value && !!activeMainSid.value) ||
+      (onNotesRoute.value && !!activeNotesBindKey.value)),
+)
 
 // 抽屉宽度：可拖拽调整，localStorage 记住下次打开复用
 const WIDTH_KEY = 'sp_aside_drawer_width'
@@ -133,22 +144,47 @@ function resolveProject(mainSid) {
 // ChatView 为 defineAsyncComponent：刷新后首次打开时 nextTick 仍拿不到实例，
 // 故已挂载则立即注入，否则写入 pendingQuotes，等 setAsideRef 再消费。
 async function openAside(quote) {
-  const mainSid = activeMainSid.value
-  if (!mainSid) return // 欢迎页无主会话，无从划词，忽略
-  let entry = entries.value.find((e) => e.mainSid === mainSid)
+  let bindKey = activeBindKey.value
+  let noteId = null
+  if (onNotesRoute.value) {
+    noteId = quote?.noteId || window.__spActiveNoteId || null
+    if (!noteId) return
+    bindKey = `note:${noteId}`
+  } else if (!bindKey) {
+    return // 欢迎页无主会话
+  }
+  let entry = entries.value.find((e) => e.mainSid === bindKey)
   if (!entry) {
-    entry = { mainSid, projectId: resolveProject(mainSid), sessionId: null }
+    entry = {
+      mainSid: bindKey,
+      projectId: onNotesRoute.value ? null : resolveProject(bindKey),
+      sessionId: null,
+      noteId: noteId || null,
+    }
     entries.value.push(entry)
   }
-  if (!quote?.text) return
+  // 允许无划词仅打开抽屉（记事本「AI 写文档」入口）
+  if (!quote?.text) {
+    await nextTick()
+    return
+  }
+  // 记事本：把 note_id 写进评论前缀，方便模型调用 notes_* 工具
+  const enriched = { ...quote }
+  if (noteId && !String(enriched.comment || '').includes(noteId)) {
+    const tip =
+      `【当前记事本 note_id=${noteId}；改文档请用 notes_apply_edit：` +
+      `划词改写用 replace_selection；在光标处插入用 insert_at_cursor（光标已由前端同步）；` +
+      `文末追加用 append；整篇重写仅在用户明确要求时用 replace_document】`
+    enriched.comment = enriched.comment ? `${tip}\n${enriched.comment}` : tip
+  }
   await nextTick()
-  const inst = asideRefs.get(mainSid)
+  const inst = asideRefs.get(bindKey)
   if (inst) {
-    applyQuote(inst, quote)
+    applyQuote(inst, enriched)
   } else {
-    const queue = pendingQuotes.get(mainSid) || []
-    queue.push(quote)
-    pendingQuotes.set(mainSid, queue)
+    const queue = pendingQuotes.get(bindKey) || []
+    queue.push(enriched)
+    pendingQuotes.set(bindKey, queue)
   }
 }
 
@@ -157,12 +193,12 @@ function onAsideCreated(mainSid, sid) {
   if (e) e.sessionId = sid
 }
 
-// 显式关闭当前主会话的侧边：销毁前端状态（后端已留痕，不受影响）
 function closeActive() {
-  const mainSid = activeMainSid.value
-  entries.value = entries.value.filter((e) => e.mainSid !== mainSid)
-  asideRefs.delete(mainSid)
-  pendingQuotes.delete(mainSid)
+  const bindKey = activeBindKey.value
+  if (!bindKey) return
+  entries.value = entries.value.filter((e) => e.mainSid !== bindKey)
+  asideRefs.delete(bindKey)
+  pendingQuotes.delete(bindKey)
 }
 
 defineExpose({ openAside })
@@ -197,13 +233,13 @@ defineExpose({ openAside })
     <div class="aside-body">
       <ChatView
         v-for="e in entries"
-        v-show="e.mainSid === activeMainSid"
+        v-show="e.mainSid === activeBindKey"
         :key="e.mainSid"
         :ref="(el) => setAsideRef(e.mainSid, el)"
         aside-mode
         :aside-session-id="e.sessionId"
         :aside-project-id="e.projectId"
-        :aside-from-session="e.mainSid"
+        :aside-from-session="e.noteId ? null : e.mainSid"
         @aside-session-created="(sid) => onAsideCreated(e.mainSid, sid)"
       />
     </div>
